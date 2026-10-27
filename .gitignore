@@ -1,0 +1,47 @@
+# Secrets and local configuration
+.env
+*.local
+
+# Runtime state: the append-only journal IS the memory for a local run, and it is deliberately
+# disposable — it can be rebuilt from a replay, and committing it would put one machine's incident
+# history into the repository. The Kafka topics are the durable memory in a real deployment.
+var/
+*.jsonl
+
+# Fitted artefacts. The calibration and the training export are outputs of a measured process on a
+# specific domain and checkpoint; they belong in a model registry or an artefact store, not in git,
+# because a stale fit silently changes what the thresholds mean.
+models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Test and tooling caches
+.pytest_cache/
+# pytest creates these next to the rootdir when its own cache path is unwritable (e.g. under a
+# sandbox that denies the system temp directory) and can leave them behind with restrictive ACLs.
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Notebooks: strip executed output before committing, if one is ever added
+*.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# External validation datasets (SMD is ~8 MB per machine) and their reports
+data/
+_real_smd/
+

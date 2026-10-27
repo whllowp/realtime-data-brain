@@ -1,0 +1,95 @@
+# Kafka + Flink for brian, in KRaft mode (no ZooKeeper).
+#
+#   docker compose up -d
+#   python -m brian topics                    # create the seven topics
+#   flink run -py src/brian/flink/job.py --bootstrap 127.0.0.1:9092   # from a Flink install
+#
+# Two honesty notes about this file:
+#
+# 1. **It has not been run end to end.** The Docker daemon was not available on the machine this was
+#    written on, so the cluster path is unverified (see docs/KAFKA_TOPICS.md, "Verification status").
+#    The in-process pipeline — the same `Pipeline.process_digest`, the same windower, the same gate —
+#    is tested, and the Flink job imports all of it rather than reimplementing it. What is untested is
+#    the transport: connectors, checkpointing, and the JobManager/TaskManager wiring.
+# 2. **Kafka is the memory**, so `acks=all` and a replication factor above 1 matter here in a way they
+#    would not for a fire-and-forget pipeline. The single-broker development settings below relax both;
+#    change them before trusting the trail.
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: brian-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # --- KRaft: this broker is both controller and broker, which is fine for one node ---
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # --- durability: the memory must survive a restart, so 1 is a development-only compromise ---
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      # --- the audit trail is the point: keep records long enough to explain an old incident ---
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 268435456
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"   # topics are created explicitly, with the right keys
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  jobmanager:
+    image: flink:1.20-scala_2.12-java17
+    container_name: brian-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"          # the Flink UI: where to confirm the job is running and check checkpoints
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        # Checkpointing is what makes the windowed aggregate and the rolling baseline survive a
+        # task-manager restart. Without it a failover silently resets every service's history, and the
+        # detector starts accusing services of deviating from a baseline it no longer has.
+        execution.checkpointing.interval: 30s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        state.backend: hashmap
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+    volumes:
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - ./:/opt/brian:ro     # the job file and the Python package, mounted read-only
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  taskmanager:
+    image: flink:1.20-scala_2.12-java17
+    container_name: brian-taskmanager
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        # The Laya call happens inside the operator, so this process is CPU-only and small: no torch,
+        # no CUDA, no model weights. That separation is why Laya is reached over HTTP rather than
+        # imported — the GPU box serves every stream, and this container only orchestrates.
+    volumes:
+      - flink-checkpoints:/tmp/flink-checkpoints
+      - ./:/opt/brian:ro
+    depends_on:
+      - jobmanager
+
+volumes:
+  kafka-data:
+  flink-checkpoints:

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brian"
+version = "0.1.0"
+description = "Flink -> Laya -> LLM real-time anomaly triage: fast System 1 detection, LLM root-cause analysis, Kafka as the traceable memory"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+
+# The core engine deliberately depends on NOTHING but the standard library.
+#   - Kafka: kafka-python is optional (a JSONL journal bus is the default)
+#   - Laya:  reached over HTTP (no torch in this process)
+#   - LLM:   reached over HTTP (urllib)
+# This is what lets `python -m brian.cli demo` run on a bare interpreter while the
+# production path swaps in real Kafka/Flink through the same interfaces.
+dependencies = []
+
+[project.optional-dependencies]
+kafka = ["kafka-python>=2.0.2"]
+flink = ["apache-flink>=1.18"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+brian = "brian.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
