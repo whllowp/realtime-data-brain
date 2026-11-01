@@ -46,6 +46,13 @@ def fetch(relative: str, timeout: float = 90.0) -> bytes:
 
 
 def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--machine", default="",
+                        help="fetch this machine's series (default: the one with most labelled anomalies)")
+    parser.add_argument("--labels-only", action="store_true", help="skip the series download")
+    args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     print("fetching %d label files..." % len(MACHINES))
 
@@ -79,12 +86,20 @@ def main() -> int:
     # Highest anomaly count, but skip a series that is almost entirely anomalous: it would score well
     # by predicting "always anomalous", which measures nothing.
     candidates = [row for row in stats if row["fraction"] < 0.5] or stats
-    chosen = candidates[0]
-    name = chosen["machine"]
+    if args.machine:
+        name = args.machine
+        chosen = next((row for row in stats if row["machine"] == name),
+                      {"machine": name, "positive": 0, "rows": 0, "fraction": 0.0})
+        print("\nrequested: %s" % name)
+    else:
+        chosen = candidates[0]
+        name = chosen["machine"]
     print("\nchosen: %s (%d anomalous rows of %d, %.2f%%)"
           % (name, chosen["positive"], chosen["rows"], chosen["fraction"] * 100))
 
     for kind, suffix in (("test", "data"), ("interpretation_label", "interpret")):
+        if args.labels_only and kind == "test":
+            continue
         try:
             payload = fetch("%s/%s.txt" % (kind, name))
         except Exception as exc:  # noqa: BLE001
