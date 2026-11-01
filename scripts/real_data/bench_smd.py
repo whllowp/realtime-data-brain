@@ -72,16 +72,48 @@ LABELS: Dict[str, str] = {
     "net_in_bytes": "net in", "net_out_bytes": "net out",
 }
 
-QUESTION = {
-    "is_anomaly": {
-        "type": "noul",
-        "instructions": (
-            "Do the measurements in this state show a real anomaly that needs attention, as opposed to "
-            "normal variation for this host? Answer yes if any measurement is clearly abnormal for this "
-            "host, given the reference values stated."
-        ),
-    }
+#: The rubric is a separate channel from the state: it may say how to *read* the numbers, while the state
+#: must not say what to *conclude* (measured in round 2: a conclusion in the state cost 0.175 AUC).
+#:
+#: The baseline wording gives no interpretation of the scale, and the model has no calibration for what
+#: "0.92" means on this host. Two variants test whether naming the semantics recovers that.
+QUESTION_VARIANTS: Dict[str, Dict[str, Any]] = {
+    "base": {
+        "is_anomaly": {
+            "type": "noul",
+            "instructions": (
+                "Do the measurements in this state show a real anomaly that needs attention, as opposed "
+                "to normal variation for this host? Answer yes if any measurement is clearly abnormal "
+                "for this host, given the reference values stated."
+            ),
+        }
+    },
+    "semantics": {
+        "is_anomaly": {
+            "type": "noul",
+            "instructions": (
+                "Each line reports one measurement of this host for the window, as `value (baseline B, "
+                "Nx)`: B is what that measurement typically is on this host and Nx is value divided by "
+                "B. The values are scaled so that higher means more of that resource being used. Decide "
+                "whether this window shows a real anomaly that needs attention, as opposed to normal "
+                "variation. A measurement far from its baseline, in either direction, is evidence of one."
+            ),
+        }
+    },
+    "bothdirections": {
+        "is_anomaly": {
+            "type": "noul",
+            "instructions": (
+                "Each line reports one measurement of this host as `value (baseline B, Nx)`, where B is "
+                "the typical value and Nx is value divided by B. An anomaly is a measurement that is far "
+                "from its typical value: much higher, or much lower. Judge whether this window needs "
+                "attention. Values near 1.0x are the host behaving normally."
+            ),
+        }
+    },
 }
+
+QUESTION = QUESTION_VARIANTS["base"]
 
 
 @dataclass
@@ -198,11 +230,24 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         first_row = int((aggregator.window_start - EPOCH).total_seconds() // sample_seconds)
         label_slice = labels[first_row:first_row + window_rows]
         stats = []
+        current_values: Dict[str, float] = {}
         for name in features:
             points = aggregator._gauges.get(name)
             if not points:
                 continue
-            value = float(points[-1][1])
+            values = [float(p[1]) for p in points]
+            if args.window_stat == "mean":
+                value = sum(values) / len(values)
+            elif args.window_stat == "max":
+                value = max(values)
+            elif args.window_stat == "min":
+                value = min(values)
+            else:
+                value = values[-1]
+            # Recorded per feature. An earlier version re-read a loop variable here, so every feature's
+            # history received the value of whichever feature happened to be last — which silently
+            # corrupted the baseline and made `--window-stat` look like a 0.09 recall improvement.
+            current_values[name] = value
             past = history[name]
             median = statistics.median(past) if past else value
             lo, hi = _p(past, 0.05), _p(past, 0.95)
@@ -216,12 +261,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             text = digest.interpretation
         else:
             text = render(args.digest, args.machine, aggregator.event_count, args.window_s, stats)
-        for name in features:
-            points = aggregator._gauges.get(name)
-            if points:
-                history[name].append(float(points[-1][1]))
-                if len(history[name]) > args.history_windows:
-                    del history[name][0]
+        for name, value in current_values.items():
+            history[name].append(value)
+            if len(history[name]) > args.history_windows:
+                del history[name][0]
 
         index = len(rows_out)
         rows_out.append(Row(index=index, anomalous=any(label_slice), digest=text))
@@ -242,6 +285,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                                                     len(rows_out) / max(build_seconds, 1e-6)))
     print("windows judged  %d (stride %d, warmup %d)" % (len(judge_jobs), args.stride, args.warmup))
 
+    question = QUESTION_VARIANTS[args.question]
     client = LayaClient(settings_laya())
     latencies: List[float] = []
     started = time.perf_counter()
@@ -250,7 +294,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         text = digests[index]
         wall = time.perf_counter()
         try:
-            result = client.decide(text, QUESTION, use_cache=False)
+            result = client.decide(text, question, model=args.model or None, use_cache=False)
             rows_out[index].probability = None
             answers = result.answers.get("is_anomaly") or {}
             rows_out[index].probability = float(answers.get("noul"))
@@ -301,6 +345,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     result = {
         "machine": args.machine,
         "digest": args.digest,
+        "model": args.model or "default",
+        "question": args.question,
         "features": features,
         "n_features": len(features),
         "window_s": args.window_s,
@@ -342,6 +388,12 @@ def settings_laya():
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--machine", default="machine-1-6")
+    parser.add_argument("--window-stat", default="last", choices=["last", "mean", "max", "min"],
+                        help="how a gauge is reduced over the window (harness variants only)")
+    parser.add_argument("--model", default="",
+                        help="checkpoint to route to (english | multilingual | typed-decisions)")
+    parser.add_argument("--question", default="base", choices=sorted(QUESTION_VARIANTS),
+                        help="rubric variant; the state is unchanged, only the question differs")
     parser.add_argument("--digest", default="current",
                         choices=["level", "ratio", "current", "level_range", "percentile",
                                   "current_percentile", "product", "current_summary"])
