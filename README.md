@@ -39,42 +39,63 @@ confidence, so acting on System 1's `AUTO_TRIAGE` verdict today would mean trust
 is wrong by ~0.26. The gate therefore escalates to System 2, and `brian calibrate` refuses to write a
 fit whose model cannot separate the classes at all. That is the design working, not a gap in it.
 
-### External validation changes the picture
+### External validation, and the scope it defines
 
 Those numbers come from scenarios I wrote, which is a closed loop. The system was therefore re-measured
-on an external dataset — **SMD** (KDD 2019 OmniAnomaly): 38 real server metrics per minute, 23,689
-samples from `machine-1-6`, 3,708 human-labelled anomaly points, fault intervals up to 3,161 minutes.
-Details and reproduction: [docs/REAL_DATA_VALIDATION.zh.md](docs/REAL_DATA_VALIDATION.zh.md).
+on an external dataset — **SMD** (KDD 2019 OmniAnomaly): 38 real server metrics per minute, human-labelled
+per-minute anomaly points, fault intervals up to 3,161 minutes. Two machines were used: `machine-1-6`
+(23,689 samples, 3,708 anomalous points) and `machine-2-2` (23,700 samples, 2,833 anomalous points).
 
-| configuration | AUC | recall @ FPR≈0.09 |
-|---|---|---|
-| shipped catalog on the host feed (`cpu` + `mem` only, 2-line state) | **0.862** | **0.735** |
-| new `host` profile, 8 metrics, each with baseline+ratio (10-line state) | **0.515** | 0.050 |
-| `host` profile restricted to 3 metrics | 0.692 | 0.242 |
-| one-line CPU-level threshold (control) | 0.900 | **0.804** |
-| robust z-score on the same features (control) | — | 0.078 |
+Ten rounds of measurement followed; the log is [docs/OPTIMIZATION_LOG.zh.md](docs/OPTIMIZATION_LOG.zh.md)
+and the first-pass findings are [docs/REAL_DATA_VALIDATION.zh.md](docs/REAL_DATA_VALIDATION.zh.md). Final
+state, all at a 10% false-positive budget:
 
-Three conclusions, in order of severity:
+| configuration | AUC | recall | vs the one-line threshold |
+|---|---|---|---|
+| `machine-1-6`, system tuned (600 s windows, 3 metrics, long baseline) | 0.745 | 0.380 | threshold wins (0.797) |
+| `machine-1-6`, best single-metric threshold | 0.904 | 0.797 | — |
+| `machine-2-2`, same config, **not retuned** | 0.698 | **0.264** | system edges past it (0.236) |
+| `machine-2-2`, best single-metric threshold | 0.775 | 0.236 | — |
 
-**The architecture is structurally blind to sustained anomalies.** Mean AUC across the eight features:
-absolute **level 0.815**, ratio-to-rolling-baseline **0.493**, delta **0.473**. A fault that lasts longer
-than the 30-window baseline is absorbed *into* the baseline, so `CPU 1.03x its baseline` is the correct
-comparison and still hides the fault. My synthetic scenarios run 1–2 windows, so they never exposed this.
-`brian`'s detection mechanism as shipped is a **spike detector**, not an incident detector.
+The two machines disagree, and that disagreement is the finding:
 
-**On this dataset a one-line rule beats the model.** A single CPU-level threshold reaches recall 0.804 at
-FPR 0.087; Laya, with its threshold swept, reaches 0.735 at 0.095. Where the problem reduces to "is one
-number high", a threshold alert is the right tool and 421M parameters add nothing. Laya's value has to
-come from cases a threshold cannot express — which is the multi-signal, categorical judgement the catalog
-was designed for, and that case is not represented in SMD.
+**Where a fault reduces to "one metric is high", a threshold wins.** On `machine-1-6` the labels are
+almost equivalent to "load or CPU is elevated", so a one-line cut on `load_1` reaches recall 0.797 against
+the system's 0.380. 421M parameters add nothing to a problem that is already one-dimensional.
 
-**Making the state richer made it worse.** Adding seven more metrics and framing everything as a
-deviation dropped AUC from 0.862 to 0.515: the extra dimensions are weaker signals (level AUC 0.60–0.65
-for network) and they dilute the one strong one. This is the same lesson as the renderer experiments —
-more information is not more evidence — now confirmed on data I did not write.
+**Where it does not, multi-signal judgement starts to pay.** On `machine-2-2` no single metric carries the
+fault (`net_out_bytes` 0.775 AUC is the best of eight, `mem_free` is at 0.493 — below chance), and the
+system, transferred without retuning, reaches 0.264 against the threshold's 0.236. That margin is small
+enough to be a tie rather than a win, and its AUC is lower — the honest reading is "competitive", not
+"better".
+
+So the scope is narrow and should be stated before the architecture: **use this where faults are
+multi-signal, or where the output has to be a category and a disposition rather than a yes/no.** Use a
+threshold where the question is "is this number high". The catalog, the gate and the LLM escalation are
+built for the first case; SMD only partly represents it.
+
+Four things the real data changed, in order of severity:
+
+**The architecture was structurally blind to sustained anomalies, and is not any more.** Absolute level
+ranked at AUC 0.815 across the eight features while ratio-to-a-rolling-baseline ranked at 0.493: a fault
+that outlasts the baseline is absorbed *into* it, so `CPU 1.03x its baseline` is the correct comparison and
+still hides the fault. My synthetic scenarios run 1–2 windows, so they never exposed this. Lengthening the
+reference horizon to 480 windows moved AUC from 0.562 to 0.758; the tracker now carries both horizons.
+
+**A verdict inside the state costs accuracy.** Appending "N of M measurements are outside ±25% of their
+baseline" to an otherwise identical digest dropped AUC from 0.758 to 0.583. The model is asked for the
+verdict, so the state must not contain one. The same held for explanatory rubrics (0.564 vs 0.756) and for
+extra metrics: only "value (baseline, ratio)" survived every ablation.
+
+**Calibration fixes meaning, never ranking.** Refitting Platt on this domain took ECE from 0.141 to 0.016
+and log loss 0.484 → 0.388, while AUC stayed at 0.7501 exactly — as a monotone transform must.
+
+**An unconfigured threshold raises nothing at all.** No window on `machine-1-6` scores at or above 0.5.
+A deployment left on the default cut reports "healthy" forever, which is the failure mode this project
+was built to avoid, appearing in its own gate. The operating curve and per-domain refit are in the log.
 
 Also measured: of the 13 HTTP-catalog metric sources, **11 cannot be populated by host telemetry at
-all**, so the shipped catalog is service-shaped and a host feed gets a two-line state.
+all**, so the shipped catalog is service-shaped and a host feed gets a short state.
 
 Four findings from building this are worth more than the headline numbers.
 
