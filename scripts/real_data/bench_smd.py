@@ -147,6 +147,10 @@ def render(digest_variant: str, machine: str, event_count: int, window_s: int,
     what they *say*, never in what they measure.
     """
     lines = ["Host %s, a %d-second window with %d samples." % (machine, window_s, event_count)]
+    if digest_variant == "level_scale":
+        # Stated once, as a property of the feed rather than of this window: the model has no way to know
+        # the scale otherwise, and repeating it per line is what made earlier variants too wordy.
+        lines.append("Each measurement is scaled from 0.00 (idle) to 1.00 (saturated) for this host.")
     outside = 0
     for item in stats:
         label, value = item["label"], item["value"]
@@ -154,7 +158,7 @@ def render(digest_variant: str, machine: str, event_count: int, window_s: int,
         lo, hi = item["lo"], item["hi"]
         if hi is not None and (value > hi or value < lo):
             outside += 1
-        if digest_variant == "level":
+        if digest_variant in ("level", "level_scale"):
             lines.append("%s %.2f." % (label, value))
         elif digest_variant == "ratio":
             lines.append("%s %.2fx its 30-window median." % (label, ratio))
@@ -306,7 +310,19 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                                                     len(rows_out) / max(build_seconds, 1e-6)))
     print("windows judged  %d (stride %d, warmup %d)" % (len(judge_jobs), args.stride, args.warmup))
 
-    question = QUESTION_VARIANTS[args.question]
+    if args.question == "permetric":
+        question = {
+            "%s_abnormal" % name: {
+                "type": "noul",
+                "instructions": (
+                    "On this host, is the %s measurement in this window abnormal, given the value and "
+                    "the baseline stated for it?" % LABELS[name]
+                ),
+            }
+            for name in features
+        }
+    else:
+        question = QUESTION_VARIANTS[args.question]
     client = LayaClient(settings_laya())
     latencies: List[float] = []
     started = time.perf_counter()
@@ -317,8 +333,16 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         try:
             result = client.decide(text, question, model=args.model or None, use_cache=False)
             rows_out[index].probability = None
-            answers = result.answers.get("is_anomaly") or {}
-            rows_out[index].probability = float(answers.get("noul"))
+            if args.question == "permetric":
+                values = []
+                for name in features:
+                    answer = result.answers.get("%s_abnormal" % name) or {}
+                    if answer.get("noul") is not None:
+                        values.append(float(answer["noul"]))
+                rows_out[index].probability = max(values) if values else None
+            else:
+                answers = result.answers.get("is_anomaly") or {}
+                rows_out[index].probability = float(answers.get("noul"))
             rows_out[index].latency_ms = result.latency_ms
         except LayaError as exc:
             rows_out[index].error = str(exc)
@@ -421,11 +445,11 @@ def main() -> int:
                         help="how a gauge is reduced over the window (harness variants only)")
     parser.add_argument("--model", default="",
                         help="checkpoint to route to (english | multilingual | typed-decisions)")
-    parser.add_argument("--question", default="base", choices=sorted(QUESTION_VARIANTS),
+    parser.add_argument("--question", default="base", choices=sorted(list(QUESTION_VARIANTS) + ["permetric"]),
                         help="rubric variant; the state is unchanged, only the question differs")
     parser.add_argument("--digest", default="current",
                         choices=["level", "ratio", "current", "level_range", "percentile",
-                                  "current_percentile", "product", "current_summary"])
+                                  "current_percentile", "product", "current_summary", "level_scale"])
     parser.add_argument("--features", default="cpu_r,cpu_s,load_1,mem_free,swap_used,disk_io_write,net_in_bytes,net_out_bytes")
     parser.add_argument("--window-s", type=int, default=300)
     parser.add_argument("--baseline-windows", type=int, default=30)
