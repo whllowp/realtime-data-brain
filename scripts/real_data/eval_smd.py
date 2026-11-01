@@ -204,7 +204,8 @@ def run_arm(name: str, machine: str, rows, labels, args, profile: str, mapping: 
 
     windower = Windower(size_s=args.window_s, slide_s=args.window_s, allowed_lateness_s=0,
                         min_events=1, specs=specs)
-    baselines = BaselineTracker(window=args.baseline_windows, keys=baseline_keys)
+    baselines = BaselineTracker(window=args.baseline_windows, keys=baseline_keys,
+                                long_window=args.long_windows)
     history: Dict[str, List[float]] = {k: [] for k in mapping}
 
     windows: List[Window] = []
@@ -329,6 +330,8 @@ def main() -> int:
     parser.add_argument("--window-s", type=int, default=300)
     parser.add_argument("--baseline-windows", type=int, default=30)
     parser.add_argument("--warmup", type=int, default=30)
+    parser.add_argument("--long-windows", type=int, default=480,
+                        help="long baseline horizon in windows; 0 disables it")
     parser.add_argument("--max-fpr", type=float, default=0.10)
     parser.add_argument("--z-threshold", type=float, default=3.0)
     parser.add_argument("--limit-calls", type=int, default=0)

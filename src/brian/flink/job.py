@@ -266,7 +266,10 @@ def build_job(settings: Settings, env: Any, bootstrap: Optional[str] = None,
         def _baselines(self) -> BaselineTracker:
             raw = self.baseline_state.value()
             if not raw:
-                return BaselineTracker(window=self.settings.window.baseline_windows)
+                return BaselineTracker(
+            window=self.settings.window.baseline_windows,
+            long_window=self.settings.window.baseline_windows_long,
+        )
             return BaselineTracker.from_dict(json.loads(raw))
 
         def _save(self, windower: Windower, baselines: BaselineTracker) -> None:

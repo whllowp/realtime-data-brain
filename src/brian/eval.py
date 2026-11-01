@@ -349,7 +349,10 @@ class Evaluator:
 
     def run(self, windows: Sequence[LabeledWindow], warmup: int = 0,
             on_window: Optional[Callable[[WindowScore], None]] = None) -> EvalReport:
-        baselines = BaselineTracker(window=self.settings.window.baseline_windows)
+        baselines = BaselineTracker(
+            window=self.settings.window.baseline_windows,
+            long_window=self.settings.window.baseline_windows_long,
+        )
         windower = Windower(
             size_s=self.settings.window.size_s,
             slide_s=self.settings.window.slide_s,

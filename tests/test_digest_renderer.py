@@ -155,8 +155,21 @@ Host machine-1-6, a 300-second window with 5 samples.
 CPU 0.72 (baseline 0.18, 4.00x).
 CPU system 0.12 (baseline 0.08, 1.53x).
 load 1m 0.70 (baseline 0.69, 1.01x).
-free memory 0.25 (baseline 0.25, 1.00x).
-2 of 4 measurements are outside +/-25% of their baseline."""
+free memory 0.25 (baseline 0.25, 1.00x)."""
+
+
+def test_host_profile_states_no_verdict() -> None:
+    """The host digest must not summarise how many signals moved.
+
+    Appending "N of M measurements are outside +/-25% of their baseline" to an otherwise identical
+    digest dropped SMD ranking AUC from 0.758 to 0.583. A count of abnormalities is a conclusion, and
+    the model is the component that is supposed to reach one — handing it over pre-empts the judgement
+    and flattens the ranking, in the same way the bare `Resources:` line did.
+    """
+    text, _ = render_digest(HOST_METRICS_FIXTURE, profile="host")
+    assert "outside" not in text
+    assert "within" not in text
+    assert text.splitlines()[-1].endswith(")."), "the digest must end on a measurement, not a verdict"
 
 
 def test_host_profile_digest_is_pinned() -> None:

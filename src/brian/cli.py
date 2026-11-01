@@ -803,7 +803,10 @@ def cmd_replay(args: argparse.Namespace, settings: Settings) -> int:
         return 2
     events.sort(key=lambda e: e.event_time)
 
-    baselines = BaselineTracker(window=settings.window.baseline_windows)
+    baselines = BaselineTracker(
+        window=settings.window.baseline_windows,
+        long_window=settings.window.baseline_windows_long,
+    )
     windower = Windower(
         size_s=settings.window.size_s,
         slide_s=settings.window.slide_s,

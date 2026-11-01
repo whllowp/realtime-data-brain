@@ -124,7 +124,7 @@ def render(digest_variant: str, machine: str, event_count: int, window_s: int,
             lines.append("%s %.2f." % (label, value))
         elif digest_variant == "ratio":
             lines.append("%s %.2fx its 30-window median." % (label, ratio))
-        elif digest_variant == "current":
+        elif digest_variant in ("current", "current_summary"):
             lines.append("%s %.2f (baseline %.2f, %.2fx)." % (label, value, median, ratio))
         elif digest_variant == "percentile":
             # The level, expressed as a rank against the host's own long history. A raw number does not
@@ -145,6 +145,9 @@ def render(digest_variant: str, machine: str, event_count: int, window_s: int,
         else:
             raise SystemExit("unknown digest variant %r" % digest_variant)
     if stats:
+        if digest_variant == "current_summary":
+            lines.append("%d of %d measurements are outside +/-25%% of their baseline."
+                         % (outside, len(stats)))
         if digest_variant in ("level_range", "level"):
             lines.append("%d of %d measurements are outside their usual range."
                          % (outside, len(stats)))
@@ -181,7 +184,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     keys = tuple(spec.key for spec in specs)
     windower = Windower(size_s=args.window_s, slide_s=args.window_s, allowed_lateness_s=0,
                         min_events=1, specs=specs)
-    baselines = BaselineTracker(window=args.baseline_windows, keys=keys)
+    baselines = BaselineTracker(window=args.baseline_windows, keys=keys,
+                                long_window=args.long_windows)
 
     history: Dict[str, List[float]] = {name: [] for name in features}
     rows_out: List[Row] = []
@@ -208,7 +212,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 "lo": lo, "hi": hi, "history": len(past),
                 "pct": int(round(100.0 * sum(1 for v in past if v <= value) / len(past))) if past else 50,
             })
-        text = render(args.digest, args.machine, aggregator.event_count, args.window_s, stats)
+        if args.digest == "product":
+            text = digest.interpretation
+        else:
+            text = render(args.digest, args.machine, aggregator.event_count, args.window_s, stats)
         for name in features:
             points = aggregator._gauges.get(name)
             if points:
@@ -336,12 +343,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--machine", default="machine-1-6")
     parser.add_argument("--digest", default="current",
-                        choices=["level", "ratio", "current", "level_range", "percentile", "current_percentile"])
+                        choices=["level", "ratio", "current", "level_range", "percentile",
+                                  "current_percentile", "product", "current_summary"])
     parser.add_argument("--features", default="cpu_r,cpu_s,load_1,mem_free,swap_used,disk_io_write,net_in_bytes,net_out_bytes")
     parser.add_argument("--window-s", type=int, default=300)
     parser.add_argument("--baseline-windows", type=int, default=30)
     parser.add_argument("--history-windows", type=int, default=240)
     parser.add_argument("--warmup", type=int, default=30)
+    parser.add_argument("--long-windows", type=int, default=480,
+                        help="long baseline horizon in windows; 0 disables it")
     parser.add_argument("--stride", type=int, default=3)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--max-fpr", type=float, default=0.10)

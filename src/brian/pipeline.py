@@ -122,7 +122,8 @@ class Pipeline:
         # attributed to a single calibration.
         self.calibrator = calibrator if calibrator is not None else settings.load_calibration()
         self.baselines = baselines if baselines is not None else BaselineTracker(
-            window=settings.window.baseline_windows
+            window=settings.window.baseline_windows,
+            long_window=settings.window.baseline_windows_long,
         )
         self.windower = Windower(
             size_s=settings.window.size_s,

@@ -314,6 +314,18 @@ class MetricValue:
     z: Optional[float] = None
     direction: str = "up"
     n: int = 0
+    #: Median over the *long* horizon (`baseline_windows_long`), when one is tracked.
+    #:
+    #: The short baseline answers "did this just move?", which is the right question for a spike and
+    #: the wrong one for a fault longer than the baseline window: the rolling median follows the fault,
+    #: so `CPU 0.92 against a baseline of 0.90` reads as normal. Measured on the SMD server dataset,
+    #: lengthening the reference from 30 windows (2.5 h) to the full history moved ranking AUC from
+    #: 0.562 to 0.772 with disjoint bootstrap intervals. The long median is kept *alongside* the short
+    #: one rather than replacing it: a spike is only visible against a short horizon, a sustained shift
+    #: only against a long one.
+    long_baseline: Optional[float] = None
+    long_delta_ratio: Optional[float] = None
+    long_n: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         # `key` and `unit` are included so a consumer can render the value in its own unit without
@@ -322,7 +334,7 @@ class MetricValue:
         # fraction, and the answers measurably compressed when it had to. `label` travels too, so a
         # metric that has no dedicated sentence in `render_digest` can still be named in words rather
         # than as a dotted path.
-        return {
+        payload = {
             "key": self.key,
             "label": self.label,
             "unit": self.unit,
@@ -333,6 +345,11 @@ class MetricValue:
             "direction": self.direction,
             "n": self.n,
         }
+        if self.long_baseline is not None:
+            payload["long_baseline"] = _round(self.long_baseline)
+            payload["long_delta_ratio"] = _round(self.long_delta_ratio, 3)
+            payload["long_n"] = self.long_n
+        return payload
 
 
 def _round(value: Optional[float], digits: int = 4) -> Optional[float]:
@@ -350,9 +367,16 @@ class BaselineStats:
     median: Optional[float] = None
     mad: Optional[float] = None
     n: int = 0
+    #: Centre over the long horizon, when the tracker was built with one.
+    long_median: Optional[float] = None
+    long_n: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"median": _round(self.median), "mad": _round(self.mad), "n": self.n}
+        payload = {"median": _round(self.median), "mad": _round(self.mad), "n": self.n}
+        if self.long_median is not None:
+            payload["long_median"] = _round(self.long_median)
+            payload["long_n"] = self.long_n
+        return payload
 
 
 class BaselineTracker:
@@ -363,16 +387,32 @@ class BaselineTracker:
     cheap and more accurate than an approximation. In the Flink job this dict is what lives
     in `ValueState`; keeping the algorithm identical in both places is worth more than the
     asymptotically better sketch.
+
+    Tracks **two** horizons when `long_window` is positive:
+
+    * `window` (short, default 30) — how a metric normally behaves *lately*. Needed for spikes: a
+      sudden 5x jump only looks like a jump against recent history.
+    * `long_window` — how it normally behaves *overall*. Needed for sustained faults: a rolling median
+      follows a fault that outlasts its window, so the deviation collapses to 1.0x exactly when the
+      fault is worst. On the SMD dataset the short-horizon reading had AUC 0.562 and the long-horizon
+      reading 0.772.
+
+    Neither replaces the other; `MetricValue` carries both and each renderer uses the horizon its own
+    profile was measured with.
     """
 
-    def __init__(self, window: int = 30, keys: Sequence[str] = BASELINE_KEYS) -> None:
+    def __init__(self, window: int = 30, keys: Sequence[str] = BASELINE_KEYS,
+                 long_window: int = 0) -> None:
         self.window = max(2, window)
+        self.long_window = max(0, long_window) if long_window else 0
         self.keys = tuple(keys)
         self._history: Dict[str, Dict[str, List[float]]] = {}
+        self._long: Dict[str, Dict[str, List[float]]] = {}
 
     def observe(self, service: str, metrics: Mapping[str, Any]) -> None:
         """Record one window's values as history for future windows."""
         bucket = self._history.setdefault(service, {k: [] for k in self.keys})
+        long_bucket = self._long.setdefault(service, {k: [] for k in self.keys})
         for key in self.keys:
             value = _dig(metrics, key)
             if value is None:
@@ -380,15 +420,22 @@ class BaselineTracker:
             bucket[key].append(float(value))
             if len(bucket[key]) > self.window:
                 del bucket[key][0]
+            if self.long_window:
+                long_bucket[key].append(float(value))
+                if len(long_bucket[key]) > self.long_window:
+                    del long_bucket[key][0]
 
     def stats(self, service: str, key: str) -> BaselineStats:
         values = self._history.get(service, {}).get(key) or []
         if not values:
             return BaselineStats()
+        long_values = (self._long.get(service, {}).get(key) or []) if self.long_window else []
         return BaselineStats(
             median=float(statistics.median(values)),
             mad=median_absolute_deviation(values),
             n=len(values),
+            long_median=float(statistics.median(long_values)) if long_values else None,
+            long_n=len(long_values),
         )
 
     def service_history(self, service: str) -> Dict[str, BaselineStats]:
@@ -396,19 +443,32 @@ class BaselineTracker:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialisable form, for checkpointing into Flink `ValueState`."""
-        return {
+        payload = {
             "window": self.window,
             "history": {
                 service: {k: list(v) for k, v in metrics.items()}
                 for service, metrics in self._history.items()
             },
         }
+        if self.long_window:
+            # Carried in checkpoint state for the same reason as the short horizon: a restart must not
+            # have to re-learn what "normal" meant, and the long horizon is the slower of the two to
+            # rebuild.
+            payload["long_window"] = self.long_window
+            payload["long_history"] = {
+                service: {k: list(v) for k, v in metrics.items()}
+                for service, metrics in self._long.items()
+            }
+        return payload
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any], keys: Sequence[str] = BASELINE_KEYS) -> "BaselineTracker":
-        tracker = cls(window=int(raw.get("window", 30)), keys=keys)
+        tracker = cls(window=int(raw.get("window", 30)), keys=keys,
+                      long_window=int(raw.get("long_window", 0) or 0))
         for service, metrics in (raw.get("history") or {}).items():
             tracker._history[str(service)] = {str(k): [float(x) for x in v] for k, v in (metrics or {}).items()}
+        for service, metrics in (raw.get("long_history") or {}).items():
+            tracker._long[str(service)] = {str(k): [float(x) for x in v] for k, v in (metrics or {}).items()}
         return tracker
 
 
@@ -629,6 +689,10 @@ class ServiceAggregator:
                 z=robust_z(float(current), stats.median, stats.mad or 0.0) if stats.median is not None else None,
                 direction=spec.direction,
                 n=stats.n,
+                long_baseline=stats.long_median,
+                long_delta_ratio=(ratio(float(current), stats.long_median)
+                                  if stats.long_median is not None else None),
+                long_n=stats.long_n,
             )
             # Only meaningful comparisons are kept: a metric with no baseline yet stays in
             # `metrics` (flat) but is left out of the comparison block entirely, so the
@@ -931,9 +995,10 @@ def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_
       suppressed every window as confidently normal, including fault-injected ones. The state was not
       cautious, it was empty.
 
-    Every line states `value (baseline B, Nx)` so nothing is left without a scale, and the digest closes
-    with how many signals actually moved — an aggregate the model cannot compute reliably itself but can
-    check against the lines above it.
+    Every line states `value (baseline B, Nx)` so nothing is left without a scale, and nothing else is
+    stated. An earlier version closed with a count of how many signals had moved; that count is a
+    verdict, and it cost 0.175 AUC (0.758 -> 0.583) on SMD. The model is asked for the verdict, so the
+    state must not contain one.
     """
     lines: List[str] = []
     service = str(metrics.get("service") or "unknown-host")
@@ -946,7 +1011,6 @@ def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_
     baseline_n = metrics.get("baseline_samples") or 0
 
     rendered = 0
-    moved = 0
     ordered = [key for key in HOST_BASELINE_KEYS if _dig(comparison, key)]
     ordered += [key for key in _comparison_keys(comparison) if key not in set(HOST_BASELINE_KEYS)]
     for key in ordered:
@@ -954,22 +1018,28 @@ def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_
         if not isinstance(entry, Mapping) or entry.get("value") is None:
             continue
         label = str(entry.get("label") or key)
+        # Prefer the long horizon when one was tracked. A host fault typically lasts far longer than a
+        # 30-window baseline, which the rolling median simply follows; the long median keeps it visible.
+        # When no long horizon exists this falls back to the short one, so the profile still works.
+        reference = entry.get("long_baseline")
+        reference_ratio = entry.get("long_delta_ratio")
+        if reference is None:
+            reference = entry.get("baseline")
+            reference_ratio = entry.get("delta_ratio")
         lines.append("%s %s (baseline %s%s)."
                      % (label,
                         _num(entry["value"], 2),
-                        _num(entry.get("baseline"), 2),
-                        ", %sx" % _num(entry.get("delta_ratio"), 2)
-                        if entry.get("delta_ratio") is not None else ""))
+                        _num(reference, 2),
+                        ", %sx" % _num(reference_ratio, 2)
+                        if reference_ratio is not None else ""))
         rendered += 1
-        ratio = entry.get("delta_ratio")
-        if ratio is not None and (ratio >= 1.25 or ratio <= 0.8):
-            moved += 1
 
-    if rendered:
-        if moved:
-            lines.append("%d of %d measurements are outside +/-25%% of their baseline." % (moved, rendered))
-        else:
-            lines.append("All %d measurements are within +/-25%% of their baseline." % rendered)
+    # No summarising sentence about how many signals moved. That was tried and measured: appending
+    # "N of M measurements are outside +/-25% of their baseline" to an otherwise identical digest
+    # dropped ranking AUC from 0.758 to 0.583 on SMD, and stating the converse ("all within range")
+    # is the same kind of claim in the other direction. A verdict in the state pre-empts the verdict the
+    # model is asked for — the same lesson as the `Resources:` line, which also lost accuracy the moment
+    # it carried a pre-digested conclusion.
     if not baseline_n or baseline_n < 3:
         lines.append(
             "No baseline is available yet for this host (fewer than 3 prior windows), so the values "

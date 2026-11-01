@@ -109,7 +109,7 @@ class KafkaSettings:
     `backend` is the important field. `auto` uses a real cluster when kafka-python is
     importable *and* a broker responds, otherwise falls back to a local append-only JSONL
     journal. The fallback is not a toy: it preserves the two properties the design depends
-    on — append-only order and replay-by-offset — so `brian demo` exercises the same code
+    on —?append-only order and replay-by-offset —?so `brian demo` exercises the same code
     path (`bus.append` / `bus.replay`) that a cluster does, and switching is one env var.
     """
 
@@ -147,7 +147,7 @@ class LayaSettings:
     timeout_s: float = 60.0
     connect_timeout_s: float = 5.0
     api_key: Optional[str] = None
-    #: Retries only cover transport failures — a 4xx is a bug in the request, not a blip.
+    #: Retries only cover transport failures —?a 4xx is a bug in the request, not a blip.
     max_retries: int = 2
     retry_backoff_s: float = 0.5
     #: Deterministic answers mean an identical digest may be answered from cache. This is
@@ -191,12 +191,12 @@ class GateThresholds:
     * model `confidence` decides **how much the system is allowed to do about it**.
 
     A window can be a confident anomaly (act) or a hesitant one (ask the LLM). It can also
-    be a confident normal (suppress) — which is just as valuable, because every suppressed
+    be a confident normal (suppress) —?which is just as valuable, because every suppressed
     window is an alert that did not wake anybody up.
 
     Where the default thresholds come from
     --------------------------------------
-    They are **measured, not conventional**, and they are stated on the scale the gate actually sees —
+    They are **measured, not conventional**, and they are stated on the scale the gate actually sees —?
     which is the calibrated one, because `brian calibrate` fits a Platt correction and the gate applies
     it before any threshold. (Mixing the scales is a silent failure: a calibrated threshold compared
     against raw probabilities simply never fires, and recall goes to 0.000 while every other number in
@@ -249,6 +249,16 @@ class WindowSettings:
     #: Baseline window used to judge the current one (e.g. same window 24h earlier, or a
     #: trailing median). The engine keeps a rolling baseline per service.
     baseline_windows: int = 30
+    #: Second, much longer baseline kept alongside the short one. `0` disables it.
+    #:
+    #: The short window answers "did this just move?", which detects a spike. It cannot detect a fault
+    #: that outlasts it: the rolling median follows the fault, so the ratio collapses to 1.0x exactly
+    #: when the fault is at its worst. On the SMD server dataset (300 s windows) the short-horizon
+    #: reading ranked with AUC 0.562 and the long-horizon reading 0.772, on identical windows.
+    #:
+    #: 480 windows = 40 h at a 5-minute cadence, the point where that curve flattened. Set it to a small
+    #: multiple of the cadence if windows are configured differently.
+    baseline_windows_long: int = 480
     #: Minimum events for a window to be judged at all. Below this the statistical basis is
     #: too thin to accuse a service of anything.
     min_events: int = 10
@@ -336,7 +346,7 @@ class Settings:
         }
 
     def with_overrides(self, **kwargs: object) -> "Settings":
-        """A copy with top-level sections replaced — used by the CLI and tests."""
+        """A copy with top-level sections replaced —?used by the CLI and tests."""
         return replace(self, **kwargs)  # type: ignore[arg-type]
 
 
@@ -409,6 +419,7 @@ def load_settings() -> Settings:
             allowed_lateness_s=_int("BRIAN_ALLOWED_LATENESS_S", window_defaults.allowed_lateness_s),
             idle_timeout_s=_int("BRIAN_IDLE_TIMEOUT_S", window_defaults.idle_timeout_s),
             baseline_windows=_int("BRIAN_BASELINE_WINDOWS", window_defaults.baseline_windows),
+        baseline_windows_long=_int("BRIAN_BASELINE_WINDOWS_LONG", window_defaults.baseline_windows_long),
             min_events=_int("BRIAN_MIN_WINDOW_EVENTS", window_defaults.min_events),
         ),
         calibration=CalibrationSettings(
