@@ -65,14 +65,26 @@ the system's 0.380. 421M parameters add nothing to a problem that is already one
 
 **Where it does not, multi-signal judgement starts to pay.** On `machine-2-2` no single metric carries the
 fault (`net_out_bytes` 0.775 AUC is the best of eight, `mem_free` is at 0.493 — below chance), and the
-system, transferred without retuning, reaches 0.264 against the threshold's 0.236. That margin is small
-enough to be a tie rather than a win, and its AUC is lower — the honest reading is "competitive", not
-"better".
+system, transferred without retuning, reaches 0.264 against the threshold's 0.236. Its AUC is lower, so the
+honest reading is "competitive", not "better".
 
-So the scope is narrow and should be stated before the architecture: **use this where faults are
-multi-signal, or where the output has to be a category and a disposition rather than a yes/no.** Use a
-threshold where the question is "is this number high". The catalog, the gate and the LLM escalation are
-built for the first case; SMD only partly represents it.
+**And a blend says whether the model adds anything at all.** Rank-averaging the model with the threshold,
+then bootstrapping the difference against the better of the two:
+
+| machine | blend − best single | 95% CI | verdict |
+|---|---|---|---|
+| `machine-1-6` | **−0.046** | [−0.061, −0.033] | adding the model makes it significantly **worse** |
+| `machine-2-2` | −0.010 | [−0.024, +0.003] | indistinguishable — the signal is redundant |
+
+So on this dataset the model contributes nothing a one-line threshold does not already have, and on the
+machine where the threshold works well it actively adds noise. That is the finding, and it is more useful
+than any AUC in the table above.
+
+The scope should therefore be stated before the architecture: **use this where faults are multi-signal, or
+where the output must be a category and a disposition rather than a yes/no.** Use a threshold where the
+question is "is this number high". The catalog, the gate and the LLM escalation are built for the first
+case; SMD only partly represents it, and nothing here has tested the service-side metrics — error rate,
+latency, request rate — on real data at all.
 
 Four things the real data changed, in order of severity:
 
