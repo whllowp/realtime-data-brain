@@ -124,6 +124,8 @@ class Row:
     probability: Optional[float] = None
     latency_ms: float = 0.0
     error: Optional[str] = None
+    screen: float = 0.0
+    skipped: bool = False
 
 
 def load(machine: str) -> Tuple[List[List[float]], List[int]]:
@@ -223,6 +225,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
     rows_out: List[Row] = []
     judge_jobs: List[int] = []
     digests: Dict[int, str] = {}
+    screens_skipped: List[int] = []
     started = time.perf_counter()
 
     def build(aggregator) -> None:
@@ -267,11 +270,29 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 del history[name][0]
 
         index = len(rows_out)
+        screen = 0.0
+        for item in stats:
+            median = item["median"]
+            if args.screen_mode == "level":
+                # Percentile of this level within the host's history: monotone in the level, which is
+                # what actually separates faults here, and immune to the baseline being dragged along.
+                screen = max(screen, float(item["pct"]))
+            elif median:
+                screen = max(screen, abs(item["value"] / median - 1.0))
         rows_out.append(Row(index=index, anomalous=any(label_slice), digest=text))
         baselines.observe(digest.service, digest.metrics)
         if index >= args.warmup and (args.stride <= 1 or (index - args.warmup) % args.stride == 0):
-            digests[index] = text
-            judge_jobs.append(index)
+            # Stage one. Quiet windows are answered without the engine: their score is a small deviation
+            # from baseline on every measured dimension, and the model has never been able to rank those
+            # apart from one another anyway (they occupy the bottom of its probability band).
+            if args.prefilter > 0 and screen < args.prefilter:
+                rows_out[index].probability = args.skip_prob
+                rows_out[index].skipped = True
+                screens_skipped.append(index)
+            else:
+                digests[index] = text
+                judge_jobs.append(index)
+        rows_out[index].screen = screen
 
     for event in events:
         windower.add(event)
@@ -370,6 +391,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         # wrong conclusion.
         "probabilities": [round(p, 5) for p in probabilities],
         "labels": [1 if y else 0 for y in truth],
+        "screened_out": len(screens_skipped),
+        "screened_fraction": round(len(screens_skipped) / max(len(judged), 1), 4),
         "engine_calls_per_s": round(len(judge_jobs) / max(elapsed, 1e-6), 2),
         "judge_seconds": round(elapsed, 2),
         "build_seconds": round(build_seconds, 2),
@@ -388,6 +411,12 @@ def settings_laya():
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--machine", default="machine-1-6")
+    parser.add_argument("--screen-mode", default="deviation", choices=["deviation", "level"],
+                        help="deviation: max|ratio-1|; level: max percentile of the value in history")
+    parser.add_argument("--prefilter", type=float, default=0.0,
+                        help="stage-one screen: skip the engine when max|ratio-1| is below this")
+    parser.add_argument("--skip-prob", type=float, default=0.20,
+                        help="probability assigned to a screened-out window")
     parser.add_argument("--window-stat", default="last", choices=["last", "mean", "max", "min"],
                         help="how a gauge is reduced over the window (harness variants only)")
     parser.add_argument("--model", default="",
