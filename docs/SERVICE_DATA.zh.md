@@ -90,14 +90,72 @@ window_start               req     req/s error_ratio     p50_ms     p99_ms
 
 ---
 
-## 4. 下一轮计划（RCAEval RE1-OB）
+## 4. RCAEval RE1-OB：找到并跑通（本轮结论）
+
+### 4.1 数据确认
+
+从 Hugging Face 取（`scripts/service_data/fetch_rcaeval.py`，125 case，32.3 MB，`data/` 已 gitignore）：
+
+| 事实 | 数值 |
+|---|---|
+| case 数 | **125** = 5 服务 × 5 故障类型 × 5 次重复 |
+| 每 case 时长 | **4,200 s**（cpu 类）或 720 s（delay 类），**cadence = 1 s** |
+| 标签 | `inject_time.txt` 给注入时间戳；录制为 **注入前 ~2,100 s + 注入后 ~2,100 s** |
+| 每服务信号 | `<svc>_cpu`、`<svc>_mem`（全部 case）；`<svc>_load`(QPS) + `<svc>_latency`（50 个 case）；`<svc>_latency-50/-90`（75 个 case）；`frontend_error` / `PassthroughCluster_error` |
+
+**这解决了 AnoMod 的根本缺陷**：有逐秒数据、有注入时刻，因此可以做逐窗口标签（前 = 正常，后 = 故障），
+而不是 1 个 Normal run 对 12 个故障 run。
+
+### 4.2 出厂 service 路径在真实服务遥测上跑通
+
+`scripts/service_data/rcaeval_to_events.py` 把 case 转成事件流；**复用出厂 catalog 的指标键名**
+（`requests.rate` / `errors.ratio` / `latency_ms.p99` / `cpu.util`），因此 `render_digest(profile="service")`
+原样产出生产文本，不做任何特判。实测输出：
+
+```
+Service adservice, a 60-second window with 4 events.
+Error fraction 0.00% against a baseline of 0.00%.
+Latency 4.7 ms against a baseline of 4.7 ms (1.00x).
+Resources: CPU 1.68%.
+Throughput 59.7 requests per second against a baseline of 58.1 req/s (1.03x).
+```
+
+### 4.3 第一个真实缺陷：CPU 从 1.7% 升到 96%，模型判为正常
+
+注入 CPU 压力后，同一 case 的窗口：
+
+```
+Service adservice, a 60-second window with 4 events.
+Error fraction 0.00% against a baseline of 0.00%.
+Latency 4.7 ms against a baseline of 4.7 ms (1.00x).
+Resources: CPU 96.05%.
+Throughput 56.6 requests per second against a baseline of 58.7 req/s (0.96x).
+```
+
+| 窗口 | CPU | 模型 P(anomaly) | 判定 |
+|---|---|---|---|
+| 注入前 | 1.68% | 0.378 | 正常 |
+| 注入后 | **96.05%** | **0.389** | **判为正常** |
+| 注入后 | **99.43%** | **0.365** | **判为正常** |
+
+原因直接可读：`Resources: CPU 96.05%` **不带任何参照**，而错误率与延迟都带了
+`against a baseline of …`。模型拿不到"96% 对这个服务算不算高"的信息，于是无法判断——
+这与 SMD 上"资源行缺基线"的发现**在同一位置复现**，只是这次是在服务侧真实数据上。
+
+这也解释了为什么 SMD 上 `Resources` 加基线会让合成 HTTP 场景 FPR 变差（那是把两个 profile 混在一起）：
+正确的解法是给 service profile 的资源行一个**同尺度的参照**，而不是删掉参照。
+
+**下一轮**：把 `Resources:` 行的基线补上（并测量它对合成 HTTP 套件的影响），然后跑全量 125 case
+的检测评测（bench / control / operating curve / incremental value），确认服务侧是否也存在
+"单指标阈值同等或更好"的结论。
+
+---
+
+## 5. 下一轮计划
 
 | 步骤 | 内容 | 验收 |
 |---|---|---|
-| 1 | 取 RCAEval RE1-OB（125 case，49–59 指标，纯指标无需 trace 解析） | 本地可读，schema 记录在案 |
-| 2 | 找到每个 case 的故障注入区间（case 内是否含 pre-fault 基线） | 能定义逐窗口标签，而非 run 级 |
-| 3 | 把指标映射到 catalog 的 13 个源，确认 `http_requests_total` / `errors` / `latency` 是否存在 | 填充率报告 |
-| 4 | 跑同一套评测（bench / control / operating curve / incremental value） | 与 SMD 可比的数字 |
-
-**关键判据**：如果 RE1-OB 的指标里同样没有请求数/错误数/延迟，那么"服务侧从未被真实数据检验"
-这个结论就要从"缺数据"升级为"公开数据集普遍缺少"，那是另一个需要写清楚的边界。
+| 1 | 资源行补基线（service profile），回归合成套件 | 合成集 FPR 不劣化 |
+| 2 | 全量 125 case × 逐窗口评测 | AUC / recall@FPR / 每 case 检出率 |
+| 3 | 对照：单指标阈值（cpu / latency / load） | 与 SMD 相同的对照表 |
+| 4 | 增量价值检验（模型与阈值秩混合） | 回答"服务侧模型是否多余" |
