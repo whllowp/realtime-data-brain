@@ -85,7 +85,7 @@ EXPECTED = """\
 Service checkout-api, a 60-second window with 812 events.
 Error fraction 31.00% against a baseline of 0.50% (62.00x).
 Latency 8900 ms against a baseline of 179 ms (49.72x).
-Resources: CPU 98.00%, memory 72.00%, DB pool 99.00%, thread pool 91.00%.
+Resources: CPU 98.00% (baseline 43.00%, 2.28x), memory 72.00%, DB pool 99.00% (baseline 35.00%, 2.83x), thread pool 91.00% (baseline 38.00%, 2.39x).
 Upstream calls failed at 27.00% against a baseline of 0.40% (67.50x).
 Connection timeouts at 3.100 per second against a baseline of 0.
 Throughput 48.0 requests per second against a baseline of 10.7 req/s (4.49x), with errors rising at the same time.

@@ -904,7 +904,7 @@ def render_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_WORDS,
     for key in RESOURCE_KEYS:
         entry = cmp_entry(key)
         if entry and entry.get("value") is not None:
-            resources.append("%s %s" % (entry_label(key), _pct(entry["value"])))
+            resources.append(_resource_fragment(entry_label(key), entry))
     if resources:
         lines.append("Resources: %s." % ", ".join(resources))
 
@@ -1092,6 +1092,38 @@ def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_
     if dropped:
         kept.append("Note: %d further signals were omitted for length." % len(dropped))
     return "\n".join(kept), dropped
+
+
+#: A resource counts as "not moved" while its ratio to baseline stays inside this band. Used by
+#: `_resource_fragment` to decide whether stating the comparison adds anything.
+RESOURCE_QUIET_LOW = 0.75
+RESOURCE_QUIET_HIGH = 1.5
+
+
+def _resource_fragment(label: str, entry: Mapping[str, Any]) -> str:
+    """`CPU 96.05% (baseline 1.68%, 57.17x)` when the resource has moved; `CPU 36.00%` when it has not.
+
+    The service profile renders resources without a baseline, and that was measured to matter: adding
+    `(baseline 43.00%, 2.28x)` to *every* resource pushed the synthetic suite's false-positive rate from
+    0.000 to 1.000, because the extra percentages shifted the whole probability band.
+
+    But a bare percentage is unreadable when the resource *has* moved. On real service telemetry (RCAEval
+    RE1-OB) an injected CPU stress took a service from 1.68% to 96.05% and the model answered "normal"
+    (p = 0.389, then 0.365 at 99.43%): it had no way to know how far 96% was from 1.68% for that service,
+    while the same digest gave errors and latency their `against a baseline of` phrasing.
+
+    So the comparison is stated only when it is itself the evidence. A healthy window keeps exactly the
+    text it had (so the measured 0.854/0.000 cannot regress), and a resource that has moved stops being a
+    number without a scale.
+    """
+    value_text = _pct(entry.get("value"))
+    ratio = entry.get("delta_ratio")
+    baseline = entry.get("baseline")
+    if ratio is None or baseline is None:
+        return "%s %s" % (label, value_text)
+    if RESOURCE_QUIET_LOW <= ratio <= RESOURCE_QUIET_HIGH:
+        return "%s %s" % (label, value_text)
+    return "%s %s (baseline %s, %sx)" % (label, value_text, _pct(baseline), _num(ratio, 2))
 
 
 def _comparison_keys(node: Any, prefix: str = "") -> List[str]:
