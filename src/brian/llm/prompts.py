@@ -225,7 +225,10 @@ def build_rca_messages(digest: Digest, decision: Decision,
     single most diagnostic thing available (did errors start at the beginning of the window,
     or in the middle?). An unbounded event dump would blow the context and bury that signal.
     """
-    metrics = json.dumps(digest.metrics, indent=1, ensure_ascii=False, default=str)
+    # Compact separators, not `indent=1`. The block was pretty-printed, which spent ~317 tokens of
+    # whitespace on every alert — 8% of a 3,972-token prompt — for a consumer that does not need the
+    # indentation. Measured on the synthetic stream: 5,084 chars pretty vs 3,818 compact, identical JSON.
+    metrics = json.dumps(digest.metrics, separators=(",", ":"), ensure_ascii=False, default=str)
     if len(metrics) > 6000:
         # Truncate the *tail*, not the middle: the renderer puts the decision-relevant metric
         # groups first, so the tail is the least load-bearing part.

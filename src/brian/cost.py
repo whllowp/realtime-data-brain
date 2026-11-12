@@ -46,6 +46,10 @@ class CostLedger:
     #: action -> {"reports": n, "tokens": t}. Lets "was this spend ever used?" be answered from data
     #: rather than from intent: a report attached to a `notify` alert may never be read by anyone.
     by_action: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    #: category -> {"reports": n, "tokens": t}. The predicted category, i.e. what production would have,
+    #: not the ground-truth scenario. A category that is expensive *and* often misclassified is the one
+    #: worth fixing first.
+    by_category: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
     @property
     def billed_tokens(self) -> int:
@@ -119,6 +123,7 @@ class CostLedger:
             "cost_by_category": self.cost_by_category(),
             "share_below_page": _round(self.share_below_page(), 3),
             "by_action": dict(self.by_action),
+            "by_category": dict(self.by_category),
         }
 
 
@@ -155,6 +160,10 @@ def ledger_from_traces(traces: Iterable[Any]) -> CostLedger:
             tokens = estimate
         action = decision.action.value if decision is not None else "unknown"
         bucket = ledger.by_action.setdefault(action, {"reports": 0, "tokens": 0})
+        bucket["reports"] += 1
+        bucket["tokens"] += tokens
+        category = getattr(getattr(decision, "category", None), "value", None) or "unclassified"
+        bucket = ledger.by_category.setdefault(category, {"reports": 0, "tokens": 0})
         bucket["reports"] += 1
         bucket["tokens"] += tokens
     return ledger
@@ -199,6 +208,16 @@ def format_ledger(ledger: CostLedger, label: str = "") -> str:
                     categories["other"]))
     share = ledger.share_below_page()
     lines.append("share below page   %s" % ("n/a" if share is None else "%.1f%%" % (100 * share)))
+    if ledger.by_category:
+        lines.append("by category (predicted):")
+        per_report = {name: (entry["tokens"] / entry["reports"] if entry["reports"] else 0)
+                      for name, entry in ledger.by_category.items()}
+        median = sorted(per_report.values())[len(per_report) // 2] if per_report else 0
+        for name in sorted(per_report, key=lambda item: per_report[item], reverse=True):
+            entry = ledger.by_category[name]
+            ratio = (per_report[name] / median) if median else 0
+            lines.append("  %-16s reports %-4d tokens %-6d %5.0f/report  (%.1fx median)"
+                         % (name, entry["reports"], entry["tokens"], per_report[name], ratio))
     if ledger.by_action:
         lines.append("by action:")
         for action in sorted(ledger.by_action):
