@@ -47,15 +47,16 @@ def test_billed_tokens_are_summed_per_report_and_attributed_to_the_action() -> N
     assert ledger.by_action["notify"]["tokens"] == 900
 
 
-def test_unused_share_is_strict_about_what_reaches_a_human() -> None:
+def test_share_below_page_counts_only_page_human_as_reaching_a_person() -> None:
     """Only `page_human` counts as used; `notify` is spend with no person on the other end.
 
-    This is a deliberately strict reading of the paper's r_no-use, and it should stay strict: relaxing it
-    to include `notify` would quietly make the metric flattering.
+    Named `share_below_page`, not "unused": `deep_analysis` and `auto_triage` are actions whose report *is*
+    the deliverable, so the paper's r_no-use does not transfer to this ladder. What the number measures is
+    spend that never interrupts anyone.
     """
-    traces = [_Trace("page_human", _report(300, 0)), _Trace("notify", _report(100, 0))]
+    traces = [_Trace("page_human", _report(300, 0)), _Trace("auto_triage", _report(100, 0))]
     ledger = ledger_from_traces(traces)
-    assert ledger.unused_share() == 0.25
+    assert ledger.share_below_page() == 0.25
 
 
 def test_estimate_is_used_only_when_nothing_was_billed() -> None:
@@ -107,5 +108,5 @@ def test_zero_spend_does_not_divide_by_zero() -> None:
     ledger = CostLedger()
     assert ledger.tokens_per_report is None
     assert ledger.tokens_per_window is None
-    assert ledger.unused_share() is None
+    assert ledger.share_below_page() is None
     format_ledger(ledger)  # must not raise

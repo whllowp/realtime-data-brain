@@ -44,6 +44,7 @@ from .contracts import (
     Alert,
     ContractError,
     Decision,
+    DecisionAction,
     Digest,
     Event,
     Lineage,
@@ -277,7 +278,14 @@ class Pipeline:
                              settings=self.settings)
 
         # -- System 2 ----------------------------------------------------------
-        if self.settings.gate.always_analyze_alerts:
+        # Spend the analysis budget only where the decision asked for reasoning. `always_analyze_alerts`
+        # keeps the old behaviour (every alerting action); when it is off, `analyze_actions` decides which
+        # actions still get a token-billed report. Anything skipped falls through to the deterministic
+        # reasoner below, so an alert is never left without *some* explanation — only without a billed one.
+        analyze = self.settings.gate.always_analyze_alerts or (
+            decision.action.value in _analyze_action_set(self.settings.gate.analyze_actions)
+        )
+        if analyze:
             try:
                 report = self.rca.analyse(digest, decision, alert.alert_id, events=events)
             except Exception as exc:  # noqa: BLE001 - reasoning must never kill the stream
@@ -299,6 +307,20 @@ class Pipeline:
             self.counters.rca_completion_tokens += report.completion_tokens
             if report.degraded:
                 self.counters.rca_degraded += 1
+            if publish:
+                self.bus.publish(report, self.settings.topic(Topic.RCA), key=report.alert_id,
+                                 settings=self.settings)
+        elif publish or True:
+            # Routed away from the billed path. The alert still gets a report — the deterministic
+            # reasoner writes it — so the only thing saved is money, not explanation. Without this branch
+            # turning the routing on would have silently produced alerts with no report at all, which is a
+            # behaviour change disguised as a cost optimisation.
+            try:
+                report = self.rca.analyse_rules(digest, decision, alert.alert_id, events=events)
+            except Exception:  # noqa: BLE001 - same rule as above: reasoning never kills the stream
+                return trace
+            trace.report = report
+            self.counters.rca_reports_offline = getattr(self.counters, "rca_reports_offline", 0) + 1
             if publish:
                 self.bus.publish(report, self.settings.topic(Topic.RCA), key=report.alert_id,
                                  settings=self.settings)
@@ -425,6 +447,18 @@ class Pipeline:
         # conclusion drawn from it, which is how the chain reads.
         chain.reverse()
         return chain
+
+
+def _analyze_action_set(spec: str) -> frozenset:
+    """Parse `GateSettings.analyze_actions` into a set of action names.
+
+    Unknown names are dropped rather than raising: the setting is a policy knob an operator may edit by
+    hand, and a typo that silently disables all analysis would look exactly like a quiet stream. Empty is
+    meaningful (no billed analysis at all) and is respected.
+    """
+    known = {action.value for action in DecisionAction}
+    names = {part.strip() for part in str(spec or "").split(",") if part.strip()}
+    return frozenset(name for name in names if name in known)
 
 
 def Severity_for(decision: Decision) -> Severity:

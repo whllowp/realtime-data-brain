@@ -121,6 +121,12 @@ def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
     windows = generate(sequence=sequence, service=args.service, warmup_minutes=args.warmup,
                        seed=args.seed)
     events = flatten(windows)
+    gate = type(settings.gate)(**{
+        **vars(settings.gate),
+        "always_analyze_alerts": args.always_analyze,
+        "analyze_actions": args.analyze_actions,
+    })
+    settings = settings.with_overrides(gate=gate)
     pipeline = Pipeline(settings, bus=MemoryBus(), rca=RcaEngine(settings.llm))
     traces = []
     for event in events:
@@ -135,14 +141,16 @@ def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
     _print("=" * 78)
     _print("reasoner          %s" % pipeline.rca.mode)
     _print("always_analyze    %s" % settings.gate.always_analyze_alerts)
+    _print("analyze_actions   %s" % settings.gate.analyze_actions)
     _print("")
     _print(format_ledger(ledger))
-    share = ledger.unused_share()
+    share = ledger.share_below_page()
     if share is not None and ledger.total_tokens:
         _print("")
         _print("Interpretation: %.1f%% of the analysis budget went to reports on alerts that did not"
                % (100 * share))
-        _print("reach a human. That is the analogue of the paper's unused-artifact share.")
+        _print("Each of those reports is still its action's deliverable. The number says what a")
+        _print("cheaper-narrative policy could target, not that the work was wasted.")
     if ledger.total_tokens == 0:
         _print("")
         _print("No tokens were spent: the reasoner is in deterministic mode, so there was no analysis")
@@ -1059,6 +1067,10 @@ def build_parser() -> argparse.ArgumentParser:
     cost.add_argument("--service", default="checkout-api")
     cost.add_argument("--warmup", type=int, default=20)
     cost.add_argument("--seed", type=int, default=7)
+    cost.add_argument("--always-analyze", action=argparse.BooleanOptionalAction, default=True,
+                      help="analyse every alerting action (default); --no-always-analyze routes by action")
+    cost.add_argument("--only-actions", dest="analyze_actions", default="auto_triage,deep_analysis,page_human",
+                      help="comma list of actions allowed to spend tokens when --no-always-analyze is used")
     cost.set_defaults(func=cmd_cost)
 
     demo = sub.add_parser("demo", help="run the full chain over synthetic telemetry")

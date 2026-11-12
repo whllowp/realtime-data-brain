@@ -84,19 +84,23 @@ class CostLedger:
         """
         return {"verify": 0, "explore": 0, "write": self.total_tokens, "other": 0}
 
-    def unused_share(self) -> Optional[float]:
-        """Share of analysis tokens attached to alerts that do not reach a human.
+    def share_below_page(self) -> Optional[float]:
+        """Share of analysis tokens spent on alerts that do not page a human.
 
-        `page_human` is the only action that puts a report in front of a person; `notify` records the
-        incident for the record. Treating `notify` spend as "unused" is a deliberately strict reading of
-        the paper's r_no-use: it is a lower bound on what could be saved, not a claim that no one ever
-        looks.
+        **Not** the paper's r_no-use, and the first version of this module wrongly claimed it was. On this
+        action ladder `deep_analysis` means "Laya is not confident enough to act on the class/severity, the
+        LLM must reason harder" and `auto_triage` means "the LLM writes the narrative". For both, the report
+        is the deliverable rather than a discarded artifact, so nothing here is structurally produced and
+        then ignored.
+
+        What the number does say is how much of the bill goes to work that never interrupts anyone — which
+        is exactly the spend a cheaper-narrative policy would target first.
         """
         if not self.total_tokens:
             return None
-        unused = sum(entry["tokens"] for action, entry in self.by_action.items()
-                     if action != "page_human")
-        return unused / self.total_tokens
+        below_page = sum(entry["tokens"] for action, entry in self.by_action.items()
+                         if action != "page_human")
+        return below_page / self.total_tokens
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -113,7 +117,7 @@ class CostLedger:
             "tokens_per_window": _round(self.tokens_per_window, 1),
             "laya_ms_per_window": _round(self.laya_ms_per_window, 2),
             "cost_by_category": self.cost_by_category(),
-            "unused_share": _round(self.unused_share(), 3),
+            "share_below_page": _round(self.share_below_page(), 3),
             "by_action": dict(self.by_action),
         }
 
@@ -193,8 +197,8 @@ def format_ledger(ledger: CostLedger, label: str = "") -> str:
     lines.append("split              verify %d  explore %d  write %d  other %d"
                  % (categories["verify"], categories["explore"], categories["write"],
                     categories["other"]))
-    share = ledger.unused_share()
-    lines.append("unused share       %s" % ("n/a" if share is None else "%.1f%%" % (100 * share)))
+    share = ledger.share_below_page()
+    lines.append("share below page   %s" % ("n/a" if share is None else "%.1f%%" % (100 * share)))
     if ledger.by_action:
         lines.append("by action:")
         for action in sorted(ledger.by_action):

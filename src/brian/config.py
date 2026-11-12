@@ -234,6 +234,18 @@ class GateThresholds:
     normal_probability: float = 0.35
     #: Escalate to the LLM for every alerting action (System 2 always explains).
     always_analyze_alerts: bool = True
+    #: Which alerting actions are allowed to spend LLM tokens, when `always_analyze_alerts` is off.
+    #:
+    #: The action ladder already encodes how much reasoning is being asked for: `auto_triage` says the
+    #: decision is confident and only needs a narrative, `deep_analysis` says Laya could not settle the
+    #: class/severity and the LLM must reason, `page_human` says someone is being woken up. Paying a full
+    #: reasoning pass for the first case is the kind of unnecessary verification "The RSI Tax"
+    #: (arXiv:2611.13524) measured as the dominant cost. Routing spends the budget where the decision asked
+    #: for it and lets the deterministic reasoner write the rest.
+    #:
+    #: Default is the conservative one — every alerting action — so turning this on is a deliberate choice
+    #: with a measured saving attached, not a silent behaviour change.
+    analyze_actions: str = "auto_triage,deep_analysis,page_human"
 
 
 @dataclass

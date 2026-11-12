@@ -72,7 +72,50 @@ by action:
 
 ---
 
-## 第 2–10 轮计划
+## 第 2 轮：修正一个错误结论 + 按动作路由分析
+
+### 2.1 先纠错：第 1 轮的"unused share"是错的
+
+第 1 轮报"37.4% 的分析预算花在未被使用的产物上"。读动作阶梯的定义才发现**这是误判**：
+
+| 动作 | 定义原文 | 报告是什么 |
+|---|---|---|
+| `auto_triage` | "confident System 1 judgement: **LLM writes the narrative**" | 交付物 |
+| `deep_analysis` | "not confident enough to act on the class/severity: **the LLM must reason harder**" | 交付物 |
+| `page_human` | "page a human in parallel with the LLM analysis" | 交付物 |
+
+三者都需要报告，**没有一个是"产生后就被丢弃的产物"**。论文的 `r_no-use` 在本系统不成立。
+
+指标已改名 `share_below_page`（不触达人的告警占比），并写明它**不是** `r_no-use`：
+它衡量的是"从不打扰任何人的花销"，这正是"更便宜的叙述策略"该瞄准的部分，但不是"浪费"。
+
+### 2.2 真正的机会：阶梯已经分好了需求程度
+
+`auto_triage` 只要叙述，`deep_analysis` 要推理，`page_human` 两者都要。
+为 `auto_triage` 付一次完整推理，正是论文测到的"不需要的验证"。于是新增
+`GateThresholds.analyze_actions`（默认全部，保守），`brian cost` 可对比策略：
+
+| 策略 | 计费报告 | tokens | 每窗口 | 相对现状 |
+|---|---|---|---|---|
+| **A 全部**（现状） | 8 | **31,725** | 906.4 | — |
+| B `deep_analysis`+`page_human` | 8 | 31,725 | 906.4 | **0%** |
+| **C 仅 `page_human`** | 5（+3 走规则） | **19,871** | 567.7 | **−37.4%** |
+
+两个结果都要说清楚：
+
+1. **B 省不到钱**，因为这条合成流里根本没有 `auto_triage` 告警——这是**流的属性，不是策略的失败**。
+2. **C 省 37.4%，代价正是阶梯要求的推理**。`deep_analysis` 的字面意思就是"LLM 必须更深入推理"，
+   把它路由到规则，等于用成本换掉那 3 个告警的推理质量。
+
+所以 C 不是"优化"，是**一个需要运维判断的取舍**。论文的价值也在这里：把账单摆出来，让取舍是自觉的。
+
+### 2.3 保证：跳过分析不等于静默
+
+新增的 `RcaEngine.analyse_rules()` 让被路由掉的告警**仍然拿到报告**（确定性推理器写），
+只是不计 token。没有这条，"省钱"会伪装成"少解释"——那才是真正的退化。
+
+测试：`tests/test_analysis_routing.py`（解析容错、空集合合法、默认必须保守）。
+
 
 | 轮次 | 目标 | 手段 | 验收 |
 |---|---|---|---|

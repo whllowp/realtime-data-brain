@@ -554,6 +554,21 @@ class RcaEngine:
         report.latency_ms = (self._clock() - started) * 1000.0
         return report
 
+    # -- rules-only path -------------------------------------------------------
+    def analyse_rules(self, digest: Digest, decision: Decision, alert_id: str,
+                      events: Optional[Sequence[Event]] = None) -> RcaReport:
+        """Deterministic report only, whether or not a model is configured.
+
+        Exists so cost routing can spend zero tokens on an action without leaving the alert unexplained.
+        `analyse` cannot express that: it prefers the LLM whenever one is configured, which is the right
+        default and the wrong tool for a policy decision made upstream.
+        """
+        started = self._clock()
+        report = self._from_rules(digest, decision, alert_id, events)
+        report.estimated_prompt_tokens = 0
+        report.latency_ms = (self._clock() - started) * 1000.0
+        return report
+
     # -- LLM path --------------------------------------------------------------
     def _from_llm(self, result: LlmResult, digest: Digest, decision: Decision, alert_id: str,
                   events: Optional[Sequence[Event]], estimated_tokens: int) -> RcaReport:
