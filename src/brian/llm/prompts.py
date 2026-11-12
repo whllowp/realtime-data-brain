@@ -300,6 +300,24 @@ def build_rca_messages(digest: Digest, decision: Decision,
     ]
 
 
+#: Characters per token measured on this system's own prompts. JSON-heavy, punctuation-dense content
+#: tokenizes far denser than prose: 14,482 characters came to 4,715 cl100k tokens, i.e. 3.07 chars/token,
+#: against the 4.0 the original heuristic assumed. Choosing 3.0 rather than 3.07 errs slightly high on
+#: purpose — an over-estimate makes the ledger pessimistic about cost, and pessimism is the safe direction
+#: for a number whose job is to stop a system looking cheaper than it is.
+CHARS_PER_TOKEN = 3.0
+
+
 def prompt_token_estimate(messages: Sequence[Mapping[str, str]]) -> int:
-    """Rough token count (~4 chars/token). Used to warn before a context overflow, not to bill."""
-    return sum(len(str(m.get("content", ""))) for m in messages) // 4
+    """Token count estimate, calibrated rather than assumed.
+
+    The original version was `chars // 4`, which **under-estimated by 30.3%** on real RCA prompts
+    (3,620 estimated vs 4,715 measured with tiktoken's cl100k encoding). Every cost number this project
+    reported before the correction was therefore ~23% too low — the exact failure "The RSI Tax" is about,
+    occurring inside the accounting layer itself.
+
+    The measurement, and the reason for the value chosen, is in `CHARS_PER_TOKEN`. Re-run
+    `scripts/calibrate_token_estimate.py` against a real provider tokenizer before trusting this for billing.
+    """
+    characters = sum(len(str(m.get("content", ""))) for m in messages)
+    return int(characters / CHARS_PER_TOKEN) + 1
