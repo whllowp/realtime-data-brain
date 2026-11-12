@@ -705,6 +705,10 @@ class RcaReport:
     #: request weighed. In deterministic mode nothing is billed and this is the only cost signal there is;
     #: with a model configured the two should agree closely, and a large gap means the estimate is drifting.
     estimated_prompt_tokens: int = 0
+    #: `rca_id` of the report this one was reused from, when the incident was re-alerted with
+    #: unchanged evidence inside the cooldown. Kept so a reused report is never mistaken for a
+    #: fresh analysis in the audit trail.
+    reused_from: Optional[str] = None
     created_at: datetime = field(default_factory=utc_now)
     lineage: Lineage = field(default_factory=Lineage)
 

@@ -246,6 +246,11 @@ class GateThresholds:
     #: Default is the conservative one — every alerting action — so turning this on is a deliberate choice
     #: with a measured saving attached, not a silent behaviour change.
     analyze_actions: str = "auto_triage,deep_analysis,page_human"
+    #: Seconds during which an unchanged incident reuses its previous report instead of paying for
+    #: another one. `0` disables reuse. Reuse requires the same dedup key *and* unchanged evidence
+    #: (action, severity, dominant error signature) — key alone would replay a stale explanation.
+    #: Measured on the synthetic stream: 37% of the analysis bill went to such repeats.
+    reuse_report_within_s: int = 0
 
 
 @dataclass

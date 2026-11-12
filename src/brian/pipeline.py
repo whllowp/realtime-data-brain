@@ -32,7 +32,7 @@ incident record.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .bus import Bus, Record
@@ -40,6 +40,8 @@ from .calibration import CalibrationFit
 from .config import Settings
 from .contracts import (
     ALERTING_ACTIONS,
+    new_id,
+    utc_now,
     HUMAN_ACTIONS,
     Alert,
     ContractError,
@@ -82,6 +84,7 @@ class Counters:
     #: Tokens spent by System 2 on this stream. The "tax" side of the ledger: Laya judges every window
     #: at a fixed local cost, while every explanation costs tokens, so an evaluation that reports only
     #: accuracy hides the half of the system that has a bill attached.
+    rca_reused: int = 0
     rca_prompt_tokens: int = 0
     rca_completion_tokens: int = 0
 
@@ -127,6 +130,7 @@ class Pipeline:
         # pipeline that picked up a new temperature mid-run would produce decisions that cannot be
         # attributed to a single calibration.
         self.calibrator = calibrator if calibrator is not None else settings.load_calibration()
+        self._recent_reports: Dict[str, tuple] = {}
         self.baselines = baselines if baselines is not None else BaselineTracker(
             window=settings.window.baseline_windows,
             long_window=settings.window.baseline_windows_long,
@@ -277,6 +281,37 @@ class Pipeline:
             self.bus.publish(alert, self.settings.topic(Topic.ALERTS), key=alert.service,
                              settings=self.settings)
 
+        # -- report reuse -------------------------------------------------------
+        # Measured before this existed: 3 of 8 alerts were repeats of an incident already analysed, and the
+        # repeats were 37% of the analysis bill. A repeated alert still gets its own report record; it just
+        # does not pay to regenerate one whose basis has not changed.
+        cooldown = self.settings.gate.reuse_report_within_s
+        signature = evidence_signature(digest, decision)
+        if cooldown > 0:
+            previous = self._recent_reports.get(alert.dedup_key)
+            if previous is not None:
+                taken_at, previous_signature, previous_report = previous
+                age = (digest.window_start - taken_at).total_seconds()
+                if age <= cooldown and previous_signature == signature:
+                    reused = replace(
+                        previous_report,
+                        alert_id=alert.alert_id,
+                        decision_id=decision.decision_id,
+                        rca_id=new_id("rca"),
+                        created_at=utc_now(),
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        estimated_prompt_tokens=0,
+                        reused_from=previous_report.rca_id,
+                    )
+                    trace.report = reused
+                    self.counters.rca_reports += 1
+                    self.counters.rca_reused += 1
+                    if publish:
+                        self.bus.publish(reused, self.settings.topic(Topic.RCA), key=reused.alert_id,
+                                         settings=self.settings)
+                    return trace
+
         # -- System 2 ----------------------------------------------------------
         # Spend the analysis budget only where the decision asked for reasoning. `always_analyze_alerts`
         # keeps the old behaviour (every alerting action); when it is off, `analyze_actions` decides which
@@ -307,6 +342,7 @@ class Pipeline:
             self.counters.rca_completion_tokens += report.completion_tokens
             if report.degraded:
                 self.counters.rca_degraded += 1
+            self._recent_reports[alert.dedup_key] = (digest.window_start, signature, report)
             if publish:
                 self.bus.publish(report, self.settings.topic(Topic.RCA), key=report.alert_id,
                                  settings=self.settings)
@@ -447,6 +483,25 @@ class Pipeline:
         # conclusion drawn from it, which is how the chain reads.
         chain.reverse()
         return chain
+
+
+def evidence_signature(digest: Digest, decision: Decision):
+    """What the report was actually about: action, severity, category and dominant error signature.
+
+    Reuse keys on this rather than on the dedup key alone. A service can stay in `resource_exhaustion` while
+    the evidence changes — a different error template, a higher severity — and replaying the old explanation
+    then would be worse than paying for a new one.
+    """
+    signature = ""
+    block = digest.metrics.get("error_signature")
+    if isinstance(block, dict):
+        signature = str(block.get("template") or "")
+    return (
+        decision.action.value,
+        getattr(decision.severity, "value", None),
+        getattr(decision.category, "value", None),
+        signature,
+    )
 
 
 def _analyze_action_set(spec: str) -> frozenset:
