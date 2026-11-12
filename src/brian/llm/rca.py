@@ -546,6 +546,11 @@ class RcaEngine:
             self.fallback_reports += 1
 
         report = self._from_rules(digest, decision, alert_id, events)
+        # What this report *would* have cost. The estimator already existed here to warn about oversized
+        # prompts, which meant the size of the bill was known and simply not recorded. Keeping it makes the
+        # analysis cost measurable without an API key, and lets a deterministic-mode run be compared with
+        # an LLM run on the same stream.
+        report.estimated_prompt_tokens = estimated
         report.latency_ms = (self._clock() - started) * 1000.0
         return report
 
@@ -598,6 +603,8 @@ class RcaEngine:
             model_id=result.model,
             prompt_version=PROMPT_VERSION,
             degraded=False,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
             lineage=self._lineage(digest, decision, "llm-rca", result.model),
         )
 

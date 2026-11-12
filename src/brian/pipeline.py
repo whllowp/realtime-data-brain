@@ -78,6 +78,11 @@ class Counters:
     laya_cache_hits: int = 0
     laya_latency_ms_total: float = 0.0
     rca_latency_ms_total: float = 0.0
+    #: Tokens spent by System 2 on this stream. The "tax" side of the ledger: Laya judges every window
+    #: at a fixed local cost, while every explanation costs tokens, so an evaluation that reports only
+    #: accuracy hides the half of the system that has a bill attached.
+    rca_prompt_tokens: int = 0
+    rca_completion_tokens: int = 0
 
     def as_dict(self) -> Dict[str, Any]:
         payload = dict(vars(self))
@@ -287,6 +292,11 @@ class Pipeline:
             trace.report = report
             self.counters.rca_reports += 1
             self.counters.rca_latency_ms_total += report.latency_ms or 0.0
+            # Charged per report, not just aggregated, so the spend can be attributed to the alert that
+            # caused it — and to the action that alert carries, which is how "was this analysis ever
+            # used?" becomes answerable rather than rhetorical.
+            self.counters.rca_prompt_tokens += report.prompt_tokens
+            self.counters.rca_completion_tokens += report.completion_tokens
             if report.degraded:
                 self.counters.rca_degraded += 1
             if publish:

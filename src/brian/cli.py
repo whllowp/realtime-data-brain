@@ -30,6 +30,7 @@ from .bus import JournalBus, MemoryBus, open_bus
 from .config import Settings, load_settings
 from .contracts import Event, Lineage, dumps, loads
 from .demo import DEFAULT_SEQUENCE, EXPECTED, LabeledWindow, flatten, generate
+from .cost import format_ledger, ledger_from_traces
 from .eval import Evaluator, format_report, gate_recommendation
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .laya.gate import explain_thresholds
@@ -111,6 +112,42 @@ def _action_style(action: Optional[str]) -> str:
 # --------------------------------------------------------------------------------------
 # demo
 # --------------------------------------------------------------------------------------
+
+
+def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
+    """Run the stream end to end and print what each half cost."""
+    sequence = (tuple(s.strip() for s in args.sequence.split(",") if s.strip())
+                if args.sequence else DEFAULT_SEQUENCE)
+    windows = generate(sequence=sequence, service=args.service, warmup_minutes=args.warmup,
+                       seed=args.seed)
+    events = flatten(windows)
+    pipeline = Pipeline(settings, bus=MemoryBus(), rca=RcaEngine(settings.llm))
+    traces = []
+    for event in events:
+        pipeline.ingest(event)
+        for trace in pipeline.drain_ready():
+            traces.append(trace)
+
+    traces.extend(pipeline.drain_ready(final=True))
+    ledger = ledger_from_traces(traces)
+    _print("=" * 78)
+    _print("brian cost - execution vs analysis")
+    _print("=" * 78)
+    _print("reasoner          %s" % pipeline.rca.mode)
+    _print("always_analyze    %s" % settings.gate.always_analyze_alerts)
+    _print("")
+    _print(format_ledger(ledger))
+    share = ledger.unused_share()
+    if share is not None and ledger.total_tokens:
+        _print("")
+        _print("Interpretation: %.1f%% of the analysis budget went to reports on alerts that did not"
+               % (100 * share))
+        _print("reach a human. That is the analogue of the paper's unused-artifact share.")
+    if ledger.total_tokens == 0:
+        _print("")
+        _print("No tokens were spent: the reasoner is in deterministic mode, so there was no analysis")
+        _print("bill to measure.")
+    return 0
 
 
 def cmd_demo(args: argparse.Namespace, settings: Settings) -> int:
@@ -1016,6 +1053,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="Flink → Laya → LLM real-time anomaly triage, with Kafka as the memory.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+
+    cost = sub.add_parser("cost", help="run the stream and report execution and analysis cost")
+    cost.add_argument("--sequence", default="", help="comma-separated scenarios")
+    cost.add_argument("--service", default="checkout-api")
+    cost.add_argument("--warmup", type=int, default=20)
+    cost.add_argument("--seed", type=int, default=7)
+    cost.set_defaults(func=cmd_cost)
 
     demo = sub.add_parser("demo", help="run the full chain over synthetic telemetry")
     demo.add_argument("--sequence", help="comma-separated scenario names (default: the built-in sequence)")

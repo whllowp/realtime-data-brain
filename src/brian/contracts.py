@@ -691,6 +691,20 @@ class RcaReport:
     prompt_version: Optional[str] = None
     latency_ms: Optional[float] = None
     degraded: bool = False
+    #: Tokens this report cost, carried on the artifact itself.
+    #:
+    #: The LLM client already counts them, but until now they were only available as a process-wide
+    #: total, so no report could be charged. Without a per-report number the expensive half of this
+    #: system is invisible to evaluation — which is the mistake "The RSI Tax" (arXiv:2611.13524) is
+    #: about: measuring accuracy while ignoring what producing the improvement cost.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    #: Prompt size the builder measured, whether or not a model was called.
+    #:
+    #: Distinct from `prompt_tokens` on purpose: that one is what a provider billed, this one is what the
+    #: request weighed. In deterministic mode nothing is billed and this is the only cost signal there is;
+    #: with a model configured the two should agree closely, and a large gap means the estimate is drifting.
+    estimated_prompt_tokens: int = 0
     created_at: datetime = field(default_factory=utc_now)
     lineage: Lineage = field(default_factory=Lineage)
 
