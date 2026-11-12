@@ -155,7 +155,8 @@ def rca_json_schema() -> Dict[str, Any]:
 
 def build_rca_messages(digest: Digest, decision: Decision,
                        events: Optional[Sequence[Event]] = None,
-                       max_events: int = 20) -> List[Dict[str, str]]:
+                       max_events: int = 20,
+                       note: Optional[str] = None) -> List[Dict[str, str]]:
     """Assemble the chat messages for one alert.
 
     The event list is capped (`max_events`) and selected deliberately: the most recent events
@@ -191,6 +192,16 @@ def build_rca_messages(digest: Digest, decision: Decision,
     lines.append("")
     lines.append("## The window summary the classifier read (verbatim)")
     lines.append(digest.interpretation or "(no summary rendered)")
+
+    if note:
+        # Placed before the measurements on purpose: standing lessons are a frame for reading the numbers,
+        # not a conclusion about them. The block states its own provenance so the model can weigh a rule
+        # distilled from three earlier alerts differently from a measurement of this window.
+        lines.append("")
+        lines.append("## Standing notes from earlier alerts (bounded, may be stale; prefer this window's"
+                     " measurements where they disagree)")
+        lines.append(note.strip())
+
     lines.append("")
     lines.append("## Machine-readable measurements for the same window")
     lines.append(metrics)
