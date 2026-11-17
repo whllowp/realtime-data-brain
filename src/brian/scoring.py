@@ -20,6 +20,7 @@ measured on two SMD hosts must not become the production default by accident.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from .config import Settings
@@ -106,6 +107,26 @@ def deviation_result(digest: Digest) -> Optional[LayaResult]:
             "answers_absent": ["category", "severity", "needs_human", "blast_radius"],
         },
     )
+
+
+#: A rendered ratio, e.g. `1.07x` or `3.60x`. The host renderer prints them inside parentheses.
+_RATIO = re.compile(r"(-?\d+(?:\.\d+)?)x\b")
+
+
+def text_deviation(text: str) -> Optional[float]:
+    """The loudest deviation a reader of the rendered *text* can see.
+
+    `deviation_score` reads the structured `MetricValue` fields, so it knows numbers the rendering may
+    have dropped, rounded or omitted (a ratio suppressed by `host_ratio_floor`, a level printed as
+    `0.00`). The engine only ever sees the text. When those two readers disagree, the difference is an
+    information loss that belongs to the renderer, not to the model — so the ceiling reported for "what
+    the state can support" has to be measured twice, once on each side of that boundary.
+
+    Returns `None` when the text carries no ratio: a window with no baseline yet renders a sentence
+    ("No baseline is available yet"), and scoring it as a perfect zero would be inventing evidence.
+    """
+    values = [abs(float(match) - 1.0) for match in _RATIO.findall(text or "")]
+    return max(values) if values else None
 
 
 def judge(digest: Digest, settings: Settings, laya: LayaClient) -> LayaResult:

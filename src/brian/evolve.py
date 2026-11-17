@@ -49,6 +49,7 @@ from .eval import EvalReport, Evaluator
 from .laya import LayaClient
 from .llm.prompts import evidence_coverage
 from .pipeline import Pipeline, WindowTrace
+from .scoring import text_deviation
 from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 from .streams import Stream, flatten_streams, summarise
 
@@ -599,10 +600,19 @@ def state_ceiling(settings: Settings, streams: Sequence[Stream]) -> Dict[str, An
     pooled AUC would measure the scale difference as much as the signal. `None` where a recording has one
     class only — a ceiling that cannot be computed is not evidence of a weak state.
 
-    On SMD this reader reaches 0.796 (machine-1-6) and 0.589 (machine-2-2) while the engine reaches
-    0.674 and 0.347, which is the fact a cost-only round table cannot show.
+    Two readers, because the state and the text are not the same thing. `by_stream` reads the
+    structured `MetricValue` fields (it can see a ratio the renderer suppressed or a level it rounded
+    away); `text_by_stream` parses only the characters the engine is given, out of
+    `digest.interpretation`. When the two disagree, the gap belongs to the renderer, and a model
+    cannot be judged against a ceiling that includes numbers its input never contained.
+
+    On SMD the field reader reaches 0.827 (machine-1-6) and 0.597 (machine-2-2) while the engine
+    reaches 0.674 and 0.347 on three features, and 0.517 and 0.299 on all eight. The two ceiling
+    columns agree, so that gap is the model's, not the renderer's — the fact a cost-only round table
+    cannot show.
     """
     by_stream: Dict[str, Optional[float]] = {}
+    text_by_stream: Dict[str, Optional[float]] = {}
     for stream in streams:
         windower = Windower(
             size_s=settings.window.size_s,
@@ -619,6 +629,7 @@ def state_ceiling(settings: Settings, streams: Sequence[Stream]) -> Dict[str, An
         labels = {(window.service, int(window.window_start.timestamp())):
                   bool((window.expected or {}).get("is_anomaly")) for window in stream.windows}
         scores: List[float] = []
+        text_scores: List[float] = []
         truth: List[int] = []
 
         def record(digest: Any) -> None:
@@ -630,6 +641,7 @@ def state_ceiling(settings: Settings, streams: Sequence[Stream]) -> Dict[str, An
                           (_deviation(entry) for entry in _comparison_values(comparison))
                           if value is not None]
             scores.append(max(deviations) if deviations else 0.0)
+            text_scores.append(text_deviation(getattr(digest, "interpretation", "") or "") or 0.0)
             truth.append(1 if labels[key] else 0)
 
         def consume(aggregators: Sequence[Any]) -> None:
@@ -644,8 +656,11 @@ def state_ceiling(settings: Settings, streams: Sequence[Stream]) -> Dict[str, An
             windower.add(event)
             consume(windower.ready())
         consume(windower.flush())
-        by_stream[stream.name] = auc(scores, [bool(v) for v in truth]) if scores else None
-    return {"by_stream": by_stream, "windows": sum(len(s.windows) for s in streams)}
+        labelled = [bool(v) for v in truth]
+        by_stream[stream.name] = auc(scores, labelled) if scores else None
+        text_by_stream[stream.name] = auc(text_scores, labelled) if text_scores else None
+    return {"by_stream": by_stream, "text_by_stream": text_by_stream,
+            "windows": sum(len(s.windows) for s in streams)}
 
 
 def _comparison_values(comparison: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -1326,13 +1341,18 @@ def format_round(result: RoundResult) -> str:
         lines.append("no candidates were tried")
     if result.ceiling:
         by_stream = result.ceiling.get("by_stream") or {}
+        text_by_stream = result.ceiling.get("text_by_stream") or {}
         lines.append("")
         lines.append("state ceiling  what a trivial reader of the same digest recovers")
         for name in sorted(by_stream):
-            value = by_stream[name]
-            lines.append("  %-22s %s" % (name, "n/a" if value is None else "%.3f" % value))
-        lines.append("  a threshold on the loudest rendered deviation from the baseline; the engine has")
-        lines.append("  to beat this to be worth its own cost, and no cost change can move it")
+            fields = by_stream[name]
+            text = text_by_stream.get(name)
+            lines.append("  %-22s fields %-5s  text %-5s"
+                         % (name,
+                            "n/a" if fields is None else "%.3f" % fields,
+                            "n/a" if text is None else "%.3f" % text))
+        lines.append("  'fields' reads the MetricValue tree, 'text' reads only the characters the engine")
+        lines.append("  is given. A gap between them is the renderer's, and no cost change can move either.")
     lines.append("")
     lines.append("Interpretation: 'accept' means one measured configuration was better than another on this")
     lines.append("stream and lost nothing this evaluator can see. It is not a claim that the change is right")

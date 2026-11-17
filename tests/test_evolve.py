@@ -39,6 +39,7 @@ from brian.evolve import (
     state_ceiling,
 )
 from brian.llm.prompts import evidence_coverage, evidence_floor
+from brian.scoring import text_deviation
 from brian.streams import Stream
 
 
@@ -807,17 +808,56 @@ def test_the_ceiling_is_per_recording_because_two_hosts_do_not_share_a_scale():
     assert all(value is not None for value in ceiling["by_stream"].values())
 
 
+def test_the_ceiling_is_measured_on_the_text_as_well_as_the_fields(tmp_path):
+    """A field reader can see numbers the rendering dropped; the engine cannot.
+
+    If the two ceilings disagree, the gap belongs to the renderer, and pitching the engine against the
+    field ceiling would be asking it to read information its input never carried.
+    """
+    stream = _cpu_stream(spikes=True)
+
+    ceiling = state_ceiling(_ceiling_settings(), [stream])
+
+    assert set(ceiling["text_by_stream"]) == set(ceiling["by_stream"])
+    for name, text in ceiling["text_by_stream"].items():
+        fields = ceiling["by_stream"][name]
+        if text is None or fields is None:
+            continue
+        # Not an ordering: the text reader parses printed ratios and the field reader prefers the long
+        # horizon, so either can be a hair higher (the demo stream has text 1.000 against fields 0.995).
+        # What must hold is that the two readers of the same windows agree, because a large gap would
+        # mean the renderer dropped information the ceiling was crediting to the state.
+        assert abs(text - fields) <= 0.10, (name, text, fields)
+
+
+def test_a_window_without_a_ratio_scores_zero_rather_than_none():
+    """The first windows render 'No baseline is available yet', which is not evidence of an incident."""
+    assert text_deviation("No baseline is available yet for this host (fewer than 3 prior windows).") is None
+    assert text_deviation("CPU 0.19 (baseline 0.17, 1.07x).") == pytest.approx(0.07)
+
+
+def test_the_text_reader_takes_the_loudest_ratio_it_can_see():
+    text = "CPU 0.19 (baseline 0.17, 1.07x). | load 1m 0.10 (baseline 0.07, 1.32x)."
+
+    assert text_deviation(text) == pytest.approx(0.32)
+
+
 def test_the_table_shows_the_ceiling_beside_the_candidates(tmp_path):
     """A round table that hides the ceiling invites attributing the state's signal to the model."""
     result = _round(tmp_path, accepted=True)
-    result.ceiling = {"by_stream": {"machine-1-6": 0.8269, "machine-2-2": None}, "windows": 948}
+    result.ceiling = {
+        "by_stream": {"machine-1-6": 0.8269, "machine-2-2": None},
+        "text_by_stream": {"machine-1-6": 0.7901, "machine-2-2": None},
+        "windows": 948,
+    }
 
     table = format_round(result)
 
     assert "state ceiling" in table
     assert "machine-1-6" in table and "0.827" in table
+    assert "0.790" in table
     assert "n/a" in table
-    assert "beat this to be worth its own cost" in table
+    assert "reads only the characters the engine" in table
 
 
 
