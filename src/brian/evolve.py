@@ -34,6 +34,7 @@ the missing capability named. A loop that grades itself L4 is a self-confirming 
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,12 +43,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from .bus import MemoryBus
 from .config import ENV_VARS, Settings
 from .contracts import Event
-from .cost import ledger_from_traces
-from .demo import LabeledWindow, flatten
+from .cost import CostLedger, ledger_from_traces
 from .eval import EvalReport, Evaluator
 from .laya import LayaClient
 from .llm.prompts import evidence_coverage
 from .pipeline import Pipeline, WindowTrace
+from .streams import Stream, flatten_streams, summarise
 
 #: Build the reference evidence pool at this cap, so every candidate's coverage is measured against the
 #: same pool rather than against the candidate's own truncation. It only has to be larger than any
@@ -156,6 +157,16 @@ def catalogue() -> List[Candidate]:
             field="confidence_auto",
             value=0.85,
         ),
+        Candidate(
+            name="anomaly-p-40",
+            hypothesis="On RCAEval the engine puts faulted and healthy windows at nearly the same "
+                       "probability (~0.36), so the neutral threshold silences it; asking whether a "
+                       "lower bar recovers recall without raising false positives faster is the only "
+                       "way the labels can prefer one configuration to another on that domain.",
+            section="gate",
+            field="anomaly_probability",
+            value=0.40,
+        ),
     ]
 
 
@@ -177,6 +188,9 @@ class Measurement:
     coverage: Dict[str, float] = field(default_factory=dict)
     trial_s: float = 0.0
     reasoner: str = ""
+    windows: int = 0
+    """Judged windows behind the rates. Carried because a rate without its sample size is a rumour."""
+    confusion: Dict[str, int] = field(default_factory=dict)
 
     @property
     def coverage_floor(self) -> float:
@@ -188,6 +202,8 @@ class Measurement:
             "recall": _round(self.recall),
             "fpr": _round(self.fpr),
             "precision": _round(self.precision),
+            "windows": self.windows,
+            "confusion": dict(self.confusion),
             "reports": self.reports,
             "tokens_per_report": _round(self.tokens_per_report, 1),
             "tokens_per_window": _round(self.tokens_per_window, 1),
@@ -203,17 +219,75 @@ def _round(value: Optional[float], digits: int = 4) -> Optional[float]:
     return None if value is None else round(value, digits)
 
 
-def build_pool(settings: Settings, windows: Sequence[LabeledWindow]) -> List[List[Event]]:
+def apply_overrides(settings: Settings, overrides: Dict[str, Any]) -> Settings:
+    """Apply a stream file's base configuration before any candidate is measured.
+
+    The overrides are part of the *data*, not of the candidates: they describe what it takes to run
+    this pipeline on this dataset at all (a different domain needs its own threshold, because the
+    shipped one was calibrated elsewhere). They are applied once, outside the loop, so every
+    candidate is compared on the same base and the round record says what that base was.
+    """
+    changed: Dict[str, Any] = {}
+    for section, values in overrides.items():
+        current = getattr(settings, section, None)
+        if current is None:
+            raise ValueError("stream overrides name an unknown settings section: %r" % section)
+        if not isinstance(values, dict):
+            raise ValueError("stream overrides for %r must be an object of fields" % section)
+        unknown = sorted(set(values) - set(vars(current)))
+        if unknown:
+            raise ValueError("%s has no field(s) %s" % (section, ", ".join(unknown)))
+        changed[section] = replace(current, **values)
+    return settings.with_overrides(**changed)
+
+
+def _tally(report: EvalReport) -> Dict[str, int]:
+    """Confusion counts, counted the same way `EvalReport` counts them.
+
+    Recomputed here rather than read off the report because a multi-stream measurement needs the
+    counts, not each stream's rate: averaging rates from recordings of different lengths weights a
+    short recording the same as a long one, which is how a 3-window fluke becomes a 30% move.
+    """
+    counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+    for score in report.scores:
+        if score.predicted_anomaly is None:
+            continue
+        if score.expected_anomaly:
+            counts["tp" if score.predicted_anomaly else "fn"] += 1
+        else:
+            counts["fp" if score.predicted_anomaly else "tn"] += 1
+    return counts
+
+
+def _rate(counts: Dict[str, int], numerator: str, denominator: str) -> Optional[float]:
+    bottom = counts[numerator] + counts[denominator]
+    return counts[numerator] / bottom if bottom else None
+
+
+def _p95(values: Sequence[float]) -> Optional[float]:
+    ordered = sorted(value for value in values if value)
+    if not ordered:
+        return None
+    return ordered[min(len(ordered) - 1, int(math.ceil(0.95 * len(ordered))) - 1)]
+
+
+def build_pool(settings: Settings, streams: Sequence[Stream]) -> List[List[Event]]:
     """The full recent-event history of every alert, captured once at a fixed, generous cap.
 
     Coverage must be judged against a pool that does not depend on the candidate being judged, or a
-    candidate that truncates harder would look safer by shrinking its own denominator.
+    candidate that truncates harder would look safer by shrinking its own denominator. One pipeline
+    per recording, for the same reason the evaluator runs one per recording: each recording has its
+    own baseline, and sharing it measures the seam between two runs.
     """
     reference = replace(settings.llm, max_context_events=REFERENCE_EVENTS)
-    pipeline = Pipeline(settings.with_overrides(llm=reference), bus=MemoryBus(),
-                        keep_events=REFERENCE_EVENTS)
-    traces = _run(pipeline, flatten(windows))
-    return [list(trace.history) for trace in traces if trace.report is not None and trace.history]
+    pool: List[List[Event]] = []
+    for stream in streams:
+        pipeline = Pipeline(settings.with_overrides(llm=reference), bus=MemoryBus(),
+                            keep_events=REFERENCE_EVENTS)
+        traces = _run(pipeline, flatten_streams([stream]))
+        pool.extend(list(trace.history) for trace in traces
+                    if trace.report is not None and trace.history)
+    return pool
 
 
 def _run(pipeline: Pipeline, events: Sequence[Event]) -> List[WindowTrace]:
@@ -226,32 +300,44 @@ def _run(pipeline: Pipeline, events: Sequence[Event]) -> List[WindowTrace]:
 
 
 def cost_run(settings: Settings,
-             windows: Sequence[LabeledWindow]) -> Tuple[Any, List[WindowTrace], str]:
-    """Run the stream end to end and return its ledger, its traces and the reasoner it used.
+             streams: Sequence[Stream]) -> Tuple[CostLedger, List[WindowTrace], str]:
+    """Run every stream end to end and return one ledger over all of them.
 
     The same code path as `brian cost`, deliberately: an improvement loop that measured a cheaper,
     simplified pipeline would be optimising something other than the thing that ships.
     """
-    pipeline = Pipeline(settings, bus=MemoryBus())
-    traces = _run(pipeline, flatten(windows))
-    return ledger_from_traces(traces), traces, pipeline.rca.mode
+    traces: List[WindowTrace] = []
+    reasoner = ""
+    for stream in streams:
+        pipeline = Pipeline(settings, bus=MemoryBus())
+        traces.extend(_run(pipeline, flatten_streams([stream])))
+        reasoner = pipeline.rca.mode or reasoner
+    return ledger_from_traces(traces), traces, reasoner
 
 
-def measure(settings: Settings, candidate: Optional[Candidate], windows: Sequence[LabeledWindow],
+def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequence[Stream],
             pool: Sequence[Sequence[Event]], clock=None) -> Measurement:
     """Measure one configuration: detection from labels, cost from the ledger, coverage from the pool.
 
-    A fresh `LayaClient` and a fresh `Pipeline` per measurement, so no result depends on the order the
-    candidates were tried in. The model is deterministic, so the quality signal is reproducible; the
-    cost signal is a token ledger and does not involve sampling at all.
+    A fresh `LayaClient` and a fresh `Pipeline` per measurement *and per recording*, so no result
+    depends on the order the candidates were tried in, and no recording is scored against another
+    recording's history. The model is deterministic, so the quality signal is reproducible; the cost
+    signal is a token ledger and does not involve sampling at all.
     """
     import time as _time
 
     started = (_time.perf_counter if clock is None else clock)()
     applied = candidate.apply(settings) if candidate is not None else settings
-    report: EvalReport = Evaluator(applied, laya=LayaClient(applied.laya)).run(windows)
 
-    ledger, _traces, reasoner = cost_run(applied, windows)
+    counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+    latencies: List[float] = []
+    for stream in streams:
+        report = Evaluator(applied, laya=LayaClient(applied.laya)).run(stream.windows)
+        for key, value in _tally(report).items():
+            counts[key] += value
+        latencies.extend(score.latency_ms for score in report.scores if score.latency_ms)
+
+    ledger, _traces, reasoner = cost_run(applied, streams)
     cap = applied.llm.max_context_events
     readings = [evidence_coverage(history, cap) for history in pool]
     coverage = (
@@ -266,16 +352,18 @@ def measure(settings: Settings, candidate: Optional[Candidate], windows: Sequenc
 
     return Measurement(
         candidate=candidate.name if candidate is not None else "baseline",
-        recall=report.recall,
-        fpr=report.false_positive_rate,
-        precision=report.precision,
+        recall=_rate(counts, "tp", "fn"),
+        fpr=_rate(counts, "fp", "tn"),
+        precision=_rate(counts, "tp", "fp"),
         reports=ledger.reports,
         tokens_per_report=ledger.tokens_per_report,
         tokens_per_window=ledger.tokens_per_window,
-        latency_p95_ms=report.latency_p95,
+        latency_p95_ms=_p95(latencies),
         coverage=coverage,
         trial_s=(_time.perf_counter if clock is None else clock)() - started,
         reasoner=reasoner,
+        windows=counts["tp"] + counts["fp"] + counts["tn"] + counts["fn"],
+        confusion=counts,
     )
 
 
@@ -347,6 +435,11 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
                        "keeps less evidence: %s" % detail)
 
     before, after = baseline.tokens_per_report, trial.tokens_per_report
+    if before is None or after is None:
+        side = "baseline" if before is None else "candidate"
+        return Verdict(trial.candidate, False, "no-reports",
+                       "the %s run produced no report, so tokens/report is undefined; "
+                       "a cost comparison needs at least one alert on each side" % side)
     if before and after <= before * (1.0 - rules.min_gain):
         return Verdict(trial.candidate, True, "cost",
                        "%.0f -> %.0f tokens/report (%.1f%%)"
@@ -394,51 +487,52 @@ def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
-def run_round(settings: Settings, windows: Sequence[LabeledWindow],
+def run_round(settings: Settings, streams: Sequence[Stream],
               selected: Optional[Sequence[Candidate]] = None,
               rules: Optional[EvolveRules] = None,
-              service: str = "checkout-api",
+              source: str = "demo",
               on_candidate: Optional[Callable[[Candidate, Measurement, Verdict], None]] = None,
               ) -> RoundResult:
     """One full pass: build the reference pool, measure the baseline, then each candidate.
 
-    Everyone is measured against the *same* window stream and the *same* evidence pool, so a candidate
-    cannot improve its own score by changing what it is scored on.
+    Everyone is measured against the *same* recordings and the *same* evidence pool, so a candidate
+    cannot improve its own score by changing what it is scored on. `source` records where the
+    recordings came from, because "accept" against a hand-written suite and "accept" against
+    fault-injection data are different claims and the version file must not conflate them.
     """
     started = _now()
     active_rules = rules if rules is not None else EvolveRules()
     chosen = list(selected) if selected is not None else catalogue()
-    pool = build_pool(settings, windows)
-    baseline = measure(settings, None, windows, pool)
+    pool = build_pool(settings, streams)
+    baseline = measure(settings, None, streams, pool)
 
     trials: List[Tuple[Candidate, Measurement, Verdict]] = []
     for candidate in chosen:
-        trial = measure(settings, candidate, windows, pool)
+        trial = measure(settings, candidate, streams, pool)
         verdict = decide(baseline, trial, active_rules, veto=candidate.veto)
         trials.append((candidate, trial, verdict))
         if on_candidate is not None:
             on_candidate(candidate, trial, verdict)
 
-    scored = [window for window in windows if getattr(window, "scored", True)]
     return RoundResult(
         started_at=started,
         finished_at=_now(),
-        stream={
-            "service": service,
-            "windows": len(windows),
-            "scored": len(scored),
-            "anomalous": sum(1 for window in scored
-                             if (window.expected or {}).get("is_anomaly")),
-            "events": sum(len(window.events) for window in windows),
-        },
+        stream={"source": source, **summarise(streams)},
         rules=active_rules,
         baseline=baseline,
         trials=trials,
     )
 
 
-def persist(root: Path, result: RoundResult) -> Dict[str, Any]:
-    """Write the round, the append-only ledger line, and a version file per accepted change.
+def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> Dict[str, Any]:
+    """Write the round, the append-only ledger line, and (optionally) a version per accepted change.
+
+    The round is recorded even when nothing is accepted and even when nothing is applied. A record
+    that only exists for accepted changes would let the next round re-propose a settled question,
+    which is precisely the "scientific amnesia" the survey names: behaviour improves across campaigns
+    while no methodological knowledge accumulates. `write_versions=False` therefore records the
+    measurement without claiming the change was integrated — deciding and integrating are different
+    facts, and the ladder grades them separately.
 
     The version file exists for the rollback requirement in both surveys' open problems: a change that
     cannot be named, diffed and reversed is not a persisted improvement, it is a drift. Each file holds
@@ -461,10 +555,13 @@ def persist(root: Path, result: RoundResult) -> Dict[str, Any]:
             "started_at": result.started_at,
             "accepted": result.accepted,
             "rejected": [v.candidate for _c, _m, v in result.trials if not v.accepted],
+            "applied": list(result.accepted) if write_versions else [],
             "baseline_tokens_per_report": result.baseline.to_dict()["tokens_per_report"],
         }) + "\n")
 
     written: List[str] = []
+    if not write_versions:
+        return {"round": str(round_path), "versions": written}
     existing = sorted(versions.glob("v*.json"))
     version = 0
     for path in existing:
@@ -567,12 +664,12 @@ def format_round(result: RoundResult) -> str:
     lines.append("-" * 96)
 
     def row(m: Measurement, label: str, verdict: str) -> str:
-        return "%-22s %7s %7s %9.0f %9.1f %8s %-9s" % (
+        return "%-22s %7s %7s %9s %9s %8s %-9s" % (
             label,
             "n/a" if m.recall is None else "%.3f" % m.recall,
             "n/a" if m.fpr is None else "%.3f" % m.fpr,
-            m.tokens_per_report,
-            m.tokens_per_window,
+            "n/a" if m.tokens_per_report is None else "%.0f" % m.tokens_per_report,
+            "n/a" if m.tokens_per_window is None else "%.1f" % m.tokens_per_window,
             "%.0f%%" % (100 * m.coverage_floor) if m.coverage else "n/a",
             verdict,
         )

@@ -310,6 +310,36 @@ HOST_METRICS: Tuple[MetricSpec, ...] = (
 HOST_BASELINE_KEYS: Tuple[str, ...] = tuple(spec.key for spec in HOST_METRICS)
 
 
+def digest_specs(profile: str) -> Tuple[MetricSpec, ...]:
+    """The metric catalog a digest profile reads.
+
+    The catalogs live here because they describe what a metric *is*; this maps a deployment's profile
+    name onto one of them. Host telemetry is a separate catalog, not a superset: a feed carrying both
+    request and host series was measured to score worse than either alone, because the model spends
+    attention on whichever series is noisiest.
+    """
+    if profile == "service":
+        return DEFAULT_METRICS
+    if profile == "host":
+        return HOST_METRICS
+    raise ValueError("unknown digest profile %r (service|host)" % (profile,))
+
+
+def baseline_keys(profile: str) -> Tuple[str, ...]:
+    """The baseline keys a profile accumulates.
+
+    A tracker built with the service keys silently ignores host metrics: `observe` looks up each key
+    in the window's metrics, finds none, and appends nothing. The window then renders "no baseline"
+    forever, every request is identical, the Laya cache returns one answer, and the domain looks
+    undetectable when the fault is in the wiring.
+    """
+    if profile == "service":
+        return BASELINE_KEYS
+    if profile == "host":
+        return HOST_BASELINE_KEYS
+    raise ValueError("unknown digest profile %r (service|host)" % (profile,))
+
+
 
 # --------------------------------------------------------------------------------------
 # aggregation

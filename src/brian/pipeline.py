@@ -56,7 +56,7 @@ from .contracts import (
 from .laya.gate import GateOutcome, apply_gate
 from .laya.client import LayaClient, LayaError
 from .llm.rca import RcaEngine
-from .state import BaselineTracker, Windower, build_digest
+from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 from .topics import Topic
 
 
@@ -134,11 +134,13 @@ class Pipeline:
         self.baselines = baselines if baselines is not None else BaselineTracker(
             window=settings.window.baseline_windows,
             long_window=settings.window.baseline_windows_long,
+            keys=baseline_keys(settings.digest.profile),
         )
         self.windower = Windower(
             size_s=settings.window.size_s,
             slide_s=settings.window.slide_s,
             allowed_lateness_s=settings.window.allowed_lateness_s,
+            specs=digest_specs(settings.digest.profile),
             min_events=settings.window.min_events,
         )
         self.counters = Counters()
@@ -185,7 +187,7 @@ class Pipeline:
         aggregators = self.windower.flush() if final else self.windower.ready()
         traces: List[WindowTrace] = []
         for aggregator in aggregators:
-            digest = build_digest(aggregator, self.baselines)
+            digest = build_digest(aggregator, self.baselines, profile=self.settings.digest.profile)
             trace = self.process_digest(digest, events=self.recent_events(digest.service, self.settings.llm.max_context_events))
             # Only now does this window become baseline material for *later* windows.
             self.baselines.observe(digest.service, digest.metrics)

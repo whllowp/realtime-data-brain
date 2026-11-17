@@ -294,12 +294,36 @@ class CalibrationSettings:
 
 
 @dataclass
+class DigestSettings:
+    """Which telemetry catalog the digest reads and how it renders.
+
+    `"service"` is the shipped HTTP-service profile (error/latency/throughput, resources as support).
+    `"host"` is OS-level host telemetry (CPU, load, memory, disk, network) with no request or error
+    series at all. The two are separate profiles rather than one merged catalog because merging them
+    was measured to dilute the signal: a window with both request and host metrics gave a lower AUC
+    than either alone, since the model spends attention on whichever series happens to be noisiest.
+
+    The profile has to be configurable rather than hardcoded because the improvement loop can only
+    verify cost changes on a domain the pipeline can actually *read*. SMD is host telemetry; with the
+    service profile its metrics are dropped silently, every window renders as "no baseline", the
+    Laya client caches one answer, and the round reports "no report was produced" about a domain it
+    never looked at.
+    """
+
+    profile: str = "service"
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"profile": self.profile}
+
+
+@dataclass
 class Settings:
     kafka: KafkaSettings = field(default_factory=KafkaSettings)
     laya: LayaSettings = field(default_factory=LayaSettings)
     llm: LlmSettings = field(default_factory=LlmSettings)
     gate: GateThresholds = field(default_factory=GateThresholds)
     window: WindowSettings = field(default_factory=WindowSettings)
+    digest: DigestSettings = field(default_factory=DigestSettings)
     calibration: CalibrationSettings = field(default_factory=CalibrationSettings)
     log_level: str = "info"
     #: Emit every record to stdout as JSON (useful when the journal is the only memory).
@@ -445,6 +469,9 @@ def load_settings() -> Settings:
         baseline_windows_long=_int("BRIAN_BASELINE_WINDOWS_LONG", window_defaults.baseline_windows_long),
             min_events=_int("BRIAN_MIN_WINDOW_EVENTS", window_defaults.min_events),
         ),
+        digest=DigestSettings(
+            profile=_env("BRIAN_DIGEST_PROFILE", "service") or "service",
+        ),
         calibration=CalibrationSettings(
             path=_env("BRIAN_CALIBRATION_PATH", DEFAULT_CALIBRATION_PATH) or DEFAULT_CALIBRATION_PATH,
             enabled=_flag("BRIAN_CALIBRATION_ENABLED", True),
@@ -477,4 +504,5 @@ ENV_VARS: Dict[Tuple[str, str], str] = {
     ("window", "baseline_windows"): "BRIAN_BASELINE_WINDOWS",
     ("window", "baseline_windows_long"): "BRIAN_BASELINE_WINDOWS_LONG",
     ("window", "min_events"): "BRIAN_MIN_WINDOW_EVENTS",
+    ("digest", "profile"): "BRIAN_DIGEST_PROFILE",
 }

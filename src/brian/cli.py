@@ -35,6 +35,7 @@ from .eval import Evaluator, format_report, gate_recommendation
 from .evolve import (
     EVOLVE_DIR,
     EvolveRules,
+    apply_overrides,
     catalogue,
     format_round,
     grade,
@@ -49,6 +50,7 @@ from .laya.qcatalog import CATALOG_VERSION, catalog_hash, describe as describe_c
 from .llm.rca import RcaEngine
 from .pipeline import Pipeline
 from .state import BaselineTracker, Windower, build_digest
+from .streams import Stream, load_stream_file, summarise
 from .topics import Topic, describe as describe_topics, key_field
 
 
@@ -183,15 +185,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("brian evolve - recorded rounds (oldest first)")
         _print("=" * 78)
         for index, record in enumerate(rounds, start=1):
-            baseline = (record.get("baseline") or {}).get("tokens_per_report") or 0.0
+            measured = (record.get("baseline") or {}).get("tokens_per_report")
+            baseline = "n/a" if measured is None else "%.0f" % measured
             trials = record.get("trials") or []
             accepted = record.get("accepted") or []
-            kept = [(t.get("measurement") or {}).get("tokens_per_report") or 0.0
+            kept = [(t.get("measurement") or {}).get("tokens_per_report")
                     for t in trials if (t.get("verdict") or {}).get("accepted")]
+            kept = [value for value in kept if value is not None]
             after = "%.0f" % min(kept) if kept else "(none accepted)"
-            _print("%2d  %s  accepted=%-24s tokens/report %.0f -> %s"
+            applied = record.get("applied")
+            mark = "" if applied is None or applied else "  [recorded, not applied]"
+            _print("%2d  %s  accepted=%-24s tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
-                      ",".join(accepted) or "-", baseline, after))
+                      ",".join(accepted) or "-", baseline, after, mark))
         return 0
 
     if args.grade:
@@ -229,8 +235,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
 
     sequence = (tuple(part.strip() for part in args.sequence.split(",") if part.strip())
                 if args.sequence else DEFAULT_SEQUENCE)
-    windows = generate(sequence=sequence, service=args.service, warmup_minutes=args.warmup,
-                       seed=args.seed)
+    if args.stream_file:
+        stream_set = load_stream_file(Path(args.stream_file))
+        settings = apply_overrides(settings, stream_set.overrides)
+        streams = stream_set.streams
+        source = stream_set.dataset or Path(args.stream_file).name
+    else:
+        windows = generate(sequence=sequence, service=args.service, warmup_minutes=args.warmup,
+                           seed=args.seed)
+        streams = [Stream(name=args.service, windows=list(windows),
+                          meta={"service": args.service, "seed": args.seed})]
+        source = "demo"
 
     known = {candidate.name: candidate for candidate in catalogue()}
     if args.candidates:
@@ -252,32 +267,33 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("  %-22s %s" % (name, reason))
         _print("")
 
-    _print("evolving over %d windows (%d scored, %d anomalous, %d events)"
-           % (len(windows), sum(1 for w in windows if w.scored),
-              sum(1 for w in windows if w.scored and (w.expected or {}).get("is_anomaly")),
-              sum(len(w.events) for w in windows)))
+    totals = summarise(streams)
+    base_overrides = stream_set.overrides if args.stream_file else {}
+    for section, values in base_overrides.items():
+        _print("base override   %s: %s" % (section, ", ".join(
+            "%s=%r" % (key, value) for key, value in sorted(values.items()))))
+    _print("evolving over %d recording(s), %d windows (%d scored, %d anomalous, %d events)"
+           % (totals["streams"], totals["windows"], totals["scored"], totals["anomalous"],
+              totals["events"]))
     _print("measuring baseline…")
-    result = run_round(settings, windows, selected=selected, rules=rules,
-                       service=args.service)
+    result = run_round(settings, streams, selected=selected, rules=rules, source=source)
     _print("")
     _print(format_round(result))
 
-    if args.apply:
-        written = persist(root, result)
-        _print("")
-        _print("persisted round %s" % written.get("round"))
-        for version_path in written.get("versions") or []:
-            _print("  version %s" % version_path)
-            try:
-                payload = json.loads(Path(version_path).read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            _print("    export %s" % payload.get("env"))
-            _print("    rollback: %s" % payload.get("rollback"))
-    elif result.accepted:
-        _print("")
-        _print("Dry run: accepted changes are printed but not written. Re-run with --apply to")
-        _print("persist a version file and the environment variables that reproduce it.")
+    written = persist(root, result, write_versions=args.apply)
+    _print("")
+    _print("recorded round %s" % written.get("round"))
+    for version_path in written.get("versions") or []:
+        _print("  version %s" % version_path)
+        try:
+            payload = json.loads(Path(version_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        _print("    export %s" % payload.get("env"))
+        _print("    rollback: %s" % payload.get("rollback"))
+    if result.accepted and not args.apply:
+        _print("Dry run: the round is recorded so the next run will not re-propose it, but no version")
+        _print("file was written. Re-run with --apply to record the environment assignment too.")
 
     if args.json_out:
         target = Path(args.json_out)
@@ -1209,6 +1225,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="run the improvement mechanism: propose, measure, select, persist",
     )
     evolve.add_argument("--sequence", default="", help="comma-separated scenarios")
+    evolve.add_argument("--stream-file", default="",
+                        help="measure a labelled stream file instead of the demo suite "
+                             "(see scripts/service_data/rcaeval_stream.py)")
     evolve.add_argument("--service", default="checkout-api")
     evolve.add_argument("--warmup", type=int, default=20)
     evolve.add_argument("--seed", type=int, default=7)
@@ -1217,7 +1236,8 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--min-gain", type=float, default=0.05,
                         help="fraction of tokens/report a change must save to be accepted")
     evolve.add_argument("--apply", action="store_true",
-                        help="persist accepted changes as version files (default: dry, prints only)")
+                        help="also write a version file per accepted change "
+                             "(the round itself is always recorded)")
     evolve.add_argument("--grade", action="store_true",
                         help="print the L1-L5 grading and exit")
     evolve.add_argument("--history", action="store_true",

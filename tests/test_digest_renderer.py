@@ -26,7 +26,7 @@ import sys
 
 import pytest
 
-from brian.state import render_digest
+from brian.state import BASELINE_KEYS, DEFAULT_METRICS, baseline_keys, digest_specs, render_digest
 
 UTC = timezone.utc
 
@@ -215,6 +215,30 @@ def test_the_two_profiles_render_different_text_for_the_same_metrics() -> None:
 def test_unknown_profile_is_rejected() -> None:
     with pytest.raises(ValueError):
         render_digest(BASELINE_METRICS, profile="nonsense")
+
+
+def test_the_catalog_and_the_baseline_keys_follow_the_profile() -> None:
+    """A profile owns three things at once: the catalog, the baseline keys, and the renderer.
+
+    Shipping only the renderer (as this repo did before a real host dataset was run) renders host
+    metrics the windower never kept and accumulates a baseline that never fills, so every request
+    is identical and the domain scores as undetectable. These three must move together.
+    """
+    host_specs = digest_specs("host")
+    host_keys = baseline_keys("host")
+
+    assert {spec.key for spec in host_specs} == set(host_keys)
+    assert "host.cpu" in host_keys
+    assert "requests.rate" not in host_keys
+    assert digest_specs("service") == DEFAULT_METRICS
+    assert baseline_keys("service") == BASELINE_KEYS
+
+
+def test_an_unknown_profile_name_is_rejected_by_the_helpers_too() -> None:
+    """One typo must not silently yield the empty tuple of keys, which reads as 'no baseline yet'."""
+    for helper in (digest_specs, baseline_keys):
+        with pytest.raises(ValueError, match="service|host"):
+            helper("nonsense")
 
 
 def test_service_profile_still_says_nothing_about_unpopulated_metrics() -> None:

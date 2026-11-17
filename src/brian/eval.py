@@ -45,7 +45,7 @@ from .demo import LabeledWindow
 from .laya.client import LayaClient, LayaError
 from .laya.gate import apply_gate
 
-from .state import BaselineTracker, Windower, build_digest
+from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 
 
 #: ECE bin count. 10 is the convention; more bins would make each estimate noisier at the
@@ -352,11 +352,13 @@ class Evaluator:
         baselines = BaselineTracker(
             window=self.settings.window.baseline_windows,
             long_window=self.settings.window.baseline_windows_long,
+            keys=baseline_keys(self.settings.digest.profile),
         )
         windower = Windower(
             size_s=self.settings.window.size_s,
             slide_s=self.settings.window.slide_s,
             allowed_lateness_s=0,
+            specs=digest_specs(self.settings.digest.profile),
             min_events=1,          # every labelled window must be judged, even a thin one
         )
         report = EvalReport(
@@ -378,7 +380,7 @@ class Evaluator:
                 windower.add(event)
 
         for aggregator in sorted(windower.flush(), key=lambda a: (a.window_start, a.service)):
-            digest = build_digest(aggregator, baselines)
+            digest = build_digest(aggregator, baselines, profile=self.settings.digest.profile)
             key = (digest.service, int(digest.window_start.timestamp()))
             label = labels.get(key)
             if label is None or not label.scored:

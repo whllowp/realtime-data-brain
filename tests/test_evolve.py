@@ -18,6 +18,7 @@ from brian.evolve import (
     Measurement,
     RoundResult,
     Verdict,
+    apply_overrides,
     catalogue,
     decide,
     format_round,
@@ -34,15 +35,15 @@ PERFECT = {"log_retention": 1.0, "signature_retention": 1.0,
 
 
 def measure(name: str = "candidate", *, recall: float = 0.875, fpr: float = 0.0,
-            tokens: float = 100.0, coverage=None) -> Measurement:
+            tokens: float | None = 100.0, coverage=None) -> Measurement:
     return Measurement(
         candidate=name,
         recall=recall,
         fpr=fpr,
         precision=1.0,
-        reports=8,
+        reports=8 if tokens is not None else 0,
         tokens_per_report=tokens,
-        tokens_per_window=tokens / 4.0,
+        tokens_per_window=None if tokens is None else tokens / 4.0,
         latency_p95_ms=1.0,
         coverage=dict(coverage if coverage is not None else PERFECT),
         trial_s=0.1,
@@ -309,3 +310,79 @@ def sample_events():
 
     windows = generate(sequence=DEFAULT_SEQUENCE[:1], warmup_minutes=2, seed=11)
     return flatten(windows)
+
+
+# --------------------------------------------------------------------------------------
+# a dataset on which nothing alerts (RCAEval, and SMD through the host profile)
+# --------------------------------------------------------------------------------------
+def test_a_run_without_reports_is_judged_on_its_reports_not_crashed():
+    """`tokens_per_report` is None when nothing alerted. That must become a verdict.
+
+    On RCAEval the detector stayed silent at the shipped threshold, so both sides of the
+    comparison had no reports at all. The loop crashing there would have hidden the one
+    finding that mattered — that the bottleneck was detection, not the cost policy.
+    """
+    verdict = decide(measure("baseline", tokens=None), measure("candidate", tokens=None),
+                     EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "no-reports"
+    assert "no report" in verdict.reason
+
+
+def test_a_missing_report_on_one_side_alone_blocks_the_comparison():
+    verdict = decide(measure("baseline"), measure("candidate", tokens=None), EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "no-reports"
+    assert "candidate" in verdict.reason
+
+
+def test_the_table_states_an_undefined_cost_as_n_a(tmp_path):
+    result = _round(tmp_path, accepted=False)
+    result.baseline = measure("baseline", tokens=None)
+    result.trials = [(result.trials[0][0], measure("events-8", tokens=None), result.trials[0][2])]
+
+    text = format_round(result)
+    assert "n/a" in text
+    assert "None" not in text
+
+
+# --------------------------------------------------------------------------------------
+# the base configuration a stream file carries
+# --------------------------------------------------------------------------------------
+def test_a_stream_file_can_set_the_base_configuration_before_any_candidate():
+    settings = load_settings()
+    tuned = apply_overrides(settings, {"gate": {"anomaly_probability": 0.5},
+                                       "digest": {"profile": "host"}})
+
+    assert tuned.gate.anomaly_probability == 0.5
+    assert tuned.digest.profile == "host"
+    assert settings.gate.anomaly_probability != 0.5      # the caller's settings are untouched
+
+
+def test_a_round_is_recorded_even_when_no_change_is_applied(tmp_path):
+    """A record that only exists for accepted changes lets the next round re-propose a dead end."""
+    written = persist(tmp_path, _round(tmp_path, accepted=True), write_versions=False)
+
+    assert written["versions"] == []
+    assert (tmp_path / written["round"]).exists()
+    assert len(history(tmp_path)) == 1
+    assert not list((tmp_path / "var" / "evolve" / "versions").glob("v*.json"))
+
+
+def test_the_ledger_separates_accepted_from_applied(tmp_path):
+    """'Accepted' and 'integrated' are different facts and the ladder grades them separately."""
+    persist(tmp_path, _round(tmp_path, accepted=True), write_versions=False)
+    row = history(tmp_path)[0]
+
+    assert row["accepted"] == ["events-8"]
+    assert row["applied"] == []
+
+
+def test_an_override_naming_an_unknown_section_or_field_is_rejected():
+    """A typo must not silently leave the domain on the shipped thresholds."""
+    settings = load_settings()
+    with pytest.raises(ValueError, match="unknown settings section"):
+        apply_overrides(settings, {"gateway": {"anomaly_probability": 0.5}})
+    with pytest.raises(ValueError, match="no field"):
+        apply_overrides(settings, {"gate": {"anomaly_probabilty": 0.5}})
+
