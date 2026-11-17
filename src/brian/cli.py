@@ -37,11 +37,13 @@ from .evolve import (
     EvolveRules,
     apply_overrides,
     catalogue,
+    format_rejudge,
     format_round,
     grade,
     history,
     persist,
     previously_rejected,
+    rejudge,
     run_round,
 )
 from .laya.client import LayaClient, LayaError, LayaUnavailable
@@ -209,6 +211,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
         return 0
 
+    if args.rejudge:
+        path = Path(args.rejudge)
+        if not path.exists():
+            _print("no such round file: %s" % path)
+            return 2
+        rules = EvolveRules(min_gain=args.min_gain)
+        try:
+            result = rejudge(path, rules)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as error:
+            _print("cannot rejudge %s: %s" % (path, error))
+            return 2
+        _print(format_rejudge(result))
+        return 0
+
     if args.grade:
         try:
             rounds = history(root)
@@ -269,9 +285,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         selected = list(known.values())
 
     rules = EvolveRules(min_gain=args.min_gain)
-    prior = previously_rejected(root)
+    prior = previously_rejected(root, rules)
     if prior:
-        _print("Previously rejected (recorded, so this is not proposed as new):")
+        _print("Previously rejected (re-judged under today's rules, so a retired rule cannot poison this):")
         for name, reason in sorted(prior.items()):
             _print("  %-22s %s" % (name, reason))
         _print("")
@@ -1251,6 +1267,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="print the L1-L5 grading and exit")
     evolve.add_argument("--history", action="store_true",
                         help="print every round recorded so far and exit")
+    evolve.add_argument("--rejudge", default="",
+                        help="re-decide a recorded round file under today's rules and exit")
     evolve.add_argument("--json-out", help="write the round to this file as well")
     evolve.set_defaults(func=cmd_evolve)
 

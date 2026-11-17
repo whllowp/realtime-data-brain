@@ -118,6 +118,28 @@ class Candidate:
             "veto": self.veto,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "Candidate":
+        """Rebuild a candidate from a recorded round, so a stored verdict can be re-judged later.
+
+        Reads both shapes: the pre-patch one with a single `section`/`field`/`value`, and the current
+        `changes` list. Old rounds are the ones most worth re-judging — they are the decisions that were
+        made under rules we have since changed.
+        """
+        changes = [tuple(change) for change in payload.get("changes") or []]
+        if not changes:
+            changes = [(payload["section"], payload["field"], payload["value"])]
+        first = changes[0]
+        return cls(
+            name=payload["name"],
+            hypothesis=payload.get("hypothesis") or "",
+            section=first[0],
+            field=first[1],
+            value=first[2],
+            veto=payload.get("veto"),
+            also=tuple(changes[1:]),
+        )
+
 
 def catalogue() -> List[Candidate]:
     """The knobs this harness is allowed to move, and why each one might be worth moving.
@@ -277,6 +299,35 @@ class Measurement:
             "thresholds_at_budget": {k: _round(v, 6) for k, v in self.thresholds_at_budget.items()},
             "at_budget_pooled": self.at_budget_pooled,
         }
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "Measurement":
+        """Rebuild a measurement from a recorded round.
+
+        The recorded numbers are the evidence, so the defaults here must never invent one: a field the
+        round file does not carry comes back as `None`/empty, and a stored `None` stays `None`.
+        """
+        return cls(
+            candidate=payload.get("candidate") or "",
+            recall=payload.get("recall"),
+            fpr=payload.get("fpr"),
+            precision=payload.get("precision"),
+            reports=int(payload.get("reports") or 0),
+            tokens_per_report=payload.get("tokens_per_report"),
+            tokens_per_window=payload.get("tokens_per_window"),
+            latency_p95_ms=payload.get("latency_p95_ms"),
+            coverage=dict(payload.get("coverage") or {}),
+            trial_s=float(payload.get("trial_s") or 0.0),
+            reasoner=payload.get("reasoner") or "",
+            windows=int(payload.get("windows") or 0),
+            confusion=dict(payload.get("confusion") or {}),
+            recall_at_budget=payload.get("recall_at_budget"),
+            fpr_at_budget=payload.get("fpr_at_budget"),
+            threshold_at_budget=payload.get("threshold_at_budget"),
+            budget=float(payload.get("budget") or 0.0),
+            thresholds_at_budget=dict(payload.get("thresholds_at_budget") or {}),
+            at_budget_pooled=bool(payload.get("at_budget_pooled")),
+        )
 
 
 def operating_point(scores: Sequence[Any], budget: float) -> Dict[str, Optional[float]]:
@@ -662,6 +713,13 @@ class EvolveRules:
     #: The false-positive budget the label comparison is made at. A rate is only comparable at a stated
     #: budget, and the budget is part of the objective, not of any candidate.
     fpr_budget: float = 0.10
+    #: A hard ceiling on the false-positive rate the configuration would *ship* with. The at-budget curve
+    #: chooses a cut the loop is allowed to sweep, so it can accept a change that only looks cheap because
+    #: the recorded configuration pages on everything; round 5 hit exactly that (a candidate whose shipped
+    #: threshold alerted on 93.5% of windows was accepted on its at-budget numbers alone). This ceiling is
+    #: not a comparison against the baseline — a baseline that alerts on everything is a finding about the
+    #: deployed configuration, not a licence for the candidate to do the same.
+    deploy_fpr_ceiling: float = 0.50
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -671,6 +729,7 @@ class EvolveRules:
             "recall_tolerance": self.recall_tolerance,
             "fpr_tolerance": self.fpr_tolerance,
             "fpr_budget": self.fpr_budget,
+            "deploy_fpr_ceiling": self.deploy_fpr_ceiling,
         }
 
 
@@ -710,6 +769,28 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
     """
     if veto:
         return Verdict(trial.candidate, False, "veto", veto)
+
+    if trial.fpr is not None and trial.fpr > rules.deploy_fpr_ceiling + 1e-9:
+        # A candidate that changes what the shipped threshold would alert on has to land inside the
+        # ceiling: it is making a deployability claim of its own. A candidate that leaves the deployed
+        # alerting outcome *identical* is inheriting a defect of the deployment, not introducing one —
+        # on SMD the shipped 0.33 alerts on every window, so a pure prompt-budget cut inherits fpr 1.000
+        # by doing nothing to the scoring path. Blaming it for that would reject every cost change on a
+        # domain whose deployment is already broken, which is the opposite of useful. The inherited
+        # defect is printed as a warning instead.
+        inherited = (
+            baseline.fpr is not None
+            and abs(trial.fpr - baseline.fpr) <= 1e-9
+            and (baseline.recall is None or trial.recall is None
+                 or abs(trial.recall - baseline.recall) <= 1e-9)
+        )
+        if not inherited:
+            return Verdict(trial.candidate, False, "deploy",
+                           "would alert on %.0f%% of windows at its shipped threshold (the deployed "
+                           "configuration: %.0f%%), above the %.0f%% deploy ceiling"
+                           % (100 * trial.fpr,
+                              100 * baseline.fpr if baseline.fpr is not None else float("nan"),
+                              100 * rules.deploy_fpr_ceiling))
 
     if baseline.recall_at_budget is not None and trial.recall_at_budget is not None:
         if trial.recall_at_budget < baseline.recall_at_budget - rules.recall_tolerance:
@@ -990,8 +1071,8 @@ def history(root: Path) -> List[Dict[str, Any]]:
     return rows
 
 
-def previously_rejected(root: Path) -> Dict[str, str]:
-    """candidate name -> the rule that rejected it, from the *latest* round that judged it.
+def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict[str, str]:
+    """candidate name -> the rule that rejects it, from the *latest* round that judged it.
 
     A loop that re-proposes its own rejected ideas has not accumulated anything; the survey calls the
     symptom scientific amnesia. This is the smallest cure: the next round can see what was already
@@ -1001,15 +1082,29 @@ def previously_rejected(root: Path) -> Dict[str, str]:
     about a dataset — the same change can be rejected on the synthetic suite and accepted on SMD — so
     keeping the first rejection forever would present a settled question that was later answered the
     other way, which is amnesia with extra paperwork.
+
+    Passing `rules` re-decides each stored measurement under the rules in force *now*, which is what
+    makes the ledger self-healing: a rule change (round 6 made the deploy floor one) can invalidate a
+    stored rejection without anyone remembering to clear it, and a ledger that keeps poisoning the next
+    round with verdicts from retired rules is worse than no ledger. The re-decided reason is prefixed
+    `re-judged`, so a reader can tell which verdicts came from stored runs and which from today's rules.
     """
     latest: Dict[str, Dict[str, Any]] = {}
     for row in history(root):
         source = (row.get("stream") or {}).get("source") or (row.get("stream") or {}).get("service") or "?"
+        baseline = Measurement.from_dict(row.get("baseline") or {}) if rules is not None else None
         for trial in row.get("trials") or []:
             verdict = trial.get("verdict") or {}
+            accepted = bool(verdict.get("accepted"))
+            reason = verdict.get("reason", "")
+            if rules is not None and baseline is not None:
+                candidate = Candidate.from_dict(trial.get("candidate") or {})
+                measurement = Measurement.from_dict(trial.get("measurement") or {})
+                fresh = decide(baseline, measurement, rules, veto=candidate.veto)
+                accepted, reason = fresh.accepted, "re-judged: %s" % fresh.reason
             latest[verdict.get("candidate") or "?"] = {
-                "accepted": bool(verdict.get("accepted")),
-                "reason": verdict.get("reason", ""),
+                "accepted": accepted,
+                "reason": reason,
                 "source": source,
             }
     rejected: Dict[str, str] = {}
@@ -1063,6 +1158,13 @@ def format_round(result: RoundResult) -> str:
             continue
         lines.append("  shipped threshold  %-22s recall %.3f  fpr %.3f"
                      % (label, measurement.recall, measurement.fpr))
+    if (result.baseline.fpr is not None
+            and result.baseline.fpr > result.rules.deploy_fpr_ceiling + 1e-9):
+        lines.append("  ! the deployed configuration already alerts on %.0f%% of windows on this stream,"
+                     % (100 * result.baseline.fpr))
+        lines.append("    above the %.0f%% deploy ceiling. That is a finding about the deployment, not a"
+                     % (100 * result.rules.deploy_fpr_ceiling))
+        lines.append("    licence for a candidate to inherit it.")
     lines.append("")
     for candidate, _measurement, verdict in result.trials:
         lines.append("%s %-22s %s" % ("+" if verdict.accepted else "x", candidate.name,
@@ -1083,6 +1185,91 @@ def format_round(result: RoundResult) -> str:
     lines.append("stream and lost nothing this evaluator can see. It is not a claim that the change is right")
     lines.append("in production — the evidence column is what stands in for the explanation quality that")
     lines.append("cannot be measured without a configured model.")
+    return "\n".join(lines)
+
+
+@dataclass
+class Rejudge:
+    """A stored round re-decided under the rules in force now."""
+
+    path: str
+    stream: Dict[str, Any]
+    old_rules: Dict[str, Any]
+    rules: EvolveRules
+    rows: List[Tuple[Candidate, Measurement, Verdict, Verdict]] = field(default_factory=list)
+
+    @property
+    def changed(self) -> List[str]:
+        return [candidate.name for candidate, _m, old, new in self.rows
+                if old.accepted != new.accepted]
+
+
+def rejudge(path: Path, rules: EvolveRules) -> Rejudge:
+    """Replay a recorded round's measurements through `decide` with the rules in force today.
+
+    The survey's second open problem is versioned, reproducible validation: results have to be
+    comparable across campaigns, or a rule change silently rewrites history and nobody can tell an
+    improvement from a bookkeeping change. This re-reads the stored measurements — no re-measurement, no
+    Laya — and reports which verdicts move. Round 5's `deploy` rule exists because a stored round turned
+    out to have accepted a change that alerting behaviour disqualified; replaying it is how that claim
+    gets checked instead of asserted.
+    """
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    baseline = Measurement.from_dict(payload.get("baseline") or {})
+    rows: List[Tuple[Candidate, Measurement, Verdict, Verdict]] = []
+    for trial in payload.get("trials") or []:
+        candidate = Candidate.from_dict(trial.get("candidate") or {})
+        measurement = Measurement.from_dict(trial.get("measurement") or {})
+        stored = trial.get("verdict") or {}
+        old = Verdict(
+            candidate=stored.get("candidate") or candidate.name,
+            accepted=bool(stored.get("accepted")),
+            rule=stored.get("rule") or "?",
+            reason=stored.get("reason") or "",
+        )
+        new = decide(baseline, measurement, rules, veto=candidate.veto)
+        rows.append((candidate, measurement, old, new))
+    return Rejudge(
+        path=str(path),
+        stream=payload.get("stream") or {},
+        old_rules=payload.get("rules") or {},
+        rules=rules,
+        rows=rows,
+    )
+
+
+def format_rejudge(result: Rejudge) -> str:
+    lines: List[str] = []
+    lines.append("=" * 96)
+    lines.append("brian evolve - rejudge a recorded round under today's rules")
+    lines.append("=" * 96)
+    lines.append("round             %s" % result.path)
+    lines.append("stream            %s" % json.dumps(result.stream, sort_keys=True))
+    lines.append("recorded rules    %s" % json.dumps(result.old_rules, sort_keys=True))
+    lines.append("current rules     %s" % json.dumps(result.rules.to_dict(), sort_keys=True))
+    lines.append("")
+    lines.append("%-22s %-22s %-22s %s" % ("candidate", "recorded", "re-decided", "change"))
+    lines.append("-" * 96)
+    for candidate, _measurement, old, new in result.rows:
+        before = "%s %s" % ("accept" if old.accepted else "reject", old.rule)
+        after = "%s %s" % ("accept" if new.accepted else "reject", new.rule)
+        moved = "-" if old.accepted == new.accepted else ("-> accept" if new.accepted else "-> reject")
+        lines.append("%-22s %-22s %-22s %s" % (candidate.name, before, after, moved))
+    lines.append("")
+    changed = result.changed
+    if changed:
+        for candidate, _measurement, old, new in result.rows:
+            if old.accepted != new.accepted:
+                lines.append("%-22s was %s: %s" % (candidate.name,
+                                                   "accepted" if old.accepted else "rejected",
+                                                   _wrap(old.reason, 60)))
+                lines.append("%-22s now  %s: %s" % ("", "accepted" if new.accepted else "rejected",
+                                                   _wrap(new.reason, 60)))
+        lines.append("")
+        lines.append("%d verdict(s) changed. The stored measurements were not re-run; only the rules moved."
+                     % len(changed))
+    else:
+        lines.append("no verdict changed: today's rules agree with the recorded round.")
     return "\n".join(lines)
 
 

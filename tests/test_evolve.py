@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +25,7 @@ from brian.evolve import (
     apply_overrides,
     catalogue,
     decide,
+    format_rejudge,
     format_round,
     grade,
     history,
@@ -31,6 +33,7 @@ from brian.evolve import (
     operating_point_by_recording,
     persist,
     previously_rejected,
+    rejudge,
     state_ceiling,
 )
 from brian.llm.prompts import evidence_coverage, evidence_floor
@@ -481,6 +484,30 @@ def test_a_rejected_change_writes_no_version_file(tmp_path):
     assert written["versions"] == []
 
 
+def test_the_reject_ledger_re_decides_stored_rounds_under_today_rules(tmp_path):
+    """A rule change must be able to clear a stored rejection without anyone remembering to."""
+    candidate = Candidate(name="events-8", hypothesis="the event block dominates the prompt",
+                          section="llm", field="max_context_events", value=8)
+    baseline = measure("baseline")
+    baseline.fpr = 1.0
+    trial = measure("events-8", tokens=60.0)
+    trial.fpr = 0.94
+    verdict = decide(baseline, trial, EvolveRules())          # rejected by the deploy floor
+    assert not verdict.accepted and verdict.rule == "deploy"
+    result = RoundResult(
+        started_at="2026-11-18T00:00:00+00:00",
+        finished_at="2026-11-18T00:01:00+00:00",
+        stream={"service": "checkout-api"},
+        rules=EvolveRules(),
+        baseline=baseline,
+        trials=[(candidate, trial, verdict)],
+    )
+    persist(tmp_path, result)
+
+    assert "re-judged: " in previously_rejected(tmp_path, EvolveRules())["events-8"]
+    assert "events-8" not in previously_rejected(tmp_path, EvolveRules(deploy_fpr_ceiling=1.0))
+
+
 def test_history_is_append_only_and_survives_a_second_round(tmp_path):
     persist(tmp_path, _round(tmp_path, accepted=True))
     persist(tmp_path, _round(tmp_path, accepted=False))
@@ -758,3 +785,159 @@ def test_the_table_shows_the_ceiling_beside_the_candidates(tmp_path):
     assert "n/a" in table
     assert "beat this to be worth its own cost" in table
 
+
+
+# --------------------------------------------------------------------------------------
+# the deployment floor
+# --------------------------------------------------------------------------------------
+def test_a_configuration_that_ships_a_threshold_paging_on_most_windows_is_rejected():
+    """Round 5's trap: the at-budget curve is swept by the loop, so it cannot see the shipped bar.
+
+    `host-scoring-deviation` alone measured recall@b 0.060 -> 0.142 and was accepted, while the same
+    table printed "shipped threshold recall 0.993 fpr 0.935". A configuration that pages on 93.5% of a
+    stream is not deployable, whatever its at-budget numbers say.
+    """
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    trial = at_budget("host-scoring-deviation", recall=0.142, fpr=0.094)
+    trial.fpr = 0.935
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule == "deploy"
+    assert "94% of windows" in verdict.reason
+    assert "deploy ceiling" in verdict.reason
+
+
+def test_the_deploy_ceiling_is_not_a_comparison_with_the_baseline():
+    """A baseline that alerts on everything is a finding about the deployment, not a licence."""
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr = 1.0
+    trial = at_budget("trial", recall=0.142, fpr=0.094)
+    trial.fpr = 0.90
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule == "deploy"
+
+
+def test_a_deployable_configuration_passes_the_floor():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    trial = at_budget("host-scoring-deviation", recall=0.142, fpr=0.094)
+    trial.fpr = 0.098
+
+    assert decide(baseline, trial, EvolveRules()).accepted
+
+
+def test_the_ceiling_is_a_rule_not_a_constant():
+    trial = at_budget("trial", recall=0.142, fpr=0.094)
+    trial.fpr = 0.60  # what 0.87 on a domain whose answers all land near 0.35 does
+
+    assert decide(at_budget("baseline", recall=0.060, fpr=0.046), trial,
+                  EvolveRules()).rule == "deploy"
+    assert decide(at_budget("baseline", recall=0.060, fpr=0.046), trial,
+                  EvolveRules(deploy_fpr_ceiling=0.70)).accepted
+
+
+def test_the_table_says_the_deployed_configuration_already_breaks_the_ceiling():
+    result = _round(None, accepted=True)
+    result.baseline.fpr = 1.0
+
+    table = format_round(result)
+
+    assert "already alerts on 100% of windows" in table
+    assert "above the 50% deploy ceiling" in table
+    assert "not a" in table and "licence" in table
+
+
+# --------------------------------------------------------------------------------------
+# replaying a stored round
+# --------------------------------------------------------------------------------------
+def test_a_single_field_candidate_round_trips_through_its_record():
+    candidate = next(entry for entry in catalogue() if len(entry.changes()) == 1)
+
+    restored = Candidate.from_dict(candidate.to_dict())
+
+    assert restored == candidate
+
+
+def test_a_patch_candidate_round_trips_with_every_companion_change():
+    candidate = next(entry for entry in catalogue() if entry.name == "host-scoring-deviation")
+    assert len(candidate.changes()) == 3
+
+    restored = Candidate.from_dict(candidate.to_dict())
+
+    assert restored == candidate
+    assert restored.describe() == candidate.describe()
+
+
+def test_a_record_from_before_patches_still_loads():
+    """Rounds recorded by the single-field shape are the ones most worth re-judging."""
+    restored = Candidate.from_dict({
+        "name": "events-8", "hypothesis": "h", "section": "llm",
+        "field": "max_context_events", "value": 8, "veto": None,
+    })
+
+    assert restored.changes() == (("llm", "max_context_events", 8),)
+
+
+def test_a_measurement_round_trips_without_inventing_numbers():
+    original = measure("trial", tokens=None)
+    original.recall_at_budget = None
+    original.windows = 0
+
+    restored = Measurement.from_dict(original.to_dict())
+
+    assert restored.tokens_per_report is None
+    assert restored.recall_at_budget is None
+    assert restored.candidate == "trial"
+    assert Measurement.from_dict({}).tokens_per_report is None
+
+
+def test_rejudging_a_stored_round_agrees_with_itself_under_the_recorded_rules(tmp_path):
+    """Same measurements, same rules, same verdict — the replay has to be a function of the files."""
+    result = _round(tmp_path, accepted=True)
+    result.baseline.fpr = 0.94
+    result.trials[0][1].fpr = 0.94
+    written = persist(tmp_path, result)
+
+    replay = rejudge(Path(written["round"]), EvolveRules(deploy_fpr_ceiling=1.0))
+
+    assert replay.changed == []
+    assert "no verdict changed" in format_rejudge(replay)
+
+
+def test_rejudging_a_stored_round_shows_the_verdict_the_new_rule_moves(tmp_path):
+    result = _round(tmp_path, accepted=True)
+    result.baseline.fpr = 1.0    # the deployed configuration alerts on everything
+    result.trials[0][1].fpr = 0.94  # the candidate changes that, and is still far above the ceiling
+    written = persist(tmp_path, result)
+
+    replay = rejudge(Path(written["round"]), EvolveRules())
+
+    assert replay.changed == ["events-8"]
+    table = format_rejudge(replay)
+    assert "-> reject" in table
+    assert "now  rejected" in table
+    assert "was accepted" in table
+    assert "only the rules moved" in table
+
+
+def test_inheriting_the_deployed_threshold_is_not_a_new_deployability_claim():
+    """On SMD the shipped 0.33 alerts on every window, so a prompt-budget cut inherits fpr 1.000.
+
+    Blaming a candidate for a defect it does not touch would reject every cost change on a domain whose
+    deployment is already broken. The inherited defect is reported, not charged.
+    """
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr = 1.0
+    baseline.recall = 1.0
+    trial = at_budget("events-8", recall=0.060, fpr=0.046, tokens=60.0)
+    trial.fpr = 1.0
+    trial.recall = 1.0
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert verdict.accepted, verdict.reason
+    assert verdict.rule == "cost"
