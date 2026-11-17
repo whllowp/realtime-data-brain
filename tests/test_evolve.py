@@ -22,9 +22,11 @@ from brian.evolve import (
     Measurement,
     RoundResult,
     Verdict,
+    alerts_per_1000,
     apply_overrides,
     catalogue,
     decide,
+    deployable,
     format_rejudge,
     format_round,
     grade,
@@ -508,6 +510,38 @@ def test_the_reject_ledger_re_decides_stored_rounds_under_today_rules(tmp_path):
     assert "events-8" not in previously_rejected(tmp_path, EvolveRules(deploy_fpr_ceiling=1.0))
 
 
+def test_a_rejudge_reports_a_rule_that_moved_without_moving_the_verdict(tmp_path):
+    """Round 7 relabels round 6's two accepts: the verdict stands, the reason is more precise."""
+    candidate = Candidate(name="host-scoring-deviation", hypothesis="a deterministic reader ranks "
+                          "the digest better than the engine ranks it",
+                          section="digest", field="scoring", value="deviation",
+                          also=(("gate", "anomaly_probability", 0.87),))
+    baseline = measure("baseline")
+    baseline.fpr, baseline.recall = 1.0, 1.0
+    trial = measure("host-scoring-deviation", tokens=100.0)
+    trial.fpr, trial.recall = 0.098, 0.142
+    trial.recall_at_budget, trial.fpr_at_budget = 0.142, 0.094
+    baseline.recall_at_budget, baseline.fpr_at_budget = 0.060, 0.046
+    stored = Verdict("host-scoring-deviation", True, "quality", "recall went up for the same bill")
+    result = RoundResult(
+        started_at="2026-11-18T00:00:00+00:00",
+        finished_at="2026-11-18T00:01:00+00:00",
+        stream={"source": "SMD"},
+        rules=EvolveRules(),
+        baseline=baseline,
+        trials=[(candidate, trial, stored)],
+    )
+    written = persist(tmp_path, result)
+
+    replay = rejudge(Path(written["round"]), EvolveRules())
+
+    assert replay.changed == []
+    assert replay.relabelled == [("host-scoring-deviation", "quality", "operational")]
+    table = format_rejudge(replay)
+    assert "same verdict, new rule" in table
+    assert "still accepted, but the rule that decides it moved quality -> operational" in table
+
+
 def test_history_is_append_only_and_survives_a_second_round(tmp_path):
     persist(tmp_path, _round(tmp_path, accepted=True))
     persist(tmp_path, _round(tmp_path, accepted=False))
@@ -922,6 +956,132 @@ def test_rejudging_a_stored_round_shows_the_verdict_the_new_rule_moves(tmp_path)
     assert "now  rejected" in table
     assert "was accepted" in table
     assert "only the rules moved" in table
+
+
+def test_a_threshold_change_is_judged_by_what_would_be_deployed():
+    """The one column that can see a threshold move: the recorded configuration itself.
+
+    A threshold-only candidate leaves the at-budget curve identical, because the loop sweeps its own
+    cut. Before this path existed the catalogue could propose thresholds forever and every round would
+    report "no difference".
+    """
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr = 1.0     # the shipped threshold alerts on every window
+    baseline.recall = 1.0
+    trial = at_budget("anomaly-p-87", recall=0.060, fpr=0.046)   # identical at-budget pair
+    trial.fpr = 0.098
+    trial.recall = 0.142
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert verdict.accepted, verdict.reason
+    assert verdict.rule == "operational"
+    assert "1000 alerts per 1,000" in verdict.reason
+    assert "98 per 1,000" in verdict.reason
+
+
+def test_a_deployability_fix_does_not_license_an_unbounded_bill():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046, tokens=100.0)
+    baseline.fpr, baseline.recall = 1.0, 1.0
+    trial = at_budget("anomaly-p-87", recall=0.060, fpr=0.046, tokens=300.0)
+    trial.fpr, trial.recall = 0.098, 0.142
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule == "gain"
+
+
+def test_a_threshold_that_silences_the_detector_is_not_deployable():
+    """Fewer alerts is not the goal: the recorded cut must also beat the cut the budget rule picks."""
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr = 1.0
+    baseline.recall = 1.0
+    trial = at_budget("anomaly-p-40", recall=0.060, fpr=0.046)
+    trial.fpr = 0.027
+    trial.recall = 0.007          # below the budget cut's recall, so it is worse than doing nothing
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule == "operational"
+    assert "0.007 against 0.060 at the 10% budget" in verdict.reason
+
+
+def test_inheriting_the_broken_configuration_is_not_an_operational_win():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr, baseline.recall = 1.0, 1.0
+    trial = at_budget("events-8", recall=0.060, fpr=0.046, tokens=60.0)
+    trial.fpr, trial.recall = 1.0, 1.0
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert verdict.accepted and verdict.rule == "cost"
+
+
+def test_a_saving_bought_by_paging_on_fewer_failures_is_rejected():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr, baseline.recall = 1.0, 1.0
+    trial = at_budget("anomaly-p-40", recall=0.060, fpr=0.046, tokens=60.0)
+    trial.fpr, trial.recall = 0.027, 0.007
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule == "silence"
+    assert "0.007" in verdict.reason
+    assert "40% smaller bill with silence" in verdict.reason
+
+
+def test_a_threshold_that_pages_on_fewer_failures_than_the_free_cut_is_rejected():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr, baseline.recall = 1.0, 1.0
+    trial = at_budget("anomaly-p-40", recall=0.060, fpr=0.046)
+    trial.fpr, trial.recall = 0.027, 0.007
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule == "operational"
+    assert "0.007 against 0.060" in verdict.reason
+
+
+def test_the_silence_rule_names_the_failures_it_stops_paging_on():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046, tokens=100.0)
+    baseline.recall = 0.900
+    trial = at_budget("budget-cut", recall=0.060, fpr=0.046, tokens=40.0)
+    trial.recall = 0.100
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert verdict.rule == "silence"
+    assert "0.900 -> 0.100" in verdict.reason
+    assert "10% false-positive budget" in verdict.reason
+
+
+def test_deployable_is_a_predicate_over_the_recorded_numbers():
+    rules = EvolveRules()
+
+    def shipped(recall: float, fpr: float, budget_recall: float = 0.060) -> Measurement:
+        m = at_budget("x", recall=budget_recall, fpr=0.05, raw_recall=recall)
+        m.fpr = fpr
+        return m
+
+    assert deployable(shipped(0.142, 0.098), rules)
+    assert not deployable(shipped(0.142, 0.60), rules)              # above the ceiling
+    assert not deployable(shipped(0.007, 0.027), rules)             # worse than the budget cut
+    empty = shipped(0.142, 0.098)
+    empty.recall = None                                             # nothing was scored
+    empty.fpr = None
+    assert not deployable(empty, rules)
+    assert alerts_per_1000(shipped(0.1, 0.25)) == 250.0
+    assert alerts_per_1000(empty) is None
+
+
+def test_the_shipped_block_reports_alerts_per_thousand_windows():
+    result = _round(tmp_path=None, accepted=True)
+    text = format_round(result)
+    assert "alerts/1k" in text
 
 
 def test_inheriting_the_deployed_threshold_is_not_a_new_deployability_claim():

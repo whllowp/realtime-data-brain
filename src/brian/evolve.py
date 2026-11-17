@@ -749,16 +749,66 @@ class Verdict:
         }
 
 
+def alerts_per_1000(measurement: "Measurement") -> Optional[float]:
+    """Alerts per 1,000 windows at the *recorded* configuration, or None when nothing was scored.
+
+    The same number as the false-positive rate in units an operator can argue about. It is displayed
+    next to the shipped recall because the two together are the only honest description of what a
+    threshold does: a cut that alerts on everything has recall 1.000 and is useless.
+    """
+    if measurement.fpr is None:
+        return None
+    return 1000.0 * measurement.fpr
+
+
+def beats_own_cut(measurement: "Measurement") -> bool:
+    """Whether the recorded configuration is at least as good as the cut the loop computes itself.
+
+    The second half of `deployable`, split out because it is the half that a *regression* can be
+    stated against: a candidate that lowers the shipped recall below the budget-fitted recall has
+    moved from "not worse than a free alternative" to "worse than a free alternative", whatever its
+    bill. True when the budget curve is missing (nothing to compare against).
+    """
+    if measurement.recall is None:
+        return False
+    if measurement.recall_at_budget is None:
+        return True
+    return measurement.recall + 1e-9 >= measurement.recall_at_budget
+
+
+def deployable(measurement: "Measurement", rules: "EvolveRules") -> bool:
+    """Whether the configuration *as recorded* is one an operator could run.
+
+    Two conditions, and both are needed. It has to sit at or below the deploy false-positive ceiling
+    (nobody answers 90% of all windows), and its recall has to be no worse than the recall of the cut
+    the budget rule would pick. The second condition is what makes a *threshold-only* candidate
+    judgeable at all: such a candidate does not move the at-budget curve — the loop still sweeps its
+    own cut — so the only place its effect exists is the recorded configuration, and the standard for
+    that configuration is that it must not be beaten by a cut the loop can compute from the same
+    scores. SMD's shipped 0.33 fails the first condition (alerts on every window) and its shipped 0.40
+    fails the second (recall 0.007 against the budget cut's 0.060), which is why neither is accepted.
+    """
+    if measurement.fpr is None or measurement.recall is None:
+        return False
+    if measurement.fpr > rules.deploy_fpr_ceiling + 1e-9:
+        return False
+    return beats_own_cut(measurement)
+
+
 def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
            veto: Optional[str] = None) -> Verdict:
     """Accept only a Pareto improvement: better on one axis, not worse on the other.
 
-    Two moves qualify, and both are checked in the same order. A cost move lowers tokens per report by
-    `min_gain` at no loss of at-budget recall, false-positive rate, or evidence. A quality move raises
-    at-budget recall by `min_quality_gain` without raising the false-positive rate and without costing
-    more than `cost_tolerance` per report (undefined cost counts as no objection, because a domain the
-    shipped threshold silences has no bill to compare and refusing to decide there would leave the
-    dilution this loop exists to find in place).
+    Three moves qualify. A cost move lowers tokens per report by `min_gain` at no loss of at-budget
+    recall, false-positive rate, or evidence. A quality move raises at-budget recall by
+    `min_quality_gain` without raising the false-positive rate and without costing more than
+    `cost_tolerance` per report (undefined cost counts as no objection, because a domain the shipped
+    threshold silences has no bill to compare and refusing to decide there would leave the dilution
+    this loop exists to find in place). The third is `operational`: the configuration *as recorded*
+    moves from undeployable to deployable (see `deployable`), which is the only column that can judge
+    a threshold-only candidate — such a candidate leaves the at-budget curve identical because the
+    loop sweeps its own cut, so before this branch the catalogue could propose thresholds forever and
+    the labels would answer "no difference" every time.
 
     The label check reads the *at-budget* pair when both sides have one. A fixed absolute threshold on
     an uncalibrated answer is not a shared yardstick: on SMD every answer lands between 0.30 and 0.47,
@@ -839,7 +889,68 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
         return Verdict(trial.candidate, False, "evidence",
                        "keeps less evidence: %s" % detail)
 
+    if deployable(trial, rules) and not deployable(baseline, rules):
+        # The one move that no other column can see. A candidate that only moves a threshold leaves
+        # the at-budget curve identical, because the loop sweeps its own cut; the change exists only
+        # in the configuration that would be deployed. Without this branch the catalogue could
+        # propose all the thresholds it liked and the labels would answer "no difference" every time.
+        # It does not license an unbounded bill: fixing deployability at three times the cost is the
+        # kind of trade a Pareto move excludes, and the version file would record the bill either way.
+        affordable = (
+            baseline.tokens_per_report is None
+            or trial.tokens_per_report is None
+            or trial.tokens_per_report <= baseline.tokens_per_report * (1.0 + rules.cost_tolerance)
+        )
+        if affordable:
+            return Verdict(trial.candidate, True, "operational",
+                           "the recorded configuration goes from %.0f alerts per 1,000 windows with "
+                           "recall %.3f to %.0f per 1,000 with recall %.3f: at or below the %.0f%% "
+                           "deploy ceiling and no worse than the cut the budget rule would pick"
+                           % (alerts_per_1000(baseline), baseline.recall,
+                              alerts_per_1000(trial), trial.recall,
+                              100 * rules.deploy_fpr_ceiling))
+
     before, after = baseline.tokens_per_report, trial.tokens_per_report
+    if (baseline.recall is not None and trial.recall is not None
+            and trial.recall < baseline.recall - rules.recall_tolerance
+            and before is not None and after is not None
+            and after <= before * (1.0 - rules.min_gain)):
+        # A real saving plus a lower shipped recall, and the at-budget curve did not rise — every path
+        # that could legitimately pay for a smaller bill has already returned above. The candidate is
+        # buying its bill with silence, and the token ledger alone would reward it. Checked before the
+        # deployability regression below because a saving names the motive: the bill is what changed.
+        return Verdict(trial.candidate, False, "silence",
+                       "pays for a %.0f%% smaller bill with silence: shipped recall %.3f -> %.3f while "
+                       "recall at the %.0f%% false-positive budget did not rise"
+                       % (100 * (1.0 - after / before), baseline.recall, trial.recall,
+                          100 * rules.fpr_budget))
+
+    if beats_own_cut(baseline) and not beats_own_cut(trial):
+        # The mirror image of the operational branch: the recorded configuration was already at least
+        # as good as the cut the loop computes, and the candidate makes it worse. `anomaly-p-40` is
+        # this case on SMD: the shipped 0.33 pages on everything, but at least finds every incident,
+        # and raising the bar to 0.40 keeps 27 alerts per 1,000 windows and 0.7% of the incidents.
+        # Saving 26 tokens a report by not paging on failures is not a Pareto move, so this is stated
+        # against the same column that acceptance uses, not against a generic "no gain".
+        return Verdict(trial.candidate, False, "operational",
+                       "the recorded configuration would page on fewer failures than the cut the budget "
+                       "rule already computes: shipped recall %.3f against %.3f at the %.0f%% budget"
+                       % (trial.recall,
+                          trial.recall_at_budget if trial.recall_at_budget is not None else 0.0,
+                          100 * rules.fpr_budget))
+
+    if (baseline.recall is not None and trial.recall is not None
+            and trial.recall < baseline.recall - rules.recall_tolerance
+            and before is not None and after is not None
+            and after <= before * (1.0 - rules.min_gain)):
+        # A real saving plus a lower shipped recall, and the at-budget curve did not rise — every path
+        # that could legitimately pay for a smaller bill has already returned above. The candidate is
+        # buying its bill with silence, and the token ledger alone would reward it.
+        return Verdict(trial.candidate, False, "silence",
+                       "pays for a %.0f%% smaller bill with silence: shipped recall %.3f -> %.3f while "
+                       "recall at the %.0f%% false-positive budget did not rise"
+                       % (100 * (1.0 - after / before), baseline.recall, trial.recall,
+                          100 * rules.fpr_budget))
     before_recall = baseline.recall_at_budget
     after_recall = trial.recall_at_budget
     quality_gain = (
@@ -1125,8 +1236,9 @@ def format_round(result: RoundResult) -> str:
     lines.append("=" * 96)
     lines.append("reasoner          %s" % (result.baseline.reasoner or "unknown"))
     lines.append("stream            %s" % json.dumps(result.stream, sort_keys=True))
-    lines.append("objective         accept a Pareto move: tokens/report down >= %.0f%% or recall at"
-                 " <=%.0f%% false positives up >= %.0f%%, never at a cost of the other column"
+    lines.append("objective         accept a Pareto move: tokens/report down >= %.0f%%, recall at"
+                 " <=%.0f%% false positives up >= %.0f%%, or a recorded configuration that becomes"
+                 " deployable; never at a cost of another column"
                  % (100 * result.rules.min_gain, 100 * result.rules.fpr_budget,
                     100 * result.rules.min_quality_gain))
     lines.append("")
@@ -1156,8 +1268,8 @@ def format_round(result: RoundResult) -> str:
         label = "baseline" if candidate is None else candidate.name
         if measurement.recall is None or measurement.fpr is None:
             continue
-        lines.append("  shipped threshold  %-22s recall %.3f  fpr %.3f"
-                     % (label, measurement.recall, measurement.fpr))
+        lines.append("  shipped threshold  %-22s recall %.3f  alerts/1k %6.0f  fpr %.3f"
+                     % (label, measurement.recall, alerts_per_1000(measurement), measurement.fpr))
     if (result.baseline.fpr is not None
             and result.baseline.fpr > result.rules.deploy_fpr_ceiling + 1e-9):
         lines.append("  ! the deployed configuration already alerts on %.0f%% of windows on this stream,"
@@ -1202,6 +1314,18 @@ class Rejudge:
     def changed(self) -> List[str]:
         return [candidate.name for candidate, _m, old, new in self.rows
                 if old.accepted != new.accepted]
+
+    @property
+    def relabelled(self) -> List[Tuple[str, str, str]]:
+        """Same verdict, different rule — the acceptance stands but for a better reason.
+
+        Round 7's `operational` path does exactly this to round 6's two quality accepts: the change is
+        still accepted, but now because it made the recorded configuration deployable rather than
+        because it found more incidents inside a budget. Reporting it keeps the rule history visible;
+        folding it into "no verdict changed" would hide the one thing a rejudge is for.
+        """
+        return [(candidate.name, old.rule, new.rule) for candidate, _m, old, new in self.rows
+                if old.accepted == new.accepted and old.rule != new.rule]
 
 
 def rejudge(path: Path, rules: EvolveRules) -> Rejudge:
@@ -1253,10 +1377,16 @@ def format_rejudge(result: Rejudge) -> str:
     for candidate, _measurement, old, new in result.rows:
         before = "%s %s" % ("accept" if old.accepted else "reject", old.rule)
         after = "%s %s" % ("accept" if new.accepted else "reject", new.rule)
-        moved = "-" if old.accepted == new.accepted else ("-> accept" if new.accepted else "-> reject")
+        if old.accepted != new.accepted:
+            moved = "-> accept" if new.accepted else "-> reject"
+        elif old.rule != new.rule:
+            moved = "same verdict, new rule"
+        else:
+            moved = "-"
         lines.append("%-22s %-22s %-22s %s" % (candidate.name, before, after, moved))
     lines.append("")
     changed = result.changed
+    relabelled = result.relabelled
     if changed:
         for candidate, _measurement, old, new in result.rows:
             if old.accepted != new.accepted:
@@ -1270,6 +1400,14 @@ def format_rejudge(result: Rejudge) -> str:
                      % len(changed))
     else:
         lines.append("no verdict changed: today's rules agree with the recorded round.")
+    if relabelled:
+        lines.append("")
+        by_name = {candidate.name: new for candidate, _m, _old, new in result.rows}
+        for name, old_rule, new_rule in relabelled:
+            verdict = by_name.get(name)
+            outcome = "accepted" if verdict is not None and verdict.accepted else "rejected"
+            lines.append("%-22s still %s, but the rule that decides it moved %s -> %s"
+                         % (name, outcome, old_rule, new_rule))
     return "\n".join(lines)
 
 
