@@ -1,0 +1,350 @@
+"""Promotion: what a version file *claims*, and what happens when the claim stops holding.
+
+`src/brian/evolve.py` decides and records; this module is about the two steps after that — putting an
+accepted configuration into force, and re-checking the claim on data that did not exist when it was made.
+
+Why this is separate from the loop
+----------------------------------
+The ladder in arXiv:2607.07663 grades integration separately from selection, and so does this repo: an
+accept is a statement about one measurement, a version file is a statement that the change *can* be
+described, diffed and reversed, and a promotion is a statement that it is *in force*. Only the third one
+can fail later, because only the third one is exposed to the future.
+
+The claim
+---------
+A version file carries the measurement that justified it. That number is a promise: "at a 10% false
+positive budget this configuration finds at least X of the failures, spends at most Y tokens per report,
+and alerts on at most Z of windows at its shipped threshold". `verify()` re-measures and asks whether the
+promise still pays out. It does not ask whether the change was a good idea — that was decided earlier,
+under a different objective, and `brian evolve --audit` is the command that revisits *that* question.
+
+Deployment state
+----------------
+This repo has no live service handle, so "in force" is expressed as the thing a deployment actually
+consumes: a set of environment assignments in `var/evolve/current.json`, with per-variable provenance so a
+revert removes exactly what one version added. A process that reads those variables at start-up picks the
+change up on its next start; nothing here hot-reloads a running process, and the doc says so rather than
+letting "apply" imply more than it does.
+
+The one thing a revert cannot undo
+----------------------------------
+If two versions override the same variable and the *later* one is reverted, the earlier value is restored
+from the recorded provenance. If the earlier version was itself reverted first, there is nothing to
+restore and the variable is removed. Neither case invents a value that was never measured.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from .evolve import Candidate, EvolveRules, Measurement
+
+CURRENT = "current.json"
+VERSIONS = "versions"
+VERIFIED = "holds"
+FAILED = "failed"
+UNMEASURABLE = "unmeasurable"
+
+
+def _now() -> str:
+    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def _evolve_dir(root: Path) -> Path:
+    return root / "var" / "evolve"
+
+
+@dataclass
+class Claim:
+    """The numbers a version promised, and the promise it did not make.
+
+    `fpr_at_budget` and `recall_at_budget` are the pair the loop actually judged; `shipped_fpr` is what a
+    deployment running the file's own configuration would alert on without any calibration. They are kept
+    apart here for the same reason they are kept apart in `format_round`: the first pair is a ranking
+    statement at a chosen cut, the second is what an operator would see.
+    """
+
+    recall_at_budget: Optional[float] = None
+    fpr_at_budget: Optional[float] = None
+    tokens_per_report: Optional[float] = None
+    shipped_recall: Optional[float] = None
+    shipped_fpr: Optional[float] = None
+
+    @classmethod
+    def from_measurement(cls, measurement: Measurement) -> "Claim":
+        return cls(
+            recall_at_budget=measurement.recall_at_budget,
+            fpr_at_budget=measurement.fpr_at_budget,
+            tokens_per_report=measurement.tokens_per_report,
+            shipped_recall=measurement.recall,
+            shipped_fpr=measurement.fpr,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "recall_at_budget": self.recall_at_budget,
+            "fpr_at_budget": self.fpr_at_budget,
+            "tokens_per_report": self.tokens_per_report,
+            "shipped_recall": self.shipped_recall,
+            "shipped_fpr": self.shipped_fpr,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "Claim":
+        return cls(
+            recall_at_budget=payload.get("recall_at_budget"),
+            fpr_at_budget=payload.get("fpr_at_budget"),
+            tokens_per_report=payload.get("tokens_per_report"),
+            shipped_recall=payload.get("shipped_recall"),
+            shipped_fpr=payload.get("shipped_fpr"),
+        )
+
+
+@dataclass
+class Promotion:
+    """One version file, as the thing in force rather than the record of a measurement."""
+
+    version: int
+    path: Path
+    candidate: Optional[Candidate]
+    change: str
+    env: Dict[str, str]
+    claim: Claim
+    stream: Dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    verification: Optional[Dict[str, Any]] = None
+    reverted_at: str = ""
+
+    @property
+    def pending(self) -> bool:
+        return self.verification is None and not self.reverted_at
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "version": self.version,
+            "change": self.change,
+            "env": dict(self.env),
+            "claim": self.claim.to_dict(),
+            "stream": dict(self.stream),
+            "created_at": self.created_at,
+            "verification": self.verification,
+            "reverted_at": self.reverted_at,
+        }
+
+
+def _env_from_payload(payload: Mapping[str, Any]) -> Dict[str, str]:
+    """Parse the `"A=1; B=2"` string the version file stores into assignments.
+
+    The file stores the shell line because that is what an operator pastes; this module needs the pairs,
+    so the parse lives here rather than in whoever reads the file next.
+    """
+    env: Dict[str, str] = {}
+    for item in str(payload.get("env") or "").split(";"):
+        entry = item.strip()
+        if not entry or "=" not in entry:
+            continue
+        name, _, value = entry.partition("=")
+        env[name.strip()] = value.strip()
+    return env
+
+
+def load_promotions(root: Path) -> List[Promotion]:
+    """Every readable version file, oldest first. Unreadable ones are skipped, not guessed at."""
+    directory = _evolve_dir(root) / VERSIONS
+    promotions: List[Promotion] = []
+    for path in sorted(directory.glob("v*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            version = int(payload.get("version") or path.stem.lstrip("v"))
+        except (TypeError, ValueError):
+            continue
+        candidate_payload = payload.get("candidate")
+        candidate: Optional[Candidate] = None
+        if isinstance(candidate_payload, Mapping) and candidate_payload.get("changes"):
+            candidate = Candidate.from_dict(candidate_payload)
+        promotions.append(Promotion(
+            version=version,
+            path=path,
+            candidate=candidate,
+            change=str(payload.get("change") or ""),
+            env=_env_from_payload(payload),
+            claim=Claim.from_dict(payload.get("measurement") or {}),
+            stream=dict(payload.get("stream") or {}),
+            created_at=str(payload.get("created_at") or ""),
+            verification=payload.get("verification"),
+            reverted_at=str(payload.get("reverted_at") or ""),
+        ))
+    promotions.sort(key=lambda item: item.version)
+    return promotions
+
+
+def write_verification(root: Path, promotion: Promotion, payload: Mapping[str, Any],
+                       reverted_at: str = "") -> None:
+    """Patch one version file with its verification result, keeping the rest of it byte-identical.
+
+    Rewriting through this function rather than through `json.dump` of a reconstructed object matters: the
+    version file is the rollback record, and a verification must not be able to drop the `rollback` line
+    that makes the file useful.
+    """
+    document = json.loads(promotion.path.read_text(encoding="utf-8"))
+    document["verification"] = dict(payload)
+    if reverted_at:
+        document["reverted_at"] = reverted_at
+    promotion.path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    promotion.verification = dict(payload)
+    if reverted_at:
+        promotion.reverted_at = reverted_at
+
+
+def current_state(root: Path) -> Dict[str, Any]:
+    path = _evolve_dir(root) / CURRENT
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"env": {}, "sources": {}, "updated_at": ""}
+    if not isinstance(payload, Mapping):
+        return {"env": {}, "sources": {}, "updated_at": ""}
+    return {
+        "env": dict(payload.get("env") or {}),
+        "sources": dict(payload.get("sources") or {}),
+        "updated_at": str(payload.get("updated_at") or ""),
+    }
+
+
+def _write_state(root: Path, state: Mapping[str, Any]) -> Path:
+    directory = _evolve_dir(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / CURRENT
+    payload = {"env": dict(state.get("env") or {}),
+               "sources": dict(state.get("sources") or {}),
+               "updated_at": _now()}
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = True) -> Dict[str, Any]:
+    """Merge one version's assignments into the deployment state, recording where each came from.
+
+    A lower version never takes a variable away from a higher one. Verifying an old version is a normal
+    thing to do — `--verify` walks whatever is still unverified — and without this rule re-checking v002
+    would put its threshold back in force over the newer v011 that replaced it, which is a rollback
+    disguised as a verification. The variables it could not take are reported as `superseded` instead of
+    being applied quietly.
+    """
+    state = current_state(root)
+    env = dict(state["env"])
+    sources = dict(state["sources"])
+    applied: List[str] = []
+    superseded: List[str] = []
+    for name, value in promotion.env.items():
+        owner = sources.get(name)
+        if respect_newer and owner and owner.isdigit() and int(owner) > promotion.version:
+            superseded.append(name)
+            continue
+        env[name] = value
+        sources[name] = str(promotion.version)
+        applied.append(name)
+    _write_state(root, {"env": env, "sources": sources})
+    return {"applied": applied, "superseded": superseded}
+
+
+def revert_promotion(root: Path, promotion: Promotion) -> Path:
+    """Remove exactly the variables this version put in force, restoring an earlier source if there is one.
+
+    The earlier value comes from the version file that *is* still the source of that variable; when the
+    source is this same version there is nothing behind it and the variable is simply removed. Neither
+    branch invents a value, which is the only property a rollback has to have.
+    """
+    state = current_state(root)
+    env = dict(state["env"])
+    sources = dict(state["sources"])
+    others = {item.version: item for item in load_promotions(root) if item.version != promotion.version}
+    for name in promotion.env:
+        if sources.get(name) != str(promotion.version):
+            continue
+        previous = None
+        for version in sorted(others):
+            if name in others[version].env and not others[version].reverted_at:
+                previous = (str(version), others[version].env[name])
+        if previous is None:
+            env.pop(name, None)
+            sources.pop(name, None)
+        else:
+            sources[name], env[name] = previous
+    return _write_state(root, {"env": env, "sources": sources})
+
+
+def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules
+                ) -> Tuple[str, str]:
+    """Does the re-measured configuration still pay out what the version promised?
+
+    The tolerances are the loop's own (`operational_tolerance` for recall, `cost_tolerance` for the bill)
+    rather than new constants, because a promise is judged by the standard of the objective that made it —
+    introducing a second standard here would let a version pass a check the loop would have rejected.
+    """
+    if measurement.recall_at_budget is None or claim.recall_at_budget is None:
+        return UNMEASURABLE, ("the claim or the re-measurement has no recall at the budget, so the "
+                              "promise cannot be checked either way")
+    floor = claim.recall_at_budget * (1.0 - rules.operational_tolerance)
+    if measurement.recall_at_budget + 1e-9 < floor:
+        return FAILED, ("promised recall %.3f at the %.0f%% budget, re-measured %.3f (below %.3f)"
+                        % (claim.recall_at_budget, 100 * rules.fpr_budget,
+                           measurement.recall_at_budget, floor))
+    if measurement.fpr_at_budget is not None and measurement.fpr_at_budget > rules.fpr_budget + 1e-9:
+        return FAILED, ("re-measured false-positive rate %.3f exceeds the %.0f%% budget the promise "
+                        "was made under" % (measurement.fpr_at_budget, 100 * rules.fpr_budget))
+    if (claim.tokens_per_report is not None and measurement.tokens_per_report is not None
+            and measurement.tokens_per_report > claim.tokens_per_report * (1.0 + rules.cost_tolerance)):
+        return FAILED, ("promised %.0f tokens per report, re-measured %.0f (above %.0f)"
+                        % (claim.tokens_per_report, measurement.tokens_per_report,
+                           claim.tokens_per_report * (1.0 + rules.cost_tolerance)))
+    return VERIFIED, ("recall %.3f at the %.0f%% budget against a promised %.3f, %.0f tokens per report "
+                      "against a promised %.0f"
+                      % (measurement.recall_at_budget, 100 * rules.fpr_budget, claim.recall_at_budget,
+                         measurement.tokens_per_report or 0.0, claim.tokens_per_report or 0.0))
+
+
+def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, Any]] = None
+                      ) -> str:
+    lines: List[str] = []
+    lines.append("=" * 96)
+    lines.append("brian evolve - versions in force and whether their claims still hold")
+    lines.append("=" * 96)
+    if not promotions:
+        lines.append("no version files yet: run a round with --apply to record one.")
+        return "\n".join(lines)
+    lines.append("%-8s %-26s %-12s %s" % ("version", "change", "claim", "state"))
+    lines.append("-" * 96)
+    for promotion in promotions:
+        claim = promotion.claim
+        promise = "n/a" if claim.recall_at_budget is None else "recall %.3f" % claim.recall_at_budget
+        if promotion.reverted_at:
+            note = "reverted %s" % promotion.reverted_at
+        elif promotion.verification:
+            note = "%s: %s" % (promotion.verification.get("verdict", "?"),
+                               _first_line(promotion.verification.get("reason", "")))
+        elif promotion.pending:
+            note = "unverified"
+        else:
+            note = "?"
+        lines.append("%-8s %-26s %-12s %s" % ("v%03d" % promotion.version, promotion.change[:26],
+                                              promise, note))
+    if state is not None:
+        lines.append("")
+        env = dict(state.get("env") or {})
+        if env:
+            lines.append("in force  %s" % ", ".join("%s=%s" % item for item in sorted(env.items())))
+        else:
+            lines.append("in force  (nothing: no promotion has been applied)")
+        lines.append("a process reads these at start-up; nothing here reloads a running one.")
+    return "\n".join(lines)
+
+
+def _first_line(text: str) -> str:
+    return str(text).splitlines()[0] if str(text) else ""

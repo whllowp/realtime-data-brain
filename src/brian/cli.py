@@ -24,7 +24,7 @@ import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .bus import JournalBus, MemoryBus, open_bus
 from .config import Settings, load_settings
@@ -37,12 +37,14 @@ from .evolve import (
     EvolveRules,
     apply_overrides,
     audit,
+    build_pool,
     catalogue,
     format_audit,
     format_rejudge,
     format_round,
     grade,
     history,
+    measure,
     persist,
     previously_rejected,
     rejudge,
@@ -52,6 +54,17 @@ from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .laya.gate import explain_thresholds
 from .laya.qcatalog import CATALOG_VERSION, catalog_hash, describe as describe_catalog, validate_questions
 from .llm.rca import RcaEngine
+from .promote import (
+    FAILED,
+    UNMEASURABLE,
+    apply_promotion,
+    claim_check,
+    current_state,
+    format_promotions,
+    load_promotions,
+    revert_promotion,
+    write_verification,
+)
 from .pipeline import Pipeline
 from .state import BaselineTracker, Windower, build_digest
 from .streams import Stream, load_stream_file, summarise
@@ -65,6 +78,10 @@ from .topics import Topic, describe as describe_topics, key_field
 
 def _print(payload: Any = "") -> None:
     print(payload, flush=True)
+
+
+def _stamp() -> str:
+    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
 def _json(payload: Any) -> str:
@@ -175,6 +192,29 @@ def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _evolve_streams(args: argparse.Namespace, settings: Settings
+                    ) -> Tuple[Settings, List[Stream], str, Dict[str, Any]]:
+    """The window stream a round (or a verification) measures on: a file, or the synthetic demo.
+
+    Extracted because `--verify` must measure on the same footing as the round that made the promise:
+    two commands that resolve their stream in two places drift, and a verification that quietly ran on a
+    different stream from the promotion would be a transfer test reported as a repetition.
+    """
+    if args.stream_file:
+        stream_set = load_stream_file(Path(args.stream_file))
+        settings = apply_overrides(settings, stream_set.overrides)
+        streams = stream_set.streams
+        source = stream_set.dataset or Path(args.stream_file).name
+        return settings, streams, source, dict(stream_set.overrides)
+    sequence = (tuple(part.strip() for part in args.sequence.split(",") if part.strip())
+                if args.sequence else DEFAULT_SEQUENCE)
+    windows = generate(sequence=sequence, service=args.service, warmup_minutes=args.warmup,
+                       seed=args.seed)
+    streams = [Stream(name=args.service, windows=list(windows),
+                      meta={"service": args.service, "seed": args.seed})]
+    return settings, streams, "demo", {}
+
+
 def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     """Run the improvement mechanism: propose, measure, select, and (only with --apply) integrate."""
     root = Path(".")
@@ -246,7 +286,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         except OSError:
             rounds = []
         result = grade(has_catalogue=bool(catalogue()), has_history=bool(rounds),
-                       mutates_mechanism=False, applies_changes=False)
+                       mutates_mechanism=False, applies_changes=False,
+                       promotes=bool(load_promotions(root)))
         _print("=" * 78)
         _print("brian evolve - how much of the loop is autonomous")
         _print("=" * 78)
@@ -260,10 +301,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         for line in result["missing_for_next"]:
             _print("  - %s" % line)
         _print("")
-        _print("Note: an accepted change is recorded as a version file; exporting it and restarting")
-        _print("the service is still a human step, so the ladder puts this at L2 however autonomous")
-        _print("the selection is. Grading it higher for writing tidy JSON would be the self-flattery")
-        _print("the survey warns about.")
+        _print("Note: an accepted change is recorded as a version file and put into the deployment")
+        _print("state file, and a version whose claim stops holding is reverted automatically. What")
+        _print("is still a human step is the restart: nothing here reloads a running process, so the")
+        _print("ladder puts this at L2 however autonomous the selection is. Grading it L3 for writing")
+        _print("tidy JSON would be the self-flattery the survey warns about.")
         return 0
 
     laya = LayaClient(settings.laya)
@@ -273,19 +315,46 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("Start Laya with:  D:\\project\\laya\\service\\start.cmd")
         return 3
 
-    sequence = (tuple(part.strip() for part in args.sequence.split(",") if part.strip())
-                if args.sequence else DEFAULT_SEQUENCE)
-    if args.stream_file:
-        stream_set = load_stream_file(Path(args.stream_file))
-        settings = apply_overrides(settings, stream_set.overrides)
-        streams = stream_set.streams
-        source = stream_set.dataset or Path(args.stream_file).name
-    else:
-        windows = generate(sequence=sequence, service=args.service, warmup_minutes=args.warmup,
-                           seed=args.seed)
-        streams = [Stream(name=args.service, windows=list(windows),
-                          meta={"service": args.service, "seed": args.seed})]
-        source = "demo"
+    if args.verify:
+        wanted = int(getattr(args, "verify_version", 0) or 0)
+        promotions = [item for item in load_promotions(root)
+                      if item.pending and (not wanted or item.version == wanted)]
+        if not promotions:
+            _print("no unverified promotions: every version file has already been re-checked.")
+            return 0
+        settings, streams, source, _overrides = _evolve_streams(args, settings)
+        rules = EvolveRules(min_gain=args.min_gain)
+        pool = build_pool(settings, streams)
+        _print("verifying %d promotion(s) on %s" % (len(promotions), source))
+        for promotion in promotions:
+            if promotion.candidate is None:
+                write_verification(root, promotion, {
+                    "checked_at": _stamp(), "stream": source, "verdict": UNMEASURABLE,
+                    "reason": "the version file does not name the change, so it cannot be re-measured",
+                })
+                _print("  v%03d  %s  unmeasurable" % (promotion.version, promotion.change))
+                continue
+            measurement = measure(settings, promotion.candidate, streams, pool,
+                                  budget=rules.fpr_budget)
+            verdict, reason = claim_check(promotion.claim, measurement, rules)
+            payload = {"checked_at": _stamp(), "stream": source, "verdict": verdict,
+                       "reason": reason, "measurement": measurement.to_dict()}
+            if verdict == FAILED:
+                # The promise stopped paying out, so the configuration stops being the deployed one.
+                # The file is kept, because a retracted claim is part of the record, not a hole in it.
+                revert_promotion(root, promotion)
+                write_verification(root, promotion, payload, reverted_at=_stamp())
+                _print("  v%03d  %s  FAILED and reverted: %s" % (promotion.version,
+                                                                 promotion.change, reason))
+            else:
+                write_verification(root, promotion, payload)
+                apply_promotion(root, promotion)
+                _print("  v%03d  %s  %s" % (promotion.version, promotion.change, verdict))
+        _print("")
+        _print(format_promotions(load_promotions(root), current_state(root)))
+        return 0
+
+    settings, streams, source, base_overrides = _evolve_streams(args, settings)
 
     known = {candidate.name: candidate for candidate in catalogue()}
     if args.candidates:
@@ -308,7 +377,6 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("")
 
     totals = summarise(streams)
-    base_overrides = stream_set.overrides if args.stream_file else {}
     for section, values in base_overrides.items():
         _print("base override   %s: %s" % (section, ", ".join(
             "%s=%r" % (key, value) for key, value in sorted(values.items()))))
@@ -331,6 +399,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             continue
         _print("    export %s" % payload.get("env"))
         _print("    rollback: %s" % payload.get("rollback"))
+    if written.get("versions"):
+        # A version file the deployment state does not mention is a claim nobody made live; put the
+        # accepted configuration into force here, so `--verify` has something to re-check later.
+        for promotion in load_promotions(root):
+            if str(promotion.path) in (written.get("versions") or []):
+                apply_promotion(root, promotion)
+        _print("in force: %s" % ", ".join("%s=%s" % item for item in
+                                         sorted(current_state(root)["env"].items())))
     if result.accepted and not args.apply:
         _print("Dry run: the round is recorded so the next run will not re-propose it, but no version")
         _print("file was written. Re-run with --apply to record the environment assignment too.")
@@ -1286,6 +1362,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-decide a recorded round file under today's rules and exit")
     evolve.add_argument("--audit", action="store_true",
                         help="re-decide every recorded round under today's rules and exit")
+    evolve.add_argument("--verify", action="store_true",
+                        help="re-measure every unverified promotion and revert the ones whose claim "
+                             "no longer holds, then exit")
+    evolve.add_argument("--verify-version", type=int, default=0,
+                        help="with --verify: only that version number (default: everything unverified)")
     evolve.add_argument("--strict", action="store_true",
                         help="with --audit: exit 1 when any recorded verdict would be decided differently")
     evolve.add_argument("--json-out", help="write the round to this file as well")

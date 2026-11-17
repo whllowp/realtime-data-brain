@@ -1360,3 +1360,25 @@ def test_the_audit_is_a_check_because_it_can_exit_nonzero(tmp_path, monkeypatch)
     assert cli.main(["evolve", "--audit", "--min-gain", "0.50"]) == 0
     assert cli.main(["evolve", "--audit", "--strict"]) == 0
     assert cli.main(["evolve", "--audit", "--strict", "--min-gain", "0.50"]) == 1
+
+def test_the_grader_names_promotion_as_a_capability_without_claiming_L3():
+    result = grade(has_catalogue=True, has_history=True, promotes=True)
+
+    # Promotion (state file + provenance + automatic revert) is real work the loop does alone, but no
+    # running process picks the change up, so the rung does not move.
+    assert result["level"] == "L2"
+    assert any("deployment state file" in line for line in result["capabilities"])
+    assert result["missing_for_next"] == ["a running process that picks the change up without a restart"]
+
+
+def test_the_grader_still_asks_for_implementation_when_nothing_is_promoted():
+    result = grade(has_catalogue=True, has_history=True)
+
+    assert result["missing_for_next"] == [
+        "autonomous implementation: applying an accepted change without a human"]
+
+
+def test_promotion_alone_does_not_earn_L3():
+    assert grade(has_catalogue=True, has_history=True, promotes=True)["level"] == "L2"
+    assert grade(has_catalogue=True, has_history=True, promotes=True,
+                 applies_changes=True)["level"] == "L3"

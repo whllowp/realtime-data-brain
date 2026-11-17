@@ -1263,6 +1263,9 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
             # configuration nobody measured, which is exactly what a version file must prevent.
             "env": "; ".join(exports),
             "measurement": measurement.to_dict(),
+            # The stream the promise was measured on: verifying on a different one is a transfer test,
+            # not a repetition, and the reader of the record has to be able to tell them apart.
+            "stream": dict(result.stream),
             "verdict": verdict.to_dict(),
             "rollback": unset + "  # each restores one default",
         }
@@ -1686,7 +1689,7 @@ def _wrap(text: str, width: int) -> str:
 # grading
 # --------------------------------------------------------------------------------------
 def grade(has_catalogue: bool, has_history: bool, mutates_mechanism: bool = False,
-          applies_changes: bool = False) -> Dict[str, Any]:
+          applies_changes: bool = False, promotes: bool = False) -> Dict[str, Any]:
     """Where this system actually sits on the D2I.ai L1–L5 ladder, and what is missing for the next rung.
 
     Deliberately takes the facts as arguments rather than reading the filesystem: a grader that reports
@@ -1695,9 +1698,14 @@ def grade(has_catalogue: bool, has_history: bool, mutates_mechanism: bool = Fals
 
     `applies_changes` is separate from `has_history` on purpose, and it is the fact that decides between
     L2 and L3. Writing a version file is *recording* a decision; the ladder's L3 requires the change to
-    take effect in the running system without a human. Here a human still exports the variable and
-    restarts the service, so this repo is L2 however autonomous its selection has become. Grading it L3
-    because it writes tidy JSON would be exactly the self-flattery the survey warns about.
+    take effect in the running system without a human. Here a human still restarts the service, so this
+    repo is L2 however autonomous its selection has become. Grading it L3 because it writes tidy JSON
+    would be exactly the self-flattery the survey warns about.
+
+    `promotes` is likewise its own fact and deliberately does **not** move the level: writing a
+    deployment state file, carrying per-variable provenance and reverting a version whose claim stopped
+    holding are all things the loop now does without a human, but no running process reads the file
+    until it is restarted. Promotion narrows the remaining gap to one action instead of closing it.
     """
     has_propose = has_catalogue
     has_evaluate = has_catalogue
@@ -1710,6 +1718,10 @@ def grade(has_catalogue: bool, has_history: bool, mutates_mechanism: bool = Fals
         capabilities.append("evaluates them against labels, prompt evidence and a token ledger")
     if has_integrate:
         capabilities.append("records an accepted change as a version file with env and rollback")
+    if promotes:
+        capabilities.append(
+            "puts an accepted change into a deployment state file with per-variable provenance, and "
+            "reverts it when its claim stops holding")
     if applies_changes:
         capabilities.append("applies an accepted change to the running configuration without a human")
     if mutates_mechanism:
@@ -1719,7 +1731,9 @@ def grade(has_catalogue: bool, has_history: bool, mutates_mechanism: bool = Fals
     missing: List[str] = ["a candidate catalogue with testable hypotheses"]
     if has_propose:
         level = "L2"
-        missing = ["autonomous implementation: applying an accepted change without a human"]
+        missing = ["a running process that picks the change up without a restart"]
+        if not promotes:
+            missing = ["autonomous implementation: applying an accepted change without a human"]
     if has_propose and has_evaluate and has_integrate and applies_changes:
         level = "L3"
         missing = ["a mutable improvement mechanism (the catalogue and the objective are fixed)"]
