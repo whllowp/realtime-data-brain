@@ -51,7 +51,7 @@ from .eval import EvalReport, Evaluator
 from .laya import LayaClient
 from .llm.prompts import evidence_coverage
 from .pipeline import Pipeline, WindowTrace
-from .scoring import text_deviation
+from .scoring import deviation_probability, text_deviation
 from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 from .streams import Stream, flatten_streams, summarise
 
@@ -234,6 +234,19 @@ def catalogue() -> List[Candidate]:
             also=(("gate", "anomaly_probability", 0.87), ("gate", "notify_probability", 0.87)),
         ),
         Candidate(
+            name="deviation-bar-free",
+            hypothesis="The reader's 0.860 recall at a 10% budget was chosen by scanning the labels, so no "
+                       "deployment can reproduce it. This candidate is the bar the stream's own score "
+                       "distribution implies at a 10% alert rate — 0.9831 on the RCAEval stream, read by "
+                       "`brian evolve --calibrate-bar` and using no label — and the labels decide whether "
+                       "the deployable form keeps the recall or whether the fitted number was an upper "
+                       "bound nobody can reach.",
+            section="digest",
+            field="scoring",
+            value="deviation",
+            also=(("gate", "anomaly_probability", 0.9831), ("gate", "notify_probability", 0.9831)),
+        ),
+        Candidate(
             name="host-precision-3",
             hypothesis="A host series measured in units of one needs a third digit before the model can "
                        "tell two windows apart: machine-2-2's CPU is 0.0016, which two decimals print as "
@@ -329,6 +342,10 @@ class Measurement:
     """The cut each recording chose at the budget; empty when one cut served all of them."""
     at_budget_pooled: bool = False
     """True when a recording could not be swept and the pooled sweep was used instead."""
+    recall_at_free_cut: Optional[float] = None
+    """Recall of the bar a deployment can compute from its own scores, with no label read."""
+    fpr_at_free_cut: Optional[float] = None
+    """The false-positive rate that bar actually spends, which is the budget in practice."""
     auc_by_recording: Dict[str, Optional[float]] = field(default_factory=dict)
     """What the model itself scored on each recording, so the round table can show the gap it has to close."""
 
@@ -358,6 +375,8 @@ class Measurement:
             "threshold_at_budget": _round(self.threshold_at_budget, 6),
             "thresholds_at_budget": {k: _round(v, 6) for k, v in self.thresholds_at_budget.items()},
             "at_budget_pooled": self.at_budget_pooled,
+            "recall_at_free_cut": _round(self.recall_at_free_cut),
+            "fpr_at_free_cut": _round(self.fpr_at_free_cut),
             "auc_by_recording": {k: _round(v, 6) for k, v in self.auc_by_recording.items()},
         }
 
@@ -388,6 +407,8 @@ class Measurement:
             budget=float(payload.get("budget") or 0.0),
             thresholds_at_budget=dict(payload.get("thresholds_at_budget") or {}),
             at_budget_pooled=bool(payload.get("at_budget_pooled")),
+            recall_at_free_cut=payload.get("recall_at_free_cut"),
+            fpr_at_free_cut=payload.get("fpr_at_free_cut"),
             auc_by_recording=dict(payload.get("auc_by_recording") or {}),
         )
 
@@ -638,53 +659,91 @@ def state_ceiling(settings: Settings, streams: Sequence[Stream]) -> Dict[str, An
     by_stream: Dict[str, Optional[float]] = {}
     text_by_stream: Dict[str, Optional[float]] = {}
     for stream in streams:
-        windower = Windower(
-            size_s=settings.window.size_s,
-            slide_s=settings.window.slide_s,
-            allowed_lateness_s=settings.window.allowed_lateness_s,
-            min_events=settings.window.min_events,
-            specs=digest_specs(settings.digest.profile, settings.digest.host_features),
-        )
-        baselines = BaselineTracker(
-            window=settings.window.baseline_windows,
-            long_window=settings.window.baseline_windows_long,
-            keys=baseline_keys(settings.digest.profile, settings.digest.host_features),
-        )
-        labels = {(window.service, int(window.window_start.timestamp())):
-                  bool((window.expected or {}).get("is_anomaly")) for window in stream.windows}
-        scores: List[float] = []
-        text_scores: List[float] = []
-        truth: List[int] = []
-
-        def record(digest: Any) -> None:
-            key = (digest.service, int(digest.window_start.timestamp()))
-            if key not in labels:
-                return
-            comparison = digest.metrics.get("comparison") or {}
-            deviations = [value for value in
-                          (_deviation(entry) for entry in _comparison_values(comparison))
-                          if value is not None]
-            scores.append(max(deviations) if deviations else 0.0)
-            text_scores.append(text_deviation(getattr(digest, "interpretation", "") or "") or 0.0)
-            truth.append(1 if labels[key] else 0)
-
-        def consume(aggregators: Sequence[Any]) -> None:
-            for aggregator in aggregators:
-                digest = build_digest(aggregator, baselines, profile=settings.digest.profile,
-                                  precision=settings.digest.host_precision,
-                                  ratio_floor=settings.digest.host_ratio_floor)
-                baselines.observe(digest.service, digest.metrics)
-                record(digest)
-
-        for event in flatten_streams([stream]):
-            windower.add(event)
-            consume(windower.ready())
-        consume(windower.flush())
-        labelled = [bool(v) for v in truth]
+        scores, text_scores, truth = _replay_scores(settings, stream)
+        labelled = [bool(value) for value in truth]
         by_stream[stream.name] = auc(scores, labelled) if scores else None
         text_by_stream[stream.name] = auc(text_scores, labelled) if text_scores else None
     return {"by_stream": by_stream, "text_by_stream": text_by_stream,
             "windows": sum(len(s.windows) for s in streams)}
+
+
+def _replay_scores(settings: Settings, stream: Stream) -> Tuple[List[float], List[float], List[int]]:
+    """Replay one recording and return the reader's score, the text score and the label per window."""
+    windower = Windower(
+        size_s=settings.window.size_s,
+        slide_s=settings.window.slide_s,
+        allowed_lateness_s=settings.window.allowed_lateness_s,
+        min_events=settings.window.min_events,
+        specs=digest_specs(settings.digest.profile, settings.digest.host_features),
+    )
+    baselines = BaselineTracker(
+        window=settings.window.baseline_windows,
+        long_window=settings.window.baseline_windows_long,
+        keys=baseline_keys(settings.digest.profile, settings.digest.host_features),
+    )
+    labels = {(window.service, int(window.window_start.timestamp())):
+              bool((window.expected or {}).get("is_anomaly")) for window in stream.windows}
+    scores: List[float] = []
+    text_scores: List[float] = []
+    truth: List[int] = []
+
+    def record(digest: Any) -> None:
+        key = (digest.service, int(digest.window_start.timestamp()))
+        if key not in labels:
+            return
+        # The reader's own answer, not the raw deviation: `deviation_probability` is monotone in
+        # `max |ratio - 1|` (so every AUC below is unchanged) and it is the number the gate compares
+        # against a bar, so a bar calibrated here is a bar the deployment can use.
+        probability = deviation_probability(digest)
+        scores.append(float(probability) if probability is not None else 0.0)
+        text_scores.append(text_deviation(getattr(digest, "interpretation", "") or "") or 0.0)
+        truth.append(1 if labels[key] else 0)
+
+    def consume(aggregators: Sequence[Any]) -> None:
+        for aggregator in aggregators:
+            digest = build_digest(aggregator, baselines, profile=settings.digest.profile,
+                              precision=settings.digest.host_precision,
+                              ratio_floor=settings.digest.host_ratio_floor)
+            baselines.observe(digest.service, digest.metrics)
+            record(digest)
+
+    for event in flatten_streams([stream]):
+        windower.add(event)
+        consume(windower.ready())
+    consume(windower.flush())
+    return scores, text_scores, truth
+
+
+def reader_scores(settings: Settings, streams: Sequence[Stream]) -> Dict[str, List[Tuple[float, bool]]]:
+    """The reader's answer and the label for every scored window, per recording. No Laya call."""
+    labelled: Dict[str, List[Tuple[float, bool]]] = {}
+    for stream in streams:
+        scores, _text, truth = _replay_scores(settings, stream)
+        labelled[stream.name] = [(float(score), bool(int(label)))
+                                 for score, label in zip(scores, truth)]
+    return labelled
+
+
+def label_free_cut(scores: Sequence[float], budget: float) -> Optional[float]:
+    """The bar that would alert on `budget` of these windows, read off the scores and nothing else.
+
+    The loop's headline result for the reader (recall 0.860 at a 10% budget) comes from a sweep that
+    scans the labels to pick its cut, so it is an upper bound no deployment can reach. This function is
+    what a deployment *can* compute: sort its own scores, take the `budget` quantile, and put the bar
+    there. The difference between the two is the price of not knowing the answer, and it belongs in the
+    table next to the number it discounts.
+    """
+    values = sorted(float(score) for score in scores)
+    if not values:
+        return None
+    if budget <= 0.0:
+        return values[-1]
+    if budget >= 1.0:
+        return values[0]
+    index = int(round(len(values) * (1.0 - budget))) - 1
+    index = min(max(index, 0), len(values) - 1)
+    return values[index]
+
 
 
 def _comparison_values(comparison: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -746,6 +805,7 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
     )
 
     operating = operating_point_by_recording(score_groups, budget)
+    free = free_cut_rates(score_groups, budget)
     return Measurement(
         candidate=candidate.name if candidate is not None else "baseline",
         recall=_rate(counts, "tp", "fn"),
@@ -766,8 +826,48 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
         budget=budget,
         thresholds_at_budget=operating.get("thresholds") or {},
         at_budget_pooled=bool(operating.get("pooled")),
+        recall_at_free_cut=free["recall"],
+        fpr_at_free_cut=free["fpr"],
         auc_by_recording=auc_by_recording,
     )
+
+
+def free_cut_rates(groups: Sequence[Tuple[str, Sequence[Any]]],
+                   budget: float) -> Dict[str, Optional[float]]:
+    """Recall and false-positive rate of the bar a deployment could compute without labels.
+
+    `recall_at_budget` is an upper bound: it is found by sweeping the observed scores and keeping the cut
+    with the highest recall inside the budget, which reads the labels. This is the same budget spent via
+    `label_free_cut` — one bar per recording, taken from that recording's own score distribution — so the
+    gap between the two numbers is the price of not knowing the answer.
+
+    It exists because round 20 found the loop using the fitted bound as the reference for "is this
+    deployable": a configuration whose bar can be computed from traffic alone was rejected for falling
+    short of a number no deployment can reach. Both numbers are reported; only this one can be shipped.
+    """
+    tp = fp = positives = negatives = 0
+    for _name, scores in groups:
+        usable = [score for score in scores
+                  if getattr(score, "predicted_probability", None) is not None
+                  and getattr(score, "predicted_anomaly", None) is not None
+                  and not getattr(score, "error", None)]
+        if not usable:
+            continue
+        cut = label_free_cut([float(score.predicted_probability) for score in usable], budget)
+        if cut is None:
+            continue
+        for score in usable:
+            hit = float(score.predicted_probability) >= cut
+            if bool(score.expected_anomaly):
+                positives += 1
+                tp += 1 if hit else 0
+            else:
+                negatives += 1
+                fp += 1 if hit else 0
+    return {
+        "recall": (tp / positives) if positives else None,
+        "fpr": (fp / negatives) if negatives else None,
+    }
 
 
 # --------------------------------------------------------------------------------------
@@ -859,22 +959,25 @@ def alerts_per_1000(measurement: "Measurement") -> Optional[float]:
 
 
 def beats_own_cut(measurement: "Measurement") -> bool:
-    """Whether the recorded configuration is at least as good as the cut the loop computes itself.
+    """Whether the recorded configuration is at least as good as the cut a deployment could compute.
 
-    The second half of `deployable`, split out because it is the half that a *regression* can be
-    stated against: a candidate that lowers the shipped recall below the budget-fitted recall has
-    moved from "not worse than a free alternative" to "worse than a free alternative", whatever its
-    bill. True when the budget curve is missing (nothing to compare against).
+    The reference is `recall_at_free_cut` when it exists — the bar taken from the scores alone — and the
+    budget-fitted recall only as a fallback for measurements recorded before that column existed. The
+    distinction matters: round 20 found the loop rejecting a configuration *because* its bar was
+    computable from traffic (`recall 0.211` against a fitted bound of `0.860`), which is comparing a
+    deployment with an upper bound no deployment can reach. True when neither reference exists.
     """
     if measurement.recall is None:
         return False
-    if measurement.recall_at_budget is None:
+    reference = (measurement.recall_at_free_cut if measurement.recall_at_free_cut is not None
+                 else measurement.recall_at_budget)
+    if reference is None:
         return True
-    return measurement.recall + 1e-9 >= measurement.recall_at_budget
+    return measurement.recall + 1e-9 >= reference
 
 
 def own_cut_shortfall(measurement: "Measurement") -> float:
-    """The share of the free cut's recall that the recorded configuration gives up.
+    """The share of the deployable cut's recall that the recorded configuration gives up.
 
     `beats_own_cut` is the two-valued form, and for acceptance two values are right: nothing is gained by
     calling a configuration "almost as good as the free one". For *rejection* the size matters, because a
@@ -882,11 +985,13 @@ def own_cut_shortfall(measurement: "Measurement") -> float:
     while still being a large improvement on the baseline. Zero when the comparison is undefined, so an
     unmeasurable candidate is never rejected for a shortfall nobody measured.
     """
-    if measurement.recall is None or measurement.recall_at_budget is None:
+    reference = (measurement.recall_at_free_cut if measurement.recall_at_free_cut is not None
+                 else measurement.recall_at_budget)
+    if measurement.recall is None or reference is None:
         return 0.0
-    if measurement.recall_at_budget <= 0.0:
+    if reference <= 0.0:
         return 0.0
-    return max(0.0, (measurement.recall_at_budget - measurement.recall) / measurement.recall_at_budget)
+    return max(0.0, (reference - measurement.recall) / reference)
 
 
 def tokens_per_incident(measurement: "Measurement") -> Optional[float]:
@@ -1464,6 +1569,20 @@ def format_round(result: RoundResult) -> str:
             continue
         lines.append("  shipped threshold  %-22s recall %.3f  alerts/1k %6.0f  fpr %.3f"
                      % (label, measurement.recall, alerts_per_1000(measurement), measurement.fpr))
+    for candidate, measurement, _verdict in [(None, result.baseline, None)] + list(result.trials):
+        label = "baseline" if candidate is None else candidate.name
+        if measurement.recall_at_free_cut is None:
+            continue
+        lines.append("  label-free cut     %-22s recall %.3f  fpr %s"
+                     % (label, measurement.recall_at_free_cut,
+                        "n/a" if measurement.fpr_at_free_cut is None
+                        else "%.3f" % measurement.fpr_at_free_cut))
+    if any(m.recall_at_free_cut is not None
+           for _c, m, _v in [(None, result.baseline, None)] + list(result.trials)):
+        lines.append("  label-free: the bar a deployment can compute from its own scores at the %.0f%% alert rate."
+                     % (100 * result.rules.fpr_budget))
+        lines.append("  It controls alert rate, not false-positive rate: on an incident-enriched stream the two differ,")
+        lines.append("  and the gap to recall@b is the price of not knowing which alerts were false.")
     if (result.baseline.fpr is not None
             and result.baseline.fpr > result.rules.deploy_fpr_ceiling + 1e-9):
         lines.append("  ! the deployed configuration already alerts on %.0f%% of windows on this stream,"

@@ -23,6 +23,7 @@ import argparse
 import json
 import sys
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -44,9 +45,11 @@ from .evolve import (
     format_round,
     grade,
     history,
+    label_free_cut,
     measure,
     persist,
     previously_rejected,
+    reader_scores,
     rejudge,
     run_round,
 )
@@ -343,6 +346,39 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 "forced by --catalogue: the fixed list, so the rule selection was not consulted",
                 list(catalogue()), proposal.space, proposal.source)
         _print(format_proposal(proposal))
+        return 0
+
+    if args.calibrate_bar:
+        # No Laya either: the reader is deterministic, so a bar read off its own scores needs no model.
+        settings, streams, source, base_overrides = _evolve_streams(args, settings)
+        if not streams:
+            _print("no streams to calibrate on")
+            return 2
+        reader_settings = replace(settings.digest, scoring="deviation")
+        bars_settings = settings.with_overrides(digest=reader_settings)
+        try:
+            scored = reader_scores(bars_settings, streams)
+        except (OSError, ValueError) as error:
+            _print("cannot calibrate: %s" % error)
+            return 2
+        budgets = (0.02, 0.05, 0.10)
+        pooled = [score for rows in scored.values() for score, _label in rows]
+        _print("=" * 78)
+        _print("brian evolve - bars a deployment can compute without labels")
+        _print("=" * 78)
+        _print("stream           %s  (%d windows)" % (source, len(pooled)))
+        _print("")
+        _print("%-24s %8s %10s %8s" % ("recording", "budget", "bar", "windows"))
+        for name in list(scored) + ["pooled"]:
+            rows = pooled if name == "pooled" else [score for score, _label in scored[name]]
+            for budget in budgets:
+                _print("%-24s %7.0f%% %10.4f %8d"
+                       % (name, budget * 100.0, label_free_cut(rows, budget) or 0.0, len(rows)))
+        _print("")
+        _print("Each bar is the (1 - budget) quantile of these scores: the value a deployment would")
+        _print("need in order to alert on that share of windows without ever looking at a label.")
+        _print("A fitted cut needs the labels; this one needs a day of traffic. Put one of these")
+        _print("numbers in a candidate to measure what it costs to deploy without the answer.")
         return 0
 
     laya = LayaClient(settings.laya)
@@ -1422,6 +1458,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="comma list of catalogue names (default: whatever the proposal rule chooses)")
     evolve.add_argument("--propose", action="store_true",
                         help="print what the proposal rule would measure and why, then exit (no Laya)")
+    evolve.add_argument("--calibrate-bar", action="store_true",
+                        help="print the reader's label-free bars for this stream at 2/5/10%% "
+                             "alert rates, then exit (no Laya)")
     evolve.add_argument("--catalogue", action="store_true",
                         help="force the fixed catalogue instead of letting the ledger choose the rule")
     evolve.add_argument("--expand", action="store_true",

@@ -1063,6 +1063,80 @@ them in force with:  brian evolve --verify --verify-version <n>
 
 在 SMD 上两列相等（3.17 节），于是当时的结论是"渲染没丢东西"；服务域上文本比字段低 0.03–0.28，说明**那条结论是 SMD 的结论，不是渲染器的性质**。对读者来说这没关系（它照样赢引擎），但它让"引擎本可以达到字段上限"这句话在服务域上不再成立——它只能达到文本上限。
 
+### 3.27 一个部署自己算得出的门限：0.860 里有多少是"偷看答案"
+
+3.26 节接受了 `host-scoring-deviation`，理由是召回 0.068 → 0.860。边界 43 写着：那个 0.860 是 `fit_cut` 扫着标签挑出来的切点，**部署时看不到标签**。这一轮问的就是——同一个读者，门限只能从自己的分数分布里取时，还剩下多少？
+
+先让代码回答"这条流能取到什么门限"：
+
+```
+$ brian evolve --calibrate-bar --stream-file data\rcaeval\stream.json
+stream           RCAEval RE1-OB  (543 windows)
+recording                  budget        bar  windows
+re1ob_adservice_cpu_1          2%     0.9834       71
+re1ob_adservice_cpu_1          5%     0.9832       71
+re1ob_adservice_cpu_1         10%     0.9831       71
+re1ob_adservice_delay_1       10%     0.0826       13
+re1ob_adservice_loss_2        10%     0.1243       13
+re1ob_adservice_mem_1         10%     0.9673       71
+pooled                         2%     0.9835      543
+pooled                         5%     0.9834      543
+pooled                        10%     0.9831      543
+Each bar is the (1 - budget) quantile of these scores: the value a deployment would
+need in order to alert on that share of windows without ever looking at a label.
+A fitted cut needs the labels; this one needs a day of traffic. Put one of these
+numbers in a candidate to measure what it costs to deploy without the answer.
+```
+
+同一批 543 个窗口（279 个故障）上，两种门限给出的东西完全不同：
+
+| 门限来源 | 门限 | 召回 | 误报 | 告警数 |
+| --- | --- | --- | --- | --- |
+| 扫标签拟合（上限，不可部署） | 0.5310 | 0.860 | 0.000 | 240 |
+| 分数分布分位，池化一把（可部署） | 0.9831 | 0.197 | 0.000 | 55 |
+| 分数分布分位，每条记录各一把（循环实际记的） | — | 0.226 | 0.028 | — |
+
+最后一行是循环表里的 `label-free cut`：`free_cut_rates()` 按记录各取分位，所以两条记录不共享一把尺。它比池化稍好，但仍远低于拟合上限。
+
+读者的分数是**双峰**的：240 个故障窗口都在 0.531 以上，其余都在这条线以下。所以"10% 的告警率"这个分位落进了故障堆里——它按构造只能控制**告警频率**，不能控制**误报率**，因为它不知道哪条告警是误报。
+
+**第一次测量因此被拒绝，而那次拒绝是 bug。** 循环复用了自己的 `beats_own_cut`：它拿"上线配置的召回"去和 `recall_at_budget`（=0.860，拟合上限）比，于是任何可部署的形态都必然判为倒退：
+
+```
+x deviation-bar-free  the recorded configuration pages on 75% fewer of the failures the cut
+                      the budget rule already computes would find: shipped recall 0.211
+                      against 0.860 at the 10% budget, past the 10% shortfall tolerated
+```
+
+这是 3.8 节那个错误的镜像：那里是拿"接受指标"当"上线指标"，这里是拿"上限"当"可部署参照"。修法是把两个数都记下来——`Measurement.recall_at_free_cut` / `fpr_at_free_cut`，由 `free_cut_rates()` 按每条记录自己的分位切点统计 tp/fp——`beats_own_cut()` 与 `own_cut_shortfall()` 优先读它，老记录退回它记录的旧列。
+
+修完重跑，同一个候选被接受（`var/evolve/round-20261117T234816Z.json`）：
+
+```
+candidate            recall@b   fpr@b  tok/rep   tok/inc evidence verdict
+baseline                0.068   0.079     1618     15514     100% -
+deviation-bar-free      0.860   0.000     1703       352     100% accept
+
+  shipped threshold  baseline             recall 0.405  alerts/1k    271  fpr 0.271
+  shipped threshold  deviation-bar-free   recall 0.211  alerts/1k      0  fpr 0.000
+  label-free cut     baseline             recall 0.136  fpr 0.130
+  label-free cut     deviation-bar-free   recall 0.226  fpr 0.028
+
++ deviation-bar-free  recall at 10% false positives 0.068 -> 0.860, and the bill per incident
+                      it finds falls 15515 -> 352 tokens even though the bill per report
+                      rises 1618 -> 1703
+```
+
+三句话读这张表：
+
+1. **不知道答案的代价是 0.860 → 0.226**。也就是说，"读者是引擎的 12.6 倍"这个说法里，大约 74% 是标签扫描贡献的。可部署的形态仍然赢，但赢的是 1.66 倍（0.226 对基线自己的可部署形态 0.136），不是 12.6 倍。
+2. 赢了不止召回：上线门限处的误报从 271 个/千窗降到 0，每故障 token 从 15 514 降到 352。这两条比召回数字更值得写进运维的账。
+3. 分位门限控制的是告警率，不是误报率——这条流 51% 是故障窗口，10% 的告警率对应 13.0% 的误报率。把两个预算混为一谈会得到一个"看起来守住了 10% 误报"的配置，其实只是告了 10% 的窗口。
+
+边界 45（§5）把第 3 条固定下来：无标签门限只能按告警率定，任何用 `fit_cut` 报出来的召回都必须同时给出分位门限的结果。
+
+**这一轮接受了一个比在役配置更差的补丁，所以没有生效。** 在役状态是 `v019`（`digest.scoring=deviation` + 两条 0.87 门限），它在服务域上的上线形态是**召回 0.807 / 误报 0.000**；本轮接受的 `deviation-bar-free` 把门限换成 0.9831，上线形态是**召回 0.211 / 误报 0.000**。它之所以被接受，是因为循环的比较基准是**出厂默认**（`load_settings()`，模型路径），而不是**在役状态**——`brian evolve` 从不读 `current.json`。于是"接受"只说明"比出厂默认好"，不说明"比线上跑的好"。本轮因此只记录、不 `--apply`，并在 §6 里把"用在役配置做基线"列为下一件事。这就是边界 46（§5）。
+
 ---
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
@@ -1141,6 +1215,10 @@ missing for the next level
 
 44. **补丁栈不是配置。** 3.26 节的 `--apply` 把服务域接受的 `v019`（`digest.scoring=deviation` + 两条 0.87 门限，测量时 `rolling_window=0`）叠在主机域留下的 `v013`（`rolling_window=100`、`rank_probability=0.85`）之上，在役状态因此变成"读者 + 排序"，而那句承诺是在"读者 + 电平"上测出来的。`INTERACTIONS` 现在是一份手写的成对声明（`scoring`↔`rolling_window`、`rolling_window`↔`rank_probability`、`anomaly_probability`↔`notify_probability`），`--apply` 遇到继承来的相互作用项会打印 `!` 警告；但"哪一对会互相改变含义"是人列的，设置之间没有依赖模型，所以这份名单永远可能不完整。真正安全的做法是**一次只让一个版本的整份补丁在役**（本轮已按此重建状态：`var/evolve/current.json` 只含 `v019` 的三个变量）。
 
+45. **无标签门限只能按告警率定，它的召回是"你得到多少"，不是"你要多少"。** 3.27 节把读者的分位门限和拟合切点放在同一张表上：0.9831 的分数分位给出召回 0.197 / 误报 0.000 / 55 条告警，而同一条流上扫标签的 0.5310 给出 0.860 / 0.000 / 240 条。差别不是"调参没调好"，而是**信息**：分位门限不知道哪条告警是误报，所以它只能控制告警频率；在 51% 是故障窗口的流上，10% 的告警率对应 13.0% 的误报率，两个预算因此不能共用一个数字（现在仍共用 `fpr_budget`）。**任何用 `fit_cut` 报出来的召回，都必须同时给出同一条流上的分位门限结果**，否则那个数字描述的是数据，不是部署。
+
+46. **循环的基线是出厂默认，不是在役配置。** 3.27 节接受的 `deviation-bar-free` 上线形态是召回 0.211，而在役的 `v019` 是 0.807——它被接受只因为比较基准是 `load_settings()`。`brian evolve` 从不读 `current.json`，所以"接受"现在的意思是"比出厂默认好"，不是"比线上跑的好"；`--apply` 的守卫只挡组合、不挡倒退。本轮的处理是**只记录不生效**（没有写 `v020`），把"以在役状态为基线重测"留给下一轮——它同时会逼出一个设计问题：`current.json` 是全局一份，而两个域需要的门限不同。
+
 ---
 
 ## 6. 下一步（按验证强度排序）
@@ -1155,3 +1233,5 @@ missing for the next level
 8. **（3.25 已完成，有界）让 `Imp` 可变，分级到 L4。** 提议规则现在从账本里选（目录 vs 有界扩充），每一轮记录 mode、空间指纹、`seeds` 与理由；可变的是**问什么**，`decide()`、评测器与目标函数仍在循环之外（边界 37/38）。种子按流隔离（边界 39），所以一次扩充只在这条流上有意义。剩下的路是 L5 的**迁移**：把同一套循环搬到第二个域（RCAEval 的服务指标与 SMD 的主机指标已经是两种域，但候选目录只服务后者）而不重写机制。
 
 9. **（3.26 已完成，两个域）迁移检验做了第一遍，结论是"机器迁移、配方不迁移"。** 服务域上读者照样赢引擎（池化 0.916 对 0.684），但主机域接受的 rank 形态在平稳的服务记录上更差（0.734 对 level 的 0.916）；引擎的失败按指标族分裂（cpu/disk 能读，mem 反向）；标签时间网格的缺陷让第 2、3 轮在这条流上的判决作废。同一轮还补上了第二个成本分母（每故障 token），让"召回涨 12.6 倍但每报告贵 5.3%"的候选第一次能被接受，并把"渲染丢信息"从 SMD 的结论降级成一条域相关的事实。剩下的路：给服务域一份自己的候选目录（现在的目录只服务主机形态），以及一个能跨域比较"哪种形态适合哪个域"的机制——后者被边界 39 的种子隔离挡在门外，需要显式打开。
+
+10. **（3.27 已完成）无标签门限进了表格，也进了判定。** `brian evolve --calibrate-bar` 用读者自己的分数分布给出 2/5/10% 告警率对应的门限；每一轮现在同时打印 `recall@b`（拟合上限）与 `label-free cut`（可部署形态），`Measurement.recall_at_free_cut` 让 `beats_own_cut`/`own_cut_shortfall` 拿可部署的参照去判"是否倒退"。同一批数据上 0.860 → 0.226，说明 12.6 倍里约 74% 是偷看答案。剩下的路：把"告警率预算"与"误报率预算"分开建模（现在 `fpr_budget` 一个数字同时被两种门限使用，边界 45），以及给每条记录单独标定告警率（现在的分位是按记录算的，但预算仍是全局一个）。

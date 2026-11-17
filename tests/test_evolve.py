@@ -31,8 +31,10 @@ from brian.evolve import (
     format_audit,
     format_rejudge,
     format_round,
+    free_cut_rates,
     grade,
     history,
+    label_free_cut,
     operating_point,
     operating_point_by_recording,
     own_cut_shortfall,
@@ -242,9 +244,10 @@ def test_without_an_at_budget_pair_the_raw_rates_still_decide():
 
 
 class _Score:
-    def __init__(self, probability, label, error=None):
+    def __init__(self, probability, label, error=None, predicted=None):
         self.predicted_probability = probability
         self.expected_anomaly = label
+        self.predicted_anomaly = bool(label) if predicted is None else predicted
         self.error = error
 
 
@@ -1463,3 +1466,83 @@ def test_the_incident_bill_is_none_when_there_is_no_fault_to_divide_by():
     bare = at_budget("x", recall=0.5, raw_recall=0.5)
     bare.confusion = {"tp": 0, "fp": 0, "tn": 10, "fn": 0}
     assert tokens_per_incident(bare) is None
+
+
+# --------------------------------------------------------------------------------------
+# the bar a deployment can compute
+# --------------------------------------------------------------------------------------
+def test_the_label_free_cut_is_the_quantile_a_deployment_could_read_off_its_own_traffic():
+    scores = [0.1, 0.2, 0.5, 0.9, 0.95, 0.99, 0.995, 0.999, 0.9995, 0.9999]
+    assert label_free_cut(scores, 0.0) == pytest.approx(0.9999)
+    assert label_free_cut(scores, 1.0) == pytest.approx(0.1)
+    ten = label_free_cut(scores, 0.10)
+    twenty = label_free_cut(scores, 0.20)
+    assert ten is not None and twenty is not None
+    assert twenty < ten  # a looser alert rate needs a lower bar, or it would not alert more
+    assert label_free_cut([], 0.1) is None
+
+
+def test_the_label_free_rates_are_counted_against_each_recordings_own_scores():
+    """One bar per recording: two hosts do not share a scale, and neither do their bars."""
+    high = [_Score(0.95, True), _Score(0.90, True), _Score(0.10, False), _Score(0.20, False)]
+    low = [_Score(0.30, True), _Score(0.25, True), _Score(0.05, False), _Score(0.01, False)]
+    groups = [("high", high), ("low", low)]
+
+    rates = free_cut_rates(groups, budget=0.25)
+
+    assert rates["recall"] == pytest.approx(1.0)
+    assert rates["fpr"] == pytest.approx(0.0)
+    # one pooled bar cannot serve both scales: it sits above the low recording's positives
+    pooled = free_cut_rates([("all", high + low)], budget=0.25)
+    assert pooled["recall"] is not None and pooled["recall"] < rates["recall"]
+
+
+def test_the_deployability_reference_is_the_bar_a_deployment_can_compute():
+    """Round 20: the guard measured against the label-fitted bound, so it rejected the honest form.
+
+    The shipped configuration (recall 0.211) is 6.6% short of the bar a deployment can compute (0.226) and
+    inside the tolerance the rules allow. Against the fitted bound (0.860) the same configuration is 75%
+    short, which is what the loop reported before the free-cut column existed.
+    """
+    measurement = at_budget("reader", recall=0.211, fpr=0.0, raw_recall=0.211)
+    measurement.recall_at_budget = 0.860
+    measurement.recall_at_free_cut = 0.226
+    measurement.fpr_at_free_cut = 0.130
+
+    assert own_cut_shortfall(measurement) == pytest.approx((0.226 - 0.211) / 0.226, abs=1e-9)
+    assert own_cut_shortfall(measurement) < EvolveRules().operational_tolerance
+    measurement.recall_at_free_cut = None  # an old record falls back to the bound it recorded
+    assert own_cut_shortfall(measurement) == pytest.approx((0.860 - 0.211) / 0.860, abs=1e-9)
+    assert own_cut_shortfall(measurement) > EvolveRules().operational_tolerance
+
+
+def test_a_measurement_remembers_both_bars():
+    original = at_budget("reader", recall=0.2, raw_recall=0.2)
+    original.recall_at_free_cut = 0.226
+    original.fpr_at_free_cut = 0.130
+
+    restored = Measurement.from_dict(original.to_dict())
+
+    assert restored.recall_at_free_cut == pytest.approx(0.226)
+    assert restored.fpr_at_free_cut == pytest.approx(0.130)
+
+
+def test_the_table_prints_the_bar_a_deployment_can_compute_next_to_the_fitted_one():
+    baseline = measure("baseline", recall=0.405, tokens=1618.0)
+    baseline.recall_at_budget = 0.068
+    baseline.recall_at_free_cut = 0.136
+    baseline.fpr_at_free_cut = 0.130
+    trial = measure("deviation-bar-free", recall=0.211, tokens=1703.0)
+    trial.recall_at_budget = 0.860
+    trial.recall_at_free_cut = 0.226
+    trial.fpr_at_free_cut = 0.0
+    result = RoundResult(started_at="t", finished_at="t", stream={}, rules=EvolveRules(),
+                         baseline=baseline,
+                         trials=[(Candidate("deviation-bar-free", "h", "digest", "scoring", "deviation"),
+                                  trial, Verdict("deviation-bar-free", True, "quality", "ok"))])
+
+    table = format_round(result)
+
+    assert "label-free cut" in table
+    assert "0.136" in table and "0.226" in table
+    assert "controls alert rate, not false-positive rate" in table
