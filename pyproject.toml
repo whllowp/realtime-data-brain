@@ -30,4 +30,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `src/` layout: without this the suite only runs where the package happens to be installed, and
+# "tests pass" then depends on state outside the repository.
+pythonpath = ["src"]
 addopts = "-q"

@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .topics import DEFAULT_PREFIX, env_prefix
 
@@ -429,6 +429,12 @@ def load_settings() -> Settings:
             page_severity_rank=_int("BRIAN_GATE_PAGE_RANK", gate_defaults.page_severity_rank),
             suppress_confidence=_float("BRIAN_GATE_SUPPRESS_CONF", gate_defaults.suppress_confidence),
             normal_probability=_float("BRIAN_GATE_NORMAL_P", gate_defaults.normal_probability),
+            always_analyze_alerts=_flag("BRIAN_GATE_ALWAYS_ANALYZE",
+                                        gate_defaults.always_analyze_alerts),
+            analyze_actions=_env("BRIAN_GATE_ANALYZE_ACTIONS", gate_defaults.analyze_actions)
+            or gate_defaults.analyze_actions,
+            reuse_report_within_s=_int("BRIAN_GATE_REUSE_REPORT_S",
+                                       gate_defaults.reuse_report_within_s),
         ),
         window=WindowSettings(
             size_s=_int("BRIAN_WINDOW_SIZE_S", window_defaults.size_s),
@@ -446,3 +452,29 @@ def load_settings() -> Settings:
         log_level=_env("BRIAN_LOG_LEVEL", "info") or "info",
         echo=_flag("BRIAN_ECHO", False),
     )
+
+
+#: `(section, field)` -> the environment variable that sets it.
+#:
+#: Kept explicit and adjacent to `load_settings` because it is the *integration* surface: an improvement
+#: loop that accepts a change but cannot express it in deployment configuration has not integrated
+#: anything. `tests/test_config_env.py` fires every entry through the real loader, so a name that drifts
+#: from `load_settings` fails rather than silently producing a version file that does nothing.
+ENV_VARS: Dict[Tuple[str, str], str] = {
+    ("llm", "max_context_events"): "BRIAN_LLM_MAX_CONTEXT_EVENTS",
+    ("gate", "always_analyze_alerts"): "BRIAN_GATE_ALWAYS_ANALYZE",
+    ("gate", "analyze_actions"): "BRIAN_GATE_ANALYZE_ACTIONS",
+    ("gate", "reuse_report_within_s"): "BRIAN_GATE_REUSE_REPORT_S",
+    ("gate", "anomaly_probability"): "BRIAN_GATE_ANOMALY_P",
+    ("gate", "notify_probability"): "BRIAN_GATE_NOTIFY_P",
+    ("gate", "confidence_auto"): "BRIAN_GATE_CONF_AUTO",
+    ("gate", "confidence_floor"): "BRIAN_GATE_CONF_FLOOR",
+    ("gate", "page_severity_rank"): "BRIAN_GATE_PAGE_RANK",
+    ("gate", "suppress_confidence"): "BRIAN_GATE_SUPPRESS_CONF",
+    ("gate", "normal_probability"): "BRIAN_GATE_NORMAL_P",
+    ("window", "size_s"): "BRIAN_WINDOW_SIZE_S",
+    ("window", "slide_s"): "BRIAN_WINDOW_SLIDE_S",
+    ("window", "baseline_windows"): "BRIAN_BASELINE_WINDOWS",
+    ("window", "baseline_windows_long"): "BRIAN_BASELINE_WINDOWS_LONG",
+    ("window", "min_events"): "BRIAN_MIN_WINDOW_EVENTS",
+}

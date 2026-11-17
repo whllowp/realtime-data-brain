@@ -32,6 +32,17 @@ from .contracts import Event, Lineage, dumps, loads
 from .demo import DEFAULT_SEQUENCE, EXPECTED, LabeledWindow, flatten, generate
 from .cost import format_ledger, ledger_from_traces
 from .eval import Evaluator, format_report, gate_recommendation
+from .evolve import (
+    EVOLVE_DIR,
+    EvolveRules,
+    catalogue,
+    format_round,
+    grade,
+    history,
+    persist,
+    previously_rejected,
+    run_round,
+)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .laya.gate import explain_thresholds
 from .laya.qcatalog import CATALOG_VERSION, catalog_hash, describe as describe_catalog, validate_questions
@@ -155,6 +166,126 @@ def cmd_cost(args: argparse.Namespace, settings: Settings) -> int:
         _print("")
         _print("No tokens were spent: the reasoner is in deterministic mode, so there was no analysis")
         _print("bill to measure.")
+    return 0
+
+
+def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
+    """Run the improvement mechanism: propose, measure, select, and (only with --apply) integrate."""
+    root = Path(".")
+    directory = Path(EVOLVE_DIR)
+
+    if args.history:
+        rounds = history(root)
+        if not rounds:
+            _print("no rounds recorded yet in %s" % directory)
+            return 0
+        _print("=" * 78)
+        _print("brian evolve - recorded rounds (oldest first)")
+        _print("=" * 78)
+        for index, record in enumerate(rounds, start=1):
+            baseline = (record.get("baseline") or {}).get("tokens_per_report") or 0.0
+            trials = record.get("trials") or []
+            accepted = record.get("accepted") or []
+            kept = [(t.get("measurement") or {}).get("tokens_per_report") or 0.0
+                    for t in trials if (t.get("verdict") or {}).get("accepted")]
+            after = "%.0f" % min(kept) if kept else "(none accepted)"
+            _print("%2d  %s  accepted=%-24s tokens/report %.0f -> %s"
+                   % (index, record.get("finished_at") or record.get("started_at") or "?",
+                      ",".join(accepted) or "-", baseline, after))
+        return 0
+
+    if args.grade:
+        try:
+            rounds = history(root)
+        except OSError:
+            rounds = []
+        result = grade(has_catalogue=bool(catalogue()), has_history=bool(rounds),
+                       mutates_mechanism=False, applies_changes=False)
+        _print("=" * 78)
+        _print("brian evolve - how much of the loop is autonomous")
+        _print("=" * 78)
+        _print("level            %s" % result["level"])
+        _print("")
+        _print("capabilities")
+        for line in result["capabilities"]:
+            _print("  + %s" % line)
+        _print("")
+        _print("missing for the next level")
+        for line in result["missing_for_next"]:
+            _print("  - %s" % line)
+        _print("")
+        _print("Note: an accepted change is recorded as a version file; exporting it and restarting")
+        _print("the service is still a human step, so the ladder puts this at L2 however autonomous")
+        _print("the selection is. Grading it higher for writing tidy JSON would be the self-flattery")
+        _print("the survey warns about.")
+        return 0
+
+    laya = LayaClient(settings.laya)
+    service = _service_report(settings, laya)
+    if not service.get("reachable") or not service.get("model_available"):
+        _print("cannot evolve: %s" % (service.get("error") or service.get("model_error")))
+        _print("Start Laya with:  D:\\project\\laya\\service\\start.cmd")
+        return 3
+
+    sequence = (tuple(part.strip() for part in args.sequence.split(",") if part.strip())
+                if args.sequence else DEFAULT_SEQUENCE)
+    windows = generate(sequence=sequence, service=args.service, warmup_minutes=args.warmup,
+                       seed=args.seed)
+
+    known = {candidate.name: candidate for candidate in catalogue()}
+    if args.candidates:
+        names = [name.strip() for name in args.candidates.split(",") if name.strip()]
+        unknown = [name for name in names if name not in known]
+        if unknown:
+            _print("unknown candidates: %s" % ", ".join(unknown))
+            _print("available: %s" % ", ".join(sorted(known)))
+            return 2
+        selected = [known[name] for name in names]
+    else:
+        selected = list(known.values())
+
+    rules = EvolveRules(min_gain=args.min_gain)
+    prior = previously_rejected(root)
+    if prior:
+        _print("Previously rejected (recorded, so this is not proposed as new):")
+        for name, reason in sorted(prior.items()):
+            _print("  %-22s %s" % (name, reason))
+        _print("")
+
+    _print("evolving over %d windows (%d scored, %d anomalous, %d events)"
+           % (len(windows), sum(1 for w in windows if w.scored),
+              sum(1 for w in windows if w.scored and (w.expected or {}).get("is_anomaly")),
+              sum(len(w.events) for w in windows)))
+    _print("measuring baseline…")
+    result = run_round(settings, windows, selected=selected, rules=rules,
+                       service=args.service)
+    _print("")
+    _print(format_round(result))
+
+    if args.apply:
+        written = persist(root, result)
+        _print("")
+        _print("persisted round %s" % written.get("round"))
+        for version_path in written.get("versions") or []:
+            _print("  version %s" % version_path)
+            try:
+                payload = json.loads(Path(version_path).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            _print("    export %s" % payload.get("env"))
+            _print("    rollback: %s" % payload.get("rollback"))
+    elif result.accepted:
+        _print("")
+        _print("Dry run: accepted changes are printed but not written. Re-run with --apply to")
+        _print("persist a version file and the environment variables that reproduce it.")
+
+    if args.json_out:
+        target = Path(args.json_out)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(result.to_dict(), indent=2, ensure_ascii=False) + "\n",
+                          encoding="utf-8")
+        _print("")
+        _print("round written to %s" % target)
     return 0
 
 
@@ -1072,6 +1203,27 @@ def build_parser() -> argparse.ArgumentParser:
     cost.add_argument("--only-actions", dest="analyze_actions", default="auto_triage,deep_analysis,page_human",
                       help="comma list of actions allowed to spend tokens when --no-always-analyze is used")
     cost.set_defaults(func=cmd_cost)
+
+    evolve = sub.add_parser(
+        "evolve",
+        help="run the improvement mechanism: propose, measure, select, persist",
+    )
+    evolve.add_argument("--sequence", default="", help="comma-separated scenarios")
+    evolve.add_argument("--service", default="checkout-api")
+    evolve.add_argument("--warmup", type=int, default=20)
+    evolve.add_argument("--seed", type=int, default=7)
+    evolve.add_argument("--candidates", default="",
+                        help="comma list of catalogue names (default: every candidate)")
+    evolve.add_argument("--min-gain", type=float, default=0.05,
+                        help="fraction of tokens/report a change must save to be accepted")
+    evolve.add_argument("--apply", action="store_true",
+                        help="persist accepted changes as version files (default: dry, prints only)")
+    evolve.add_argument("--grade", action="store_true",
+                        help="print the L1-L5 grading and exit")
+    evolve.add_argument("--history", action="store_true",
+                        help="print every round recorded so far and exit")
+    evolve.add_argument("--json-out", help="write the round to this file as well")
+    evolve.set_defaults(func=cmd_evolve)
 
     demo = sub.add_parser("demo", help="run the full chain over synthetic telemetry")
     demo.add_argument("--sequence", help="comma-separated scenario names (default: the built-in sequence)")

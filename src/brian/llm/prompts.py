@@ -153,6 +153,21 @@ def rca_json_schema() -> Dict[str, Any]:
     }
 
 
+def _is_context_event(event: Event) -> bool:
+    """A deploy, version bump or config change: it reframes every other measurement in the window."""
+    payload = getattr(event, "payload", {}) or {}
+    return any(key in payload for key in ("deploy", "version", "config_change", "flag"))
+
+
+def _is_log(event: Event) -> bool:
+    return getattr(event, "kind", "") == "log"
+
+
+def _signature(event: Event) -> str:
+    payload = getattr(event, "payload", {}) or {}
+    return str(payload.get("error") or payload.get("message") or "")
+
+
 def select_events(events: Sequence[Event], max_events: int) -> List[Event]:
     """Choose which raw events reach the prompt: diagnostic value first, recency second.
 
@@ -181,10 +196,9 @@ def select_events(events: Sequence[Event], max_events: int) -> List[Event]:
     logs: List[Event] = []
     metrics: List[Event] = []
     for event in ordered:
-        payload = getattr(event, "payload", {}) or {}
-        if any(key in payload for key in ("deploy", "version", "config_change", "flag")):
+        if _is_context_event(event):
             context.append(event)
-        elif getattr(event, "kind", "") == "log":
+        elif _is_log(event):
             logs.append(event)
         else:
             metrics.append(event)
@@ -194,8 +208,7 @@ def select_events(events: Sequence[Event], max_events: int) -> List[Event]:
     first_sightings: List[Event] = []
     rest: List[Event] = []
     for event in logs:
-        payload = getattr(event, "payload", {}) or {}
-        signature = str(payload.get("error") or payload.get("message") or "")
+        signature = _signature(event)
         if signature not in seen:
             seen.add(signature)
             first_sightings.append(event)
@@ -212,6 +225,49 @@ def select_events(events: Sequence[Event], max_events: int) -> List[Event]:
             break
 
     return sorted(chosen, key=lambda event: event.event_time)
+
+
+def evidence_coverage(events: Sequence[Event], max_events: int) -> Dict[str, float]:
+    """How much of the available evidence survives `select_events(events, max_events)`.
+
+    The token ledger says what a smaller context costs; it says nothing about what it *omits*. Without a
+    configured model the explanation quality itself cannot be measured, but this can: whether the cut kept
+    the log lines, the distinct error signatures, the first failure of the window, and the deploy/config
+    markers. A saving that scores 1.0 on every column is a free saving; a saving that drops a column is a
+    blindfold with a smaller bill.
+
+    Every value is a fraction in `[0, 1]`, and `1.0` means "this cut removed nothing of that kind". An
+    empty event list is defined as full coverage rather than as a division by zero.
+    """
+    full = list(events)
+    selected = select_events(full, max_events) if 0 < max_events < len(full) else full
+
+    logs_full = [event for event in full if _is_log(event)]
+    logs_selected = [event for event in selected if _is_log(event)]
+    signatures_full = {_signature(event) for event in logs_full}
+    signatures_selected = {_signature(event) for event in logs_selected}
+    context_full = [event for event in full if _is_context_event(event)]
+    context_selected = [event for event in selected if _is_context_event(event)]
+    first_error_kept = (
+        logs_full[0].event_time == logs_selected[0].event_time
+        if logs_full and logs_selected
+        else not logs_full
+    )
+
+    def ratio(kept: int, total: int) -> float:
+        return 1.0 if not total else kept / total
+
+    return {
+        "log_retention": ratio(len(logs_selected), len(logs_full)),
+        "signature_retention": ratio(len(signatures_selected), len(signatures_full)),
+        "first_error_kept": 1.0 if first_error_kept else 0.0,
+        "context_retention": ratio(len(context_selected), len(context_full)),
+    }
+
+
+def evidence_floor(coverage: Mapping[str, float]) -> float:
+    """The worst column of a coverage reading: the one that decides whether the cut was safe."""
+    return min(coverage.values()) if coverage else 1.0
 
 
 def build_rca_messages(digest: Digest, decision: Decision,
