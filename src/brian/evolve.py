@@ -33,6 +33,7 @@ the missing capability named. A loop that grades itself L4 is a self-confirming 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field, replace
@@ -1129,6 +1130,11 @@ class RoundResult:
             "finished_at": self.finished_at,
             "stream": self.stream,
             "rules": self.rules.to_dict(),
+            # A round is evidence *for a ruleset*. Storing the numbers without saying which rules judged
+            # them produces a record that looks authoritative and cannot be audited, which is the failure
+            # the survey calls "no versioned infrastructure": traces exist, validation results exist, and
+            # nothing ties them to the version of the objective that produced them.
+            "rules_hash": rules_fingerprint(self.rules),
             "baseline": self.baseline.to_dict(),
             "trials": [
                 {"candidate": candidate.to_dict(), "measurement": measurement.to_dict(),
@@ -1142,6 +1148,17 @@ class RoundResult:
 
 def _now() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def rules_fingerprint(rules: EvolveRules) -> str:
+    """A short, stable hash of the objective a round was judged under.
+
+    Short because it is printed next to a round id in a table, stable because `to_dict` is sorted, and
+    derived from the rule *values* rather than from the file mtime — two identical rulesets must produce
+    the same fingerprint no matter when they were written.
+    """
+    blob = json.dumps(rules.to_dict(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
 def run_round(settings: Settings, streams: Sequence[Stream],
@@ -1215,6 +1232,7 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
             "accepted": result.accepted,
             "rejected": [v.candidate for _c, _m, v in result.trials if not v.accepted],
             "applied": list(result.accepted) if write_versions else [],
+            "rules_hash": rules_fingerprint(result.rules),
             "baseline_tokens_per_report": result.baseline.to_dict()["tokens_per_report"],
         }) + "\n")
 
@@ -1528,6 +1546,123 @@ def format_rejudge(result: Rejudge) -> str:
             outcome = "accepted" if verdict is not None and verdict.accepted else "rejected"
             lines.append("%-22s still %s, but the rule that decides it moved %s -> %s"
                          % (name, outcome, old_rule, new_rule))
+    return "\n".join(lines)
+
+
+@dataclass
+class Audit:
+    """Every recorded round re-decided under the rules in force now.
+
+    The survey's versioned-infrastructure problem in one object: a round is a measurement plus the
+    ruleset that judged it, and a ruleset that has since moved must be able to show which stored verdicts
+    it would now decide differently. `Moved` counts *verdicts*, not rounds, because one round can hold
+    ten candidates and moving one of them is a different fact from moving all ten.
+    """
+
+    rules: EvolveRules
+    fingerprint: str
+    rounds: int
+    trials: int
+    entries: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def moved(self) -> int:
+        return sum(len(entry["changed"]) for entry in self.entries)
+
+    @property
+    def relabelled(self) -> int:
+        return sum(len(entry["relabelled"]) for entry in self.entries)
+
+    @property
+    def stale(self) -> int:
+        """Rounds whose recorded ruleset differs from today's, by fingerprint."""
+        return sum(1 for entry in self.entries if entry["recorded_hash"] not in (None, "", self.fingerprint))
+
+
+def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
+    """Re-decide every stored round under `rules` and report what moves.
+
+    No measurement is re-run and no Laya call is made: this answers "do the records still say what this
+    objective says", which is the question a rule change raises. A round whose file is unreadable or
+    predates `rules_hash` is still audited — the fingerprint is then reported as unrecorded rather than
+    guessed, because inventing one would make an old record look versioned.
+    """
+    active = rules if rules is not None else EvolveRules()
+    fingerprint = rules_fingerprint(active)
+    entries: List[Dict[str, Any]] = []
+    rounds = 0
+    trials = 0
+    for record in history(root):
+        name = str(record.get("round") or "?")
+        payload = dict(record)
+        baseline = Measurement.from_dict(payload.get("baseline") or {})
+        changed: List[Dict[str, Any]] = []
+        relabelled: List[Dict[str, Any]] = []
+        rounds += 1
+        for trial in payload.get("trials") or []:
+            trials += 1
+            candidate = Candidate.from_dict(trial.get("candidate") or {})
+            measurement = Measurement.from_dict(trial.get("measurement") or {})
+            stored = trial.get("verdict") or {}
+            old = Verdict(
+                candidate=stored.get("candidate") or candidate.name,
+                accepted=bool(stored.get("accepted")),
+                rule=stored.get("rule") or "?",
+                reason=stored.get("reason") or "",
+            )
+            new = decide(baseline, measurement, active, veto=candidate.veto)
+            if old.accepted != new.accepted:
+                changed.append({"candidate": candidate.name, "was": old.rule, "now": new.rule,
+                                "was_accepted": old.accepted, "now_accepted": new.accepted})
+            elif old.rule != new.rule:
+                relabelled.append({"candidate": candidate.name, "was": old.rule, "now": new.rule,
+                                   "accepted": old.accepted})
+        if changed or relabelled:
+            entries.append({
+                "round": name,
+                "stream": (payload.get("stream") or {}).get("source") or "?",
+                "recorded_hash": payload.get("rules_hash"),
+                "changed": changed,
+                "relabelled": relabelled,
+            })
+    return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials, entries=entries)
+
+
+def format_audit(result: Audit) -> str:
+    lines: List[str] = []
+    lines.append("=" * 96)
+    lines.append("brian evolve - audit every recorded round against today's rules")
+    lines.append("=" * 96)
+    lines.append("current rules     %s  (%s)" % (result.fingerprint,
+                                                json.dumps(result.rules.to_dict(), sort_keys=True)))
+    lines.append("recorded rounds   %d  (%d candidate measurements re-decided, no re-run)"
+                 % (result.rounds, result.trials))
+    lines.append("")
+    if not result.entries:
+        lines.append("every recorded verdict survives today's rules.")
+        return "\n".join(lines)
+    lines.append("%-26s %-10s %-14s %s" % ("round", "stream", "recorded rules", "what moves today"))
+    lines.append("-" * 96)
+    for entry in result.entries:
+        recorded = entry["recorded_hash"] or "unrecorded"
+        if entry["changed"]:
+            detail = ", ".join("%s %s -> %s" % (item["candidate"], item["was"], item["now"])
+                               for item in entry["changed"])
+        else:
+            detail = ", ".join("%s %s -> %s (same verdict)" % (item["candidate"], item["was"], item["now"])
+                               for item in entry["relabelled"])
+        lines.append("%-26s %-10s %-14s %s" % (entry["round"], entry["stream"], recorded, detail))
+    lines.append("")
+    if result.moved:
+        lines.append("%d verdict(s) would be decided differently today; %d more kept their verdict but "
+                     "changed rule. Use `brian evolve --rejudge <round>` to read one case in full."
+                     % (result.moved, result.relabelled))
+    else:
+        lines.append("no verdict moves. %d candidate measurement(s) kept their verdict but changed rule."
+                     % result.relabelled)
+    if result.stale:
+        lines.append("%d recorded round(s) carry a different ruleset fingerprint, so their numbers were "
+                     "measured under an objective that no longer exists." % result.stale)
     return "\n".join(lines)
 
 

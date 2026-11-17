@@ -785,6 +785,46 @@ recall@10% 0.2239   fpr@10% 0.0908   cuts: 1-6 0.89, 2-2 0.91
 - **排序一旦进了产品，`anomaly_probability` 的含义就变了。** 0.90 不再表示"概率 90%"，而是"比最近 K 个窗口里的九成都响"。这个语义切换没有改字段名，只在 `raw` 与设置项的 docstring 里说明——这是本轮最容易被误读的一处。
 - **冷启动仍走电平。** 一条新记录的窗口数不足 `min_samples` 时，`reported_as` 是 `"level"`，行为与 3.20 之前完全一致；差别只在累积够历史之后。
 
+### 3.22 把"改了规则就要重审历史"做成一条命令
+
+前面十四轮里，`decide()` 的规则被改过七八次，每次都有一批旧判决在语义上作废，但没有一次是自动发现的——靠的是某一轮恰好想起来了 `--rejudge`，或者等下一轮的"previous rejections"里蹦出个不对劲的理由。这正是 arXiv:2607.07663 描述的第三类问题：**版本化基础设施缺失**，判决、规则、测量三者的对应关系只存在文档和人脑里。
+
+```bash
+$ brian evolve --audit
+current rules     757fd5a25275  ({"cost_tolerance": 0.05, "deploy_fpr_ceiling": 0.5, ...})
+recorded rounds   22  (77 candidate measurements re-decided, no re-run)
+
+round                      stream     recorded rules what moves today
+------------------------------------------------------------------------------------------------
+round-20261117T184415Z.json SMD       unrecorded     host-features-3 no-reports -> operational
+round-20261117T190913Z.json SMD       unrecorded     host-features-3 fpr -> operational
+round-20261117T193010Z.json SMD       unrecorded     anomaly-p-40 gain -> operational (same verdict), …
+round-20261117T200320Z.json SMD       unrecorded     host-scoring-deviation quality -> deploy
+round-20261117T201715Z.json SMD       unrecorded     events-8 deploy -> cost, events-4 deploy -> cost
+round-20261117T214547Z.json SMD       unrecorded     host-ratio-floor-10 deploy -> recall (same verdict)
+round-20261117T222244Z.json SMD       unrecorded     host-rolling-rank operational -> quality
+
+6 verdict(s) would be decided differently today; 17 more kept their verdict but changed rule.
+```
+
+读法：
+
+- **六条判决翻案。** 184415 / 190913 从"拒"变"收"（当年的理由是 `no-reports` 与 `fpr`，今天是 `operational` 出口）；222244 从"拒"变"收"（那是 3.21 的容差修好之前的记录）；200320 从"收"变"拒"（单字段版本今天会被上线地板挡住）；201715 的两条 `deploy -> cost` 是那条"过钝的第一版规则"的化石。
+- **`unrecorded` 是诚实的空位。** 指纹是本轮才加进账本的，之前的 round 文件里没有这个字段；审计把它们标成 `unrecorded` 而不是拿今天的规则补一个上去——补上去会让旧记录看起来像是有版本号的。
+- **`--strict` 才是"检查"。** 默认 `--audit` 只报告、退出码 0；加 `--strict` 时，只要有任何判决会翻，退出码就是 1。CI 里该用的是后者，否则这条命令会退化成一篇没人看的报告：
+  ```
+  $ brian evolve --audit --strict --min-gain 0.50 ; echo $?   # 旧账本 + 更严的规则
+  1
+  ```
+
+实现上只有三件事：`rules_fingerprint(rules)` 对 `to_dict()` 排序后取 sha256 前 12 位（十二年不换手机号的那种"短"，因为要印在表格里）；`persist()` 把 `rules_hash` 同时写进 round 文件和 `ledger.jsonl`（两处都写，是因为 ledger 是索引、round 文件是正文，只有一处的话总有一边会被截断）；`audit(root, rules)` 复用 `rejudge()` 的 `Measurement.from_dict` / `Candidate.from_dict`，把每个 trial 交回 `decide()` 重判，区分"判决翻了"和"判决没翻但理由换了"。
+
+三条边界：
+
+- **指纹只覆盖 `EvolveRules` 的取值，不覆盖 `decide()` 的代码。** 今天加了一个 `silence` 分支、明天删掉一个，只要规则数值没动，指纹就一样，`--audit` 什么都不会说。要闭这条缝，得把 `decide()` 的源码哈希也算进去——但那需要在规则里存代码版本，属于"下一步"而不是这一轮。
+- **重审只是重放数字，不是重测。** 规则如果改变的是"测什么"（比如新增一个要测的列），`--audit` 无法发现，因为旧记录里根本没有那一列。这和 3.20 的"重审不重测"是同一条限制。
+- **"今天会怎么判"不等于"当时判错了"。** 200320 的 `quality -> deploy` 不是当年的错：上线地板是第 6 轮才有的规则，用今天的尺子量昨天的测量，结论是"这套目标下会怎么判"，不是"当年该判什么"。审计输出里那句 `6 verdict(s) would be decided differently today` 特意用了 would。
+
 ---
 
 ## 4. 分级：为什么是 L2，不是 L3
@@ -836,6 +876,10 @@ missing for the next level
 27. **排序规则只在累积够 `min_samples`（默认 10）个窗口后才生效。** 一条新记录的前 9 个窗口仍按电平判（`reported_as="level"`），所以"上线即用排序"这句只在稳态成立；冷启动段的可比性没有被单独测量。
 28. **一个数字不能同时是概率和分位。** 3.21 节把这条踩实了两次：补丁把排序门限写进 `anomaly_probability` 后，服务域召回从 0.875 掉到 0.625；修法是新增 `gate.rank_probability` 并让 `apply_gate` 按 `raw["reported_as"]` 选门限。字段名没有变，量纲随答案走——任何把 `anomaly_probability` 当"唯一存在门限"读的外部消费者，在排序部署上都会读错。
 
+29. **指纹只覆盖规则取值，不覆盖 `decide()` 的代码。** 3.22 节的 `rules_fingerprint` 只哈希 `EvolveRules.to_dict()`；同一组数值下增删一个分支（比如 6.4 节那个 `silence` 规则怎么排）不会改变指纹，`--audit` 也就不会说话。要闭这条缝，得把判定函数的版本一起记进账本。
+30. **`--audit` 是重放数字，不是重测。** 规则如果改变的是"测什么"（新增一列、换一个预算），旧记录里没有那一列，审计只能沉默。这和 3.20 的"重审不重测"是同一条限制。
+31. **"今天会怎么判"不等于"当时判错了"。** 3.22 节那六条翻案里，`200320` 的 `quality → deploy` 用的是第 6 轮才引入的上线地板：审计输出用 `would be decided differently today` 而不是 `was wrong`，因为目标变了，不是测量变了。
+
 ---
 
 ## 6. 下一步（按验证强度排序）
@@ -843,7 +887,7 @@ missing for the next level
 1. **（3.17 已完成）上限已经是文本上限。** 两列相等，那条含糊关掉了。
 2. **（3.18 已完成）逐窗分层做完了，答案是一个偏置。** 改名、放大、抹平三种替换都指向同一件事：引擎在这类文本上不读信息。因此"继续在候选目录里调参"这条路被关闭——下一个动作不是试配置，而是**改喂法**。
 3. **（3.19 已完成）"换措辞能不能救"已被五渲染 × 两问句回答：不能。** 同一批主机数字渲染成五种形状、问两个问题，四臂横跨 0.17–0.67 且方向在两条记录之间翻转，控制组（无数字文本）精确落在 0.5000。于是落地的不是新渲染，而是分工：`digest.scoring="auto"` 按 profile 选裁决者（主机 → 确定性读者，服务 → 模型）。由此剩下的是一条**产品决策**而非实验：主机状态在线上是否交给读者，以及是否接受它在 10% 误报预算下的 0.142 召回（3.12、3.19 的边界 24）。
-4. **把 `--rejudge` 变成每次改规则的固定动作。** 3.16 节第一次真实用上它（`deploy` → `recall`，判决不变），证明这条审计轨迹有用；但它还靠人记得跑。下一步是让"改了 `EvolveRules` 就重审全部历史轮次"成为一条检查（CI 或 `brian evolve --audit`），结果写进账本。
+4. **（3.22 已完成）"改了规则就重审全部历史"已经是一条命令。** `brian evolve --audit` 把 22 轮、77 个候选测量在今天的目标下重判一遍：6 条判决会翻，17 条判决不变但理由换了；`--strict` 时有翻案就以退出码 1 结束，这才让它成为 CI 里的一道门而不是一篇报告。剩下的缺口是边界 29：指纹管不到判定代码本身。
 5. **（3.20 / 3.21 已完成）读者切点的"标定"问题被换成了"平稳性"问题。** 不是给每台主机各选一个常数，而是发现常数在这条流上不可用：记录内部电平摆动 0.4、类别均值差 0.03，所以固定切点在时间上不迁移。3.21 节把排序规则接进了产品（`RollingWindow` + `digest.rolling_window`，`Pipeline`/`Evaluator` 各一份状态），候选 `host-rolling-rank` 被接受：预算内召回 0.060 → 0.224，每窗口 token −87%。剩下的仍是产品决策：**要不要在生产上把主机状态交给读者**，以及上线后谁来监控它的漂移（这条规则会随流量自我调整，所以"告警率突然上升"可能是流量变了而不是故障变了）。
 6. **真模型校准**：配 API key 后重跑一轮，把 `coverage` 与真实解释质量对比，看这个代理到底代理了什么。
 7. **让 `apply` 真生效**（L3 的唯一缺口）：配置热加载 + 自动回滚窗口，才够格说 L3。

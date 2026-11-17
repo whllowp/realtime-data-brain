@@ -24,9 +24,11 @@ from brian.evolve import (
     Verdict,
     alerts_per_1000,
     apply_overrides,
+    audit,
     catalogue,
     decide,
     deployable,
+    format_audit,
     format_rejudge,
     format_round,
     grade,
@@ -37,6 +39,7 @@ from brian.evolve import (
     persist,
     previously_rejected,
     rejudge,
+    rules_fingerprint,
     state_ceiling,
 )
 from brian.llm.prompts import evidence_coverage, evidence_floor
@@ -1252,3 +1255,108 @@ def test_the_inheritance_tolerance_is_a_rule_not_a_constant():
 
     assert not verdict.accepted
     assert verdict.rule == "deploy", verdict.reason
+
+def test_the_fingerprint_follows_the_rule_values_not_the_clock():
+    assert rules_fingerprint(EvolveRules()) == rules_fingerprint(EvolveRules())
+    assert len(rules_fingerprint(EvolveRules())) == 12
+    assert rules_fingerprint(EvolveRules()) != rules_fingerprint(EvolveRules(min_gain=0.20))
+
+
+def test_a_stored_round_records_the_ruleset_that_judged_it(tmp_path):
+    result = _round(tmp_path, accepted=True)
+    written = persist(tmp_path, result)
+    payload = json.loads(Path(written["round"]).read_text(encoding="utf-8"))
+
+    assert payload["rules_hash"] == rules_fingerprint(result.rules)
+    ledger = (tmp_path / "var" / "evolve" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(ledger[-1])["rules_hash"] == rules_fingerprint(result.rules)
+
+
+def test_an_audit_of_a_ledger_under_its_own_rules_moves_nothing(tmp_path):
+    persist(tmp_path, _round(tmp_path, accepted=True))
+
+    result = audit(tmp_path)
+
+    assert result.rounds == 1
+    assert result.trials == 1
+    assert result.moved == 0
+    assert result.entries == []
+    assert "every recorded verdict survives today's rules." in format_audit(result)
+
+
+def test_an_audit_names_the_stored_verdict_a_stricter_rule_would_flip(tmp_path):
+    persist(tmp_path, _round(tmp_path, accepted=True))
+
+    result = audit(tmp_path, EvolveRules(min_gain=0.50))
+
+    assert result.moved == 1
+    moving = result.entries[0]["changed"][0]
+    assert moving["candidate"] == "events-8"
+    assert moving["was"] == "cost" and moving["now"] == "gain"
+    assert moving["was_accepted"] is True and moving["now_accepted"] is False
+    table = format_audit(result)
+    assert "events-8 cost -> gain" in table
+    assert "1 verdict(s) would be decided differently today" in table
+
+
+def test_an_audit_counts_a_rule_relabel_as_something_other_than_a_move(tmp_path):
+    candidate = Candidate(name="events-8", hypothesis="smaller prompt",
+                          section="llm", field="max_context_events", value=8)
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046, tokens=3350.0)
+    baseline.fpr = 1.0
+    baseline.recall = 1.0
+    trial = at_budget("events-8", recall=0.187, fpr=0.089, tokens=3000.0)
+    trial.fpr = 0.291
+    trial.recall = 0.291
+    stored = Verdict("events-8", True, "quality", "found more incidents")
+    result = RoundResult(
+        started_at="2026-11-18T00:00:00+00:00",
+        finished_at="2026-11-18T00:01:00+00:00",
+        stream={"service": "SMD"},
+        rules=EvolveRules(),
+        baseline=baseline,
+        trials=[(candidate, trial, stored)],
+    )
+    persist(tmp_path, result)
+
+    replayed = audit(tmp_path)
+
+    assert replayed.moved == 0
+    assert replayed.relabelled >= 1
+    table = format_audit(replayed)
+    assert "same verdict" in table
+    assert "no verdict moves" in table
+
+
+def test_an_audit_reports_rounds_whose_objective_no_longer_exists(tmp_path):
+    result = _round(tmp_path, accepted=True)
+    written = persist(tmp_path, result)
+    path = Path(written["round"])
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["rules_hash"] = "000000000000"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    replayed = audit(tmp_path, EvolveRules(min_gain=0.50))
+
+    assert replayed.stale == 1
+    assert "measured under an objective that no longer exists" in format_audit(replayed)
+
+
+def test_an_audit_of_an_empty_ledger_is_a_statement_about_the_rules(tmp_path):
+    result = audit(tmp_path / "nothing-here")
+
+    assert result.rounds == 0
+    assert result.entries == []
+    assert result.fingerprint == rules_fingerprint(EvolveRules())
+
+
+def test_the_audit_is_a_check_because_it_can_exit_nonzero(tmp_path, monkeypatch):
+    from brian import cli
+
+    persist(tmp_path, _round(tmp_path, accepted=True))
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["evolve", "--audit"]) == 0
+    assert cli.main(["evolve", "--audit", "--min-gain", "0.50"]) == 0
+    assert cli.main(["evolve", "--audit", "--strict"]) == 0
+    assert cli.main(["evolve", "--audit", "--strict", "--min-gain", "0.50"]) == 1

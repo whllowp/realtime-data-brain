@@ -36,7 +36,9 @@ from .evolve import (
     EVOLVE_DIR,
     EvolveRules,
     apply_overrides,
+    audit,
     catalogue,
+    format_audit,
     format_rejudge,
     format_round,
     grade,
@@ -224,6 +226,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             return 2
         _print(format_rejudge(result))
         return 0
+
+    if args.audit:
+        rules = EvolveRules(min_gain=args.min_gain)
+        try:
+            result = audit(root, rules)
+        except OSError as error:
+            _print("cannot audit %s: %s" % (root / EVOLVE_DIR, error))
+            return 2
+        _print(format_audit(result))
+        # The exit code is the part that makes this a check rather than a report: a rule change that
+        # rewrites history should fail the build, or it will be noticed months later by whoever reads the
+        # table last.
+        return 1 if (args.strict and result.moved) else 0
 
     if args.grade:
         try:
@@ -1269,6 +1284,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="print every round recorded so far and exit")
     evolve.add_argument("--rejudge", default="",
                         help="re-decide a recorded round file under today's rules and exit")
+    evolve.add_argument("--audit", action="store_true",
+                        help="re-decide every recorded round under today's rules and exit")
+    evolve.add_argument("--strict", action="store_true",
+                        help="with --audit: exit 1 when any recorded verdict would be decided differently")
     evolve.add_argument("--json-out", help="write the round to this file as well")
     evolve.set_defaults(func=cmd_evolve)
 
