@@ -44,6 +44,7 @@ from .contracts import Severity
 from .demo import LabeledWindow
 from .laya.client import LayaClient, LayaError
 from .laya.gate import apply_gate
+from .scoring import judge
 
 from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 
@@ -399,7 +400,7 @@ class Evaluator:
                 digest_text=digest.interpretation,
             )
             try:
-                result = self.laya.decide(digest)
+                result = judge(digest, self.settings, self.laya)
                 outcome = apply_gate(digest, result, self.settings.gate, calibrator=self.calibrator)
                 decision = outcome.decision
                 score.predicted_anomaly = decision.is_anomaly

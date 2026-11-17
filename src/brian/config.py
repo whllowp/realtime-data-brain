@@ -320,8 +320,19 @@ class DigestSettings:
     #: dataset, so it lives in settings where the improvement loop can propose and reverse it.
     host_features: str = ""
 
+    #: Who answers "is this window an incident": ``"model"`` (the shipped path) or ``"deviation"``
+    #: (a threshold on the loudest deviation the renderer prints, no inference at all).
+    #:
+    #: Measured before it was added: on SMD the deterministic reader reaches AUC 0.827 (machine-1-6)
+    #: and 0.597 (machine-2-2) against the engine's 0.674 and 0.347 on the same text. The loop prints
+    #: both numbers every round as the state ceiling, so this switch is the smallest change that lets
+    #: the labelled data decide which of the two answers the domain, instead of a comment in a doc.
+    #: Default stays ``"model"``: a rule measured on two hosts must not become a default by accident.
+    scoring: str = "model"
+
     def to_dict(self) -> Dict[str, object]:
-        return {"profile": self.profile, "host_features": self.host_features}
+        return {"profile": self.profile, "host_features": self.host_features,
+                "scoring": self.scoring}
 
 
 @dataclass
@@ -480,6 +491,7 @@ def load_settings() -> Settings:
         digest=DigestSettings(
             profile=_env("BRIAN_DIGEST_PROFILE", "service") or "service",
             host_features=_env("BRIAN_DIGEST_HOST_FEATURES", ""),
+            scoring=_env("BRIAN_DIGEST_SCORING", "model") or "model",
         ),
         calibration=CalibrationSettings(
             path=_env("BRIAN_CALIBRATION_PATH", DEFAULT_CALIBRATION_PATH) or DEFAULT_CALIBRATION_PATH,
@@ -515,4 +527,5 @@ ENV_VARS: Dict[Tuple[str, str], str] = {
     ("window", "min_events"): "BRIAN_MIN_WINDOW_EVENTS",
     ("digest", "profile"): "BRIAN_DIGEST_PROFILE",
     ("digest", "host_features"): "BRIAN_DIGEST_HOST_FEATURES",
+    ("digest", "scoring"): "BRIAN_DIGEST_SCORING",
 }

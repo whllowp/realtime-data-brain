@@ -56,6 +56,7 @@ from .contracts import (
 from .laya.gate import GateOutcome, apply_gate
 from .laya.client import LayaClient, LayaError
 from .llm.rca import RcaEngine
+from .scoring import judge
 from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 from .topics import Topic
 
@@ -228,7 +229,7 @@ class Pipeline:
         self.counters.digests += 1
 
         try:
-            result = self.laya.decide(digest)
+            result = judge(digest, self.settings, self.laya)
         except LayaError as exc:
             # The engine is unreachable. Do not invent a verdict: dead-letter the digest with the
             # reason so it can be re-judged from the events once Laya is back. The memory makes

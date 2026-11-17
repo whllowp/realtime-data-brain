@@ -335,11 +335,67 @@ def test_applying_a_candidate_leaves_the_original_settings_untouched():
 def test_every_catalogue_entry_names_a_real_field_and_an_environment_variable():
     settings = load_settings()
     for candidate in catalogue():
-        section = getattr(settings, candidate.section)
-        assert candidate.field in {item.name for item in dataclasses.fields(section)}, candidate.name
-        assert (candidate.section, candidate.field) in ENV_VARS, candidate.name
+        for section_name, field, _value in candidate.changes():
+            section = getattr(settings, section_name)
+            assert field in {item.name for item in dataclasses.fields(section)}, candidate.name
+            assert (section_name, field) in ENV_VARS, candidate.name
         assert candidate.apply(settings) is not settings
         assert candidate.hypothesis, candidate.name
+
+
+def test_a_companion_change_is_applied_together_and_recorded_together():
+    """A fix can need two settings at once; applying half of it ships what nobody measured."""
+    settings = load_settings()
+    candidate = Candidate(name="joint", hypothesis="two fields", section="llm",
+                          field="max_context_events", value=6,
+                          also=(("gate", "anomaly_probability", 0.9),))
+
+    applied = candidate.apply(settings)
+    assert applied.llm.max_context_events == 6
+    assert applied.gate.anomaly_probability == 0.9
+    assert settings.gate.anomaly_probability != 0.9
+
+    assert candidate.describe() == "llm.max_context_events = 6, gate.anomaly_probability = 0.9"
+    assert [list(change) for change in candidate.changes()] == [
+        ["llm", "max_context_events", 6], ["gate", "anomaly_probability", 0.9]]
+    assert [change[0] for change in candidate.to_dict()["changes"]] == ["llm", "gate"]
+
+
+def test_a_companion_change_is_validated_like_the_first_one():
+    settings = load_settings()
+    typo = Candidate(name="joint", hypothesis="two fields", section="llm",
+                     field="max_context_events", value=6,
+                     also=(("gate", "anomly_probability", 0.9),))
+    with pytest.raises(ValueError):
+        typo.apply(settings)
+
+
+def test_a_joint_change_exports_every_variable_and_can_be_reversed(tmp_path):
+    candidate = Candidate(name="joint", hypothesis="two fields", section="digest",
+                          field="scoring", value="deviation",
+                          also=(("gate", "anomaly_probability", 0.87),))
+    settings = load_settings()
+
+    baseline = measure("baseline", recall=0.060, tokens=3349.0)
+    trial = measure("joint", recall=0.142, tokens=800.0)
+    result = RoundResult(
+        started_at="2026-01-01T00:00:00+00:00",
+        finished_at="2026-01-01T00:01:00+00:00",
+        stream={"source": "test"},
+        rules=EvolveRules(),
+        baseline=baseline,
+        trials=[(candidate, trial, Verdict(candidate=candidate.name, accepted=True,
+                                           rule="quality", reason="recall rose"))],
+    )
+    written = persist(tmp_path, result)
+    payload = json.loads((tmp_path / written["versions"][0]).read_text(encoding="utf-8"))
+
+    assert "BRIAN_DIGEST_SCORING=deviation" in payload["env"]
+    assert "BRIAN_GATE_ANOMALY_P=0.87" in payload["env"]
+    assert "unset BRIAN_DIGEST_SCORING" in payload["rollback"]
+    assert "unset BRIAN_GATE_ANOMALY_P" in payload["rollback"]
+    assert len(payload["candidate"]["changes"]) == 2
+    assert settings.digest.scoring == "model"
 
 
 def test_catalogue_names_are_unique_and_that_is_what_makes_the_ledger_joinable():
@@ -460,7 +516,15 @@ def test_a_rejection_is_remembered_so_the_next_round_does_not_rediscover_it(tmp_
     persist(tmp_path, _round(tmp_path, accepted=False))
 
     rejected = previously_rejected(tmp_path)
-    assert rejected["events-8"] == "no gain"
+    assert rejected["events-8"] == "on checkout-api: no gain"
+
+
+def test_a_later_acceptance_on_another_stream_clears_the_rejection(tmp_path):
+    """A verdict is about a dataset; the latest one wins, or the ledger remembers the wrong answer."""
+    persist(tmp_path, _round(tmp_path, accepted=False))
+    persist(tmp_path, _round(tmp_path, accepted=True))
+
+    assert "events-8" not in previously_rejected(tmp_path)
 
 
 def test_versions_are_numbered_across_rounds(tmp_path):

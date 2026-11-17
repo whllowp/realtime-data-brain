@@ -76,28 +76,45 @@ class Candidate:
     name: str
     hypothesis: str
     section: str
-    """Which `Settings` section the change lands in: `llm`, `gate` or `window`."""
+    """Which `Settings` section the change lands in: `llm`, `gate`, `window` or `digest`."""
 
     field: str
     value: Any
+    also: Tuple[Tuple[str, str, Any], ...] = ()
+    """Companion changes that are only useful together with the first one.
+
+    Added in round 5, after a candidate that was right about the ranking and wrong about the threshold
+    could not be proposed at all: `digest.scoring=deviation` improves how the text is read and shifts
+    every probability onto a different scale, so shipping it alone alerts on 93% of windows. A catalogue
+    whose entries are single fields can only ever express half of such a fix — which makes "the loop
+    rejected it" a statement about the catalogue, not about the change. Widening the mutation space is
+    the one improvement the survey says a bounded loop *can* make safely: nothing about the objective
+    or the verification changes, only the shape of a proposal.
+    """
+
     veto: Optional[str] = None
     """A disqualifier that no metric in this module can see. See `analyze-pages-only`."""
 
+    def changes(self) -> Tuple[Tuple[str, str, Any], ...]:
+        """Every setting this candidate writes, as `(section, field, value)`."""
+        return ((self.section, self.field, self.value),) + tuple(self.also)
+
     def apply(self, settings: Settings) -> Settings:
-        section = getattr(settings, self.section)
-        changed = replace(section, **{self.field: self.value})
-        return settings.with_overrides(**{self.section: changed})
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for section, field, value in self.changes():
+            grouped.setdefault(section, {})[field] = value
+        # `apply_overrides` owns the validation, so a typo in a companion change is reported the same
+        # way as a typo in the first one instead of half-applying.
+        return apply_overrides(settings, grouped)
 
     def describe(self) -> str:
-        return "%s.%s = %r" % (self.section, self.field, self.value)
+        return ", ".join("%s.%s = %r" % change for change in self.changes())
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
             "hypothesis": self.hypothesis,
-            "section": self.section,
-            "field": self.field,
-            "value": self.value,
+            "changes": [list(change) for change in self.changes()],
             "veto": self.veto,
         }
 
@@ -177,6 +194,19 @@ def catalogue() -> List[Candidate]:
             section="digest",
             field="host_features",
             value="cpu_r,load_1,mem_free",
+        ),
+        Candidate(
+            name="host-scoring-deviation",
+            hypothesis="On host telemetry a threshold on the loudest rendered deviation should judge the "
+                       "digest, not the engine: the same text separates at AUC 0.827 (machine-1-6) and "
+                       "0.597 (machine-2-2) for a rule with no parameters, against 0.674 and 0.347 for "
+                       "the engine. If the labels prefer the rule at an equal false-positive budget the "
+                       "engine is not paying for itself on this domain, and that is a finding about the "
+                       "architecture rather than about a threshold.",
+            section="digest",
+            field="scoring",
+            value="deviation",
+            also=(("gate", "anomaly_probability", 0.87), ("gate", "notify_probability", 0.87)),
         ),
     ]
 
@@ -898,16 +928,21 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
         if not verdict.accepted:
             continue
         version += 1
-        env_key = (candidate.section, candidate.field)
+        exports = ["%s=%s" % (ENV_VARS.get((section, field), "?"), _env_value(value))
+                   for section, field, value in candidate.changes()]
+        unset = "  ".join("unset %s" % ENV_VARS.get((section, field), "?")
+                          for section, field, _value in candidate.changes())
         payload = {
             "version": version,
             "created_at": result.finished_at,
             "candidate": candidate.to_dict(),
             "change": candidate.describe(),
-            "env": "%s=%s" % (ENV_VARS.get(env_key, "?"), _env_value(candidate.value)),
+            # A joint change is exported as one line per variable: applying half of it would ship a
+            # configuration nobody measured, which is exactly what a version file must prevent.
+            "env": "; ".join(exports),
             "measurement": measurement.to_dict(),
             "verdict": verdict.to_dict(),
-            "rollback": "unset %s  # restores the default" % ENV_VARS.get(env_key, "?"),
+            "rollback": unset + "  # each restores one default",
         }
         path = versions / ("v%03d.json" % version)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -956,18 +991,32 @@ def history(root: Path) -> List[Dict[str, Any]]:
 
 
 def previously_rejected(root: Path) -> Dict[str, str]:
-    """candidate name -> the rule that rejected it, from earlier rounds.
+    """candidate name -> the rule that rejected it, from the *latest* round that judged it.
 
     A loop that re-proposes its own rejected ideas has not accumulated anything; the survey calls the
     symptom scientific amnesia. This is the smallest cure: the next round can see what was already
     decided and why, and skip it instead of paying to rediscover it.
+
+    The latest verdict wins, and the reason names the stream it came from. A verdict is a statement
+    about a dataset — the same change can be rejected on the synthetic suite and accepted on SMD — so
+    keeping the first rejection forever would present a settled question that was later answered the
+    other way, which is amnesia with extra paperwork.
     """
-    rejected: Dict[str, str] = {}
+    latest: Dict[str, Dict[str, Any]] = {}
     for row in history(root):
+        source = (row.get("stream") or {}).get("source") or (row.get("stream") or {}).get("service") or "?"
         for trial in row.get("trials") or []:
             verdict = trial.get("verdict") or {}
-            if not verdict.get("accepted"):
-                rejected.setdefault(verdict.get("candidate", "?"), verdict.get("reason", ""))
+            latest[verdict.get("candidate") or "?"] = {
+                "accepted": bool(verdict.get("accepted")),
+                "reason": verdict.get("reason", ""),
+                "source": source,
+            }
+    rejected: Dict[str, str] = {}
+    for name, verdict in latest.items():
+        if verdict["accepted"]:
+            continue
+        rejected[name] = "on %s: %s" % (verdict["source"], verdict["reason"])
     return rejected
 
 
