@@ -311,3 +311,34 @@ def test_an_older_promotion_never_takes_a_variable_from_a_newer_one(tmp_path):
     assert outcome["superseded"] == ["BRIAN_DIGEST_SCORING", "BRIAN_DIGEST_ROLLING_WINDOW"]
     assert current_state(tmp_path)["sources"] == {"BRIAN_DIGEST_SCORING": "2",
                                                   "BRIAN_DIGEST_ROLLING_WINDOW": "2"}
+
+
+def test_a_patch_that_inherits_a_variable_it_interacts_with_says_so(tmp_path):
+    # Round 19 applied the level reader on top of a state that kept `rolling_window=100`, so the same
+    # three assignments meant "level" in the measurement and "rank" in the deployment.
+    _write_version(tmp_path, 1, "BRIAN_DIGEST_ROLLING_WINDOW=100", "digest.rolling_window = 100")
+    _write_version(tmp_path, 2, "BRIAN_DIGEST_SCORING=deviation", "digest.scoring = 'deviation'")
+    first, second = load_promotions(tmp_path)
+    apply_promotion(tmp_path, first)
+
+    outcome = apply_promotion(tmp_path, second)
+
+    assert outcome["applied"] == ["BRIAN_DIGEST_SCORING"]
+    assert outcome["superseded"] == []
+    assert [entry["name"] for entry in outcome["inherited"]] == ["BRIAN_DIGEST_ROLLING_WINDOW"]
+    assert len(outcome["interactions"]) == 1
+    assert "BRIAN_DIGEST_ROLLING_WINDOW=100" in outcome["interactions"][0]
+    assert "v001" in outcome["interactions"][0]
+
+
+def test_a_patch_that_inherits_nothing_it_interacts_with_stays_quiet(tmp_path):
+    _write_version(tmp_path, 1, "BRIAN_LLM_MAX_CONTEXT_EVENTS=8", "llm.max_context_events = 8")
+    _write_version(tmp_path, 2, "BRIAN_DIGEST_SCORING=deviation", "digest.scoring = 'deviation'")
+    first, second = load_promotions(tmp_path)
+    apply_promotion(tmp_path, first)
+
+    outcome = apply_promotion(tmp_path, second)
+
+    assert outcome["applied"] == ["BRIAN_DIGEST_SCORING"]
+    assert len(outcome["inherited"]) == 1
+    assert outcome["interactions"] == []

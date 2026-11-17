@@ -19,6 +19,7 @@ from brian.streams import (
     FORMAT,
     Stream,
     StreamError,
+    align_window_start,
     dump_stream_file,
     flatten_streams,
     load_stream_file,
@@ -150,3 +151,37 @@ def test_flatten_streams_orders_by_time_across_recordings() -> None:
 def test_an_empty_set_summarises_as_empty_not_as_a_zero() -> None:
     assert summarise([]) == {"streams": 0, "windows": 0, "scored": 0, "anomalous": 0,
                              "events": 0, "names": []}
+
+
+def test_a_label_lands_on_the_window_the_pipeline_will_emit() -> None:
+    """The window start is a grid time, not the sample's own timestamp.
+
+    Round 19 found the RCAEval stream carrying sample times (`…588`) against digest times
+    (`…560`). Nothing matched, the evaluator scored zero windows, and the table said `recall
+    0.000` — which reads like a fact about the detector and was a fact about the label.
+    """
+    sample = datetime(2023, 5, 27, 9, 56, 28, tzinfo=timezone.utc)
+
+    aligned = align_window_start(sample, 60)
+
+    assert aligned == datetime(2023, 5, 27, 9, 56, 0, tzinfo=timezone.utc)
+    assert int(aligned.timestamp()) % 60 == 0
+    assert aligned.tzinfo is not None
+
+
+def test_the_alignment_follows_the_slide_not_just_the_size() -> None:
+    """A window opens where the *newest* window that fits would start.
+
+    A 300 s window sliding every 60 s is a 5-minute window that closes on the minute, so an event
+    at 09:57:05 belongs to the window that began at 09:53:00 — not to one that began at 09:57:00,
+    because that one would have to end at 10:02 and the pipeline has not seen that far yet.
+    """
+    sample = datetime(2023, 5, 27, 9, 57, 5, tzinfo=timezone.utc)
+
+    assert align_window_start(sample, 300, 60) == datetime(2023, 5, 27, 9, 53, 0,
+                                                           tzinfo=timezone.utc)
+
+
+def test_a_window_size_of_zero_is_rejected_rather_than_division_by_zero() -> None:
+    with pytest.raises(StreamError, match="window size must be positive"):
+        align_window_start(START, 0)

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -55,6 +56,25 @@ FORMAT = "brian.stream/1"
 
 class StreamError(ValueError):
     """The file is not a stream this version can read. Loud, because silence scores as nothing."""
+
+
+def align_window_start(moment: datetime, size_s: int,
+                       slide_s: Optional[int] = None) -> datetime:
+    """The window start `Windower` will emit for an event at `moment`.
+
+    The windower assigns by event time onto a grid of `slide_s` seconds from the epoch (see
+    `Windower._window_start`), so a label carrying a raw sample timestamp never matches a digest.
+    When it does not, `Evaluator` scores nothing and prints `recall 0.000` — a number that reads
+    like a finding about the detector and is in fact a finding about the label. Round 19 hit this
+    on the RCAEval stream, where the labels were sample times (`…588`) and the digests were grid
+    times (`…560`); rounds 2-3 had reported exactly that zero.
+    """
+    if size_s <= 0:
+        raise StreamError("window size must be positive, got %r" % (size_s,))
+    slide = max(1, int(slide_s if slide_s is not None else size_s))
+    epoch = int(moment.timestamp())
+    start = (epoch // slide) * slide - max(0, int(size_s) - slide)
+    return datetime.fromtimestamp(start, tz=moment.tzinfo)
 
 
 @dataclass

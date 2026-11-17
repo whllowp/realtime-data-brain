@@ -236,6 +236,13 @@ def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = T
     would put its threshold back in force over the newer v011 that replaced it, which is a rollback
     disguised as a verification. The variables it could not take are reported as `superseded` instead of
     being applied quietly.
+
+    `inherited` lists variables already in force that this version does not set, and `interactions` names
+    the ones that change what the patch means. Round 19 showed why that matters: a version measured with
+    the reader reporting a level was applied on top of an earlier version that kept a rolling window, so
+    the same three assignments meant "level" in the measurement and "rank" in the deployment. A stack of
+    patches each measured against the baseline is not a configuration anyone measured, and the tool has
+    to say so where the operator can see it.
     """
     state = current_state(root)
     env = dict(state["env"])
@@ -251,7 +258,57 @@ def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = T
         sources[name] = str(promotion.version)
         applied.append(name)
     _write_state(root, {"env": env, "sources": sources})
-    return {"applied": applied, "superseded": superseded}
+    return {
+        "applied": applied,
+        "superseded": superseded,
+        "inherited": inherited_variables(state, promotion),
+        "interactions": interacting_variables(state, promotion),
+    }
+
+
+#: Pairs whose meaning depends on each other, so a patch that sets one while the other is inherited from
+#: an earlier version is not the patch that was measured. Declared by hand because the settings have no
+#: dependency model: `digest.rolling_window` turns the reader's answer into a quantile, and
+#: `gate.rank_probability` is the bar that reads it.
+INTERACTIONS: Tuple[Tuple[Tuple[str, str], Tuple[str, str]], ...] = (
+    (("digest", "scoring"), ("digest", "rolling_window")),
+    (("digest", "rolling_window"), ("gate", "rank_probability")),
+    (("gate", "anomaly_probability"), ("gate", "notify_probability")),
+)
+
+
+def inherited_variables(state: Mapping[str, Any], promotion: "Promotion") -> List[Dict[str, Any]]:
+    """Variables already in force that this version does not set, with the version that owns them."""
+    env = dict((state or {}).get("env") or {})
+    sources = dict((state or {}).get("sources") or {})
+    mine = set(promotion.env)
+    return [{"name": name, "value": env[name], "version": sources.get(name)}
+            for name in sorted(env) if name not in mine]
+
+
+def interacting_variables(state: Mapping[str, Any], promotion: "Promotion") -> List[str]:
+    """The inherited variables that change what `promotion` means, as `VAR=value (from vNNN)` lines."""
+    from .deploy import FIELD_BY_ENV  # local: keeps the import graph one-way at module load
+
+    mine = {FIELD_BY_ENV[name] for name in promotion.env if name in FIELD_BY_ENV}
+    lines: List[str] = []
+    for entry in inherited_variables(state, promotion):
+        field = FIELD_BY_ENV.get(entry["name"])
+        if field is None:
+            continue
+        for first, second in INTERACTIONS:
+            if (field == first and second in mine) or (field == second and first in mine):
+                lines.append("%s=%s is inherited from %s and changes what this patch means"
+                             % (entry["name"], entry["value"], _version_label(entry["version"])))
+    return lines
+
+
+def _version_label(source: Optional[str]) -> str:
+    """`v003` for a numeric source, the raw string otherwise, `?` when the state never said."""
+    if source is None or not str(source).strip():
+        return "?"
+    text = str(source).strip()
+    return "v%03d" % int(text) if text.isdigit() else text
 
 
 def revert_promotion(root: Path, promotion: Promotion) -> Path:

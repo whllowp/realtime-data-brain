@@ -889,6 +889,28 @@ def own_cut_shortfall(measurement: "Measurement") -> float:
     return max(0.0, (measurement.recall_at_budget - measurement.recall) / measurement.recall_at_budget)
 
 
+def tokens_per_incident(measurement: "Measurement") -> Optional[float]:
+    """Tokens the configuration would spend per *incident it found*, at the budget cut.
+
+    The loop's cost column counts tokens per report, which is what a report costs and says nothing
+    about what an incident costs. A configuration that finds ten times as many incidents for 5% more
+    tokens per report is cheaper per incident by an order of magnitude, and a per-report bar cannot
+    see that: round 19 rejected the deterministic reader on the service domain for a 5.3% rise in
+    tokens per report while its recall went 0.068 -> 0.860. This function is the other denominator.
+
+    None when there is nothing to divide: no scored fault, no budget recall, or no bill.
+    """
+    counts = measurement.confusion or {}
+    faults = int(counts.get("tp", 0)) + int(counts.get("fn", 0))
+    if faults <= 0 or measurement.recall_at_budget is None or measurement.tokens_per_window is None:
+        return None
+    found = measurement.recall_at_budget * faults
+    if found <= 0.0:
+        return None
+    windows = measurement.windows if measurement.windows > 0 else 1
+    return measurement.tokens_per_window * windows / found
+
+
 def deployable(measurement: "Measurement", rules: "EvolveRules") -> bool:
     """Whether the configuration *as recorded* is one an operator could run.
 
@@ -1090,11 +1112,27 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
                        "recall at %.0f%% false positives %.3f -> %.3f for %.0f -> %.0f "
                        "tokens/report"
                        % (100 * baseline.budget, before_recall, after_recall, before, after))
+    before_incident = tokens_per_incident(baseline)
+    after_incident = tokens_per_incident(trial)
+    if (quality_gain and before_incident and after_incident
+            and after_incident <= before_incident * (1.0 - rules.min_quality_gain)):
+        # The bill per report may rise and the bill per *incident* still fall, because the change
+        # finds more incidents. Refusing this would price a detection gain against the wrong unit:
+        # round 19's service-domain reader raised tokens/report by 5.3% while recall went 0.068 ->
+        # 0.860, and the per-report bar alone called that "costing more".
+        return Verdict(trial.candidate, True, "quality",
+                       "recall at %.0f%% false positives %.3f -> %.3f, and the bill per incident "
+                       "it finds falls %.0f -> %.0f tokens even though the bill per report rises "
+                       "%.0f -> %.0f"
+                       % (100 * baseline.budget, before_recall, after_recall,
+                          before_incident, after_incident, before, after))
     if quality_gain:
         return Verdict(trial.candidate, False, "cost",
                        "recall improves but the bill rises %.0f -> %.0f tokens/report, more than "
-                       "the %.0f%% a quality gain may cost"
-                       % (before, after, 100 * rules.cost_tolerance))
+                       "the %.0f%% a quality gain may cost, and the bill per incident it finds "
+                       "does not fall by %.0f%%"
+                       % (before, after, 100 * rules.cost_tolerance,
+                          100 * rules.min_quality_gain))
     return Verdict(trial.candidate, False, "gain",
                    "%.0f -> %.0f tokens/report is below the %.0f%% bar and recall at the budget "
                    "did not rise by %.0f%%"
@@ -1397,17 +1435,18 @@ def format_round(result: RoundResult) -> str:
                  % (100 * result.rules.min_gain, 100 * result.rules.fpr_budget,
                     100 * result.rules.min_quality_gain))
     lines.append("")
-    lines.append("%-22s %8s %7s %9s %9s %8s %-9s" %
-                 ("candidate", "recall@b", "fpr@b", "tok/rep", "tok/win", "evidence", "verdict"))
+    lines.append("%-20s %8s %7s %8s %9s %8s %-9s" %
+                 ("candidate", "recall@b", "fpr@b", "tok/rep", "tok/inc", "evidence", "verdict"))
     lines.append("-" * 96)
 
     def row(m: Measurement, label: str, verdict: str) -> str:
-        return "%-22s %8s %7s %9s %9s %8s %-9s" % (
+        incident = tokens_per_incident(m)
+        return "%-20s %8s %7s %8s %9s %8s %-9s" % (
             label,
             "n/a" if m.recall_at_budget is None else "%.3f" % m.recall_at_budget,
             "n/a" if m.fpr_at_budget is None else "%.3f" % m.fpr_at_budget,
             "n/a" if m.tokens_per_report is None else "%.0f" % m.tokens_per_report,
-            "n/a" if m.tokens_per_window is None else "%.1f" % m.tokens_per_window,
+            "n/a" if incident is None else "%.0f" % incident,
             "%.0f%%" % (100 * m.coverage_floor) if m.coverage else "n/a",
             verdict,
         )

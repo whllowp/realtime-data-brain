@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -37,7 +38,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts" / "service_data"))
 
 from brian.contracts import Event  # noqa: E402
 from brian.demo import LabeledWindow  # noqa: E402
-from brian.streams import Stream, dump_stream_file  # noqa: E402
+from brian.streams import Stream, align_window_start, dump_stream_file  # noqa: E402
 
 from rcaeval_to_events import DATA, fault_type, window_events  # noqa: E402
 
@@ -47,7 +48,12 @@ from rcaeval_to_events import DATA, fault_type, window_events  # noqa: E402
 #: same reason: the Platt fit was made on other data.
 BASE_OVERRIDES = {
     "calibration": {"enabled": False},
-    "gate": {"anomaly_probability": 0.5, "notify_probability": 0.5},
+    # The engine answers 0.24-0.28 on this domain (pooled p50 0.2533, p90 0.2710), so a bar
+    # inherited from the synthetic suite does not mean "strict", it means "silent": every window
+    # would be OBSERVE, no alert would be raised, and the cost column would be empty. 0.26 is
+    # inside the measured band and is documented here as what it takes to run this domain, not
+    # as a threshold chosen against the labels.
+    "gate": {"anomaly_probability": 0.26, "notify_probability": 0.26},
     # RCAEval publishes one event per metric per window (four events); the shipped minimum of ten
     # assumes a production feed with thousands. Without this the pipeline emits no window at all,
     # the evaluator scores fine (it uses min_events=1), and the round would compare token costs of
@@ -67,17 +73,27 @@ def case_stream(case_dir: Path, window_s: int, warmup_cap: int) -> Optional[Stre
     starts = sorted(grouped)
     pre_fault = max(1, int((inject - starts[0].timestamp()) // window_s))
     warmup = max(1, min(warmup_cap, pre_fault // 2))
-    windows = [
-        LabeledWindow(
-            service=meta["service"],
-            window_start=start,
-            scenario=meta["case"],
-            events=grouped[start],
-            expected={"is_anomaly": start.timestamp() >= inject},
-            scored=index >= warmup,
+    windows = []
+    previous = None
+    for index, start in enumerate(starts):
+        # The windower floors its window starts to a grid of `size_s` from the epoch, so a label
+        # carrying the raw sample timestamp can never match a digest: every round on this stream
+        # would print `recall 0.000` about a domain it never scored, which is exactly what rounds
+        # 2-3 did here. The label therefore carries the floored start the pipeline will emit.
+        floored = align_window_start(start, window_s)
+        if floored == previous:
+            continue
+        previous = floored
+        windows.append(
+            LabeledWindow(
+                service=meta["service"],
+                window_start=floored,
+                scenario=meta["case"],
+                events=[replace(event, event_time=floored) for event in grouped[start]],
+                expected={"is_anomaly": start.timestamp() >= inject},
+                scored=index >= warmup,
+            )
         )
-        for index, start in enumerate(starts)
-    ]
     return Stream(
         name=meta["case"],
         windows=windows,

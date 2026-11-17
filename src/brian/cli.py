@@ -464,9 +464,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         fresh = [promotion for promotion in load_promotions(root)
                  if str(promotion.path) in (written.get("versions") or [])]
         if len(fresh) == 1:
-            apply_promotion(root, fresh[0])
+            applied = apply_promotion(root, fresh[0])
             _print("in force: %s" % ", ".join("%s=%s" % item for item in
                                              sorted(current_state(root)["env"].items())))
+            for line in applied.get("interactions") or []:
+                _print("  ! %s" % line)
+                _print("    that setting was measured as part of the earlier version, not this one: the")
+                _print("    configuration in force is not the one this round measured.")
         elif fresh:
             # They were measured against the same baseline, so they are alternatives. Applying all of
             # them merges several measurements into a configuration no round has looked at.

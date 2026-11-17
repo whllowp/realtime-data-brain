@@ -41,6 +41,7 @@ from brian.evolve import (
     rejudge,
     rules_fingerprint,
     state_ceiling,
+    tokens_per_incident,
 )
 from brian.llm.prompts import evidence_coverage, evidence_floor
 from brian.scoring import text_deviation
@@ -1412,3 +1413,53 @@ def test_promotion_alone_does_not_earn_L3():
     assert grade(has_catalogue=True, has_history=True, promotes=True)["level"] == "L2"
     assert grade(has_catalogue=True, has_history=True, promotes=True,
                  applies_changes=True)["level"] == "L3"
+
+
+def _service_domain(*, recall: float, found: int, tokens: float, reports: int,
+                    windows: int = 543, faults: int = 279) -> Measurement:
+    """A measurement shaped like round 19's RCAEval round: faults known, budget cut known."""
+    m = at_budget("x", recall=recall, fpr=0.0, raw_recall=recall, tokens=tokens)
+    m.reports = reports
+    m.windows = windows
+    m.tokens_per_window = tokens * reports / windows
+    m.confusion = {"tp": found, "fp": 0, "tn": windows - faults, "fn": faults - found}
+    return m
+
+
+def test_the_bill_per_incident_is_the_other_denominator():
+    """Round 19: 5.3% more tokens per report bought 12.6x more found failures.
+
+    Per report the reader looked more expensive; per incident it was an order of magnitude cheaper.
+    """
+    baseline = _service_domain(recall=0.068, found=19, tokens=1618, reports=228)
+    trial = _service_domain(recall=0.860, found=240, tokens=1703, reports=240)
+
+    before = tokens_per_incident(baseline)
+    after = tokens_per_incident(trial)
+
+    assert before is not None and after is not None
+    assert before > after * 10
+    verdict = decide(baseline, trial, EvolveRules())
+    assert verdict.accepted
+    assert verdict.rule == "quality"
+    assert "bill per incident" in verdict.reason
+
+
+def test_a_rise_in_both_bills_is_still_a_rejection():
+    """A quality gain that costs more per report *and* more per incident is not a Pareto move."""
+    baseline = _service_domain(recall=0.500, found=140, tokens=1618, reports=228)
+    trial = _service_domain(recall=0.540, found=151, tokens=3000, reports=300)
+    trial.tokens_per_window = 3000.0 / 4.0
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule == "cost"
+    assert "does not fall" in verdict.reason
+
+
+def test_the_incident_bill_is_none_when_there_is_no_fault_to_divide_by():
+    assert tokens_per_incident(at_budget("x", recall=0.5, raw_recall=0.5)) is None
+    bare = at_budget("x", recall=0.5, raw_recall=0.5)
+    bare.confusion = {"tp": 0, "fp": 0, "tn": 10, "fn": 0}
+    assert tokens_per_incident(bare) is None
