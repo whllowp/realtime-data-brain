@@ -1234,7 +1234,7 @@ def test_deployable_is_a_predicate_over_the_recorded_numbers():
 def test_the_shipped_block_reports_alerts_per_thousand_windows():
     result = _round(tmp_path=None, accepted=True)
     text = format_round(result)
-    assert "alerts/1k" in text
+    assert "fp/1k" in text
 
 
 def test_inheriting_the_deployed_threshold_is_not_a_new_deployability_claim():

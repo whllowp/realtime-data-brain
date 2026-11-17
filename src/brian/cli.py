@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .bus import JournalBus, MemoryBus, open_bus
-from .config import Settings, load_settings
+from .config import ENV_VARS, Settings, load_settings
 from .contracts import Event, Lineage, dumps, loads
 from .demo import DEFAULT_SEQUENCE, EXPECTED, LabeledWindow, flatten, generate
 from .cost import format_ledger, ledger_from_traces
@@ -66,8 +66,10 @@ from .promote import (
     claim_check,
     current_state,
     format_promotions,
+    in_force_overrides,
     load_promotions,
     revert_promotion,
+    version_label,
     write_verification,
 )
 from .pipeline import Pipeline
@@ -428,6 +430,35 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     settings, streams, source, base_overrides = _evolve_streams(args, settings)
+
+    # The baseline is the deployment, not the factory default. `load_settings()` is what the code ships
+    # with; `current.json` is what is running. Round 20 accepted a patch whose shipped form was worse than
+    # the configuration already in force, which is a statement about the baseline, not about the patch.
+    if not args.from_default:
+        in_force, sources, refused, unknown = in_force_overrides(root, settings)
+        if in_force:
+            settings = apply_overrides(settings, in_force)
+            names = sorted(ENV_VARS.get((section, key), "%s.%s" % (section, key))
+                           for section, values in in_force.items() for key in values)
+            _print("in force        %s  (%d variable(s) from the deployment state)"
+                   % (", ".join(sorted({version_label(sources.get(name)) for name in names})),
+                      len(names)))
+            for name in names:
+                pair = next((pair for pair, env in ENV_VARS.items() if env == name), None)
+                value = in_force[pair[0]][pair[1]] if pair else "?"
+                _print("  %s=%r  from %s" % (name, value, version_label(sources.get(name))))
+            for section, values in sorted(in_force.items()):
+                for key, value in sorted(values.items()):
+                    base = (base_overrides.get(section) or {}).get(key)
+                    if base is not None and base != value:
+                        _print("  ! the deployment replaces this domain's own base setting: %s %r -> %r"
+                               % ("%s.%s" % (section, key), base, value))
+            if refused or unknown:
+                _print("  ! not adopted: refused %s, unknown %s" % (refused or "[]", unknown or "[]"))
+            _print("")
+        elif args.stream_file:
+            _print("in force        (nothing) the deployment state sets no reloadable setting")
+            _print("")
 
     known = {candidate.name: candidate for candidate in catalogue()}
     proposal_record: dict = {}
@@ -1470,6 +1501,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--apply", action="store_true",
                         help="also write a version file per accepted change "
                              "(the round itself is always recorded)")
+    evolve.add_argument("--from-default", action="store_true",
+                        help="measure against the factory defaults instead of the settings in force "
+                             "(the deployment state is the baseline by default)")
     evolve.add_argument("--grade", action="store_true",
                         help="print the L1-L5 grading and exit")
     evolve.add_argument("--history", action="store_true",

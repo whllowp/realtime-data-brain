@@ -947,11 +947,15 @@ class Verdict:
 
 
 def alerts_per_1000(measurement: "Measurement") -> Optional[float]:
-    """Alerts per 1,000 windows at the *recorded* configuration, or None when nothing was scored.
+    """False positives per 1,000 scored windows at the *recorded* configuration, or None.
 
     The same number as the false-positive rate in units an operator can argue about. It is displayed
     next to the shipped recall because the two together are the only honest description of what a
     threshold does: a cut that alerts on everything has recall 1.000 and is useless.
+
+    It counts *false* positives, not all pages (round 21: a configuration with shipped recall 0.211
+    and zero false positives printed `0`, which is correct here and would be a lie under the heading
+    "alerts" — the table says `fp/1k` for that reason).
     """
     if measurement.fpr is None:
         return None
@@ -1567,7 +1571,7 @@ def format_round(result: RoundResult) -> str:
         label = "baseline" if candidate is None else candidate.name
         if measurement.recall is None or measurement.fpr is None:
             continue
-        lines.append("  shipped threshold  %-22s recall %.3f  alerts/1k %6.0f  fpr %.3f"
+        lines.append("  shipped threshold  %-22s recall %.3f  fp/1k %6.0f  fpr %.3f"
                      % (label, measurement.recall, alerts_per_1000(measurement), measurement.fpr))
     for candidate, measurement, _verdict in [(None, result.baseline, None)] + list(result.trials):
         label = "baseline" if candidate is None else candidate.name

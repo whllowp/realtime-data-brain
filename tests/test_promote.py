@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from brian.config import load_settings
 from brian.evolve import Candidate, EvolveRules, Measurement, RoundResult, Verdict
 from brian.promote import (
     FAILED,
@@ -22,6 +23,7 @@ from brian.promote import (
     combined_versions,
     current_state,
     format_promotions,
+    in_force_overrides,
     load_promotions,
     revert_promotion,
     write_verification,
@@ -288,6 +290,49 @@ def test_an_empty_ledger_says_there_is_nothing_to_verify(tmp_path):
     table = format_promotions([])
 
     assert "no version files yet" in table
+
+
+def test_the_round_reads_the_deployment_as_its_baseline(tmp_path):
+    # Round 20 accepted a patch whose shipped recall was 0.211 while the in-force v019 gave 0.807:
+    # the loop had been comparing everything against the factory default, not against production.
+    seed_versions(tmp_path)
+    apply_promotion(tmp_path, load_promotions(tmp_path)[0])
+
+    overrides, sources, refused, unknown = in_force_overrides(tmp_path, load_settings())
+
+    assert overrides == {"digest": {"scoring": "deviation", "rolling_window": 100}}
+    assert sources == {"BRIAN_DIGEST_SCORING": "1", "BRIAN_DIGEST_ROLLING_WINDOW": "1"}
+    assert refused == []
+    assert unknown == []
+
+
+def test_a_deployment_state_that_sets_nothing_is_four_empty_answers(tmp_path):
+    overrides, sources, refused, unknown = in_force_overrides(tmp_path, load_settings())
+
+    assert overrides == {}
+    assert sources == {}
+    assert refused == []
+    assert unknown == []
+
+
+def test_a_setting_the_live_process_cannot_own_is_reported_not_adopted(tmp_path):
+    # Window geometry needs a restart, so adopting it as the baseline would describe a deployment
+    # that is not running. It is named in `refused` instead.
+    state = tmp_path / "var" / "evolve"
+    state.mkdir(parents=True)
+    (state / "current.json").write_text(
+        json.dumps({"env": {"BRIAN_DIGEST_SCORING": "deviation",
+                            "BRIAN_WINDOW_SIZE_S": "120"},
+                    "sources": {"BRIAN_DIGEST_SCORING": "19", "BRIAN_WINDOW_SIZE_S": "19"}}),
+        encoding="utf-8",
+    )
+
+    overrides, source_map, refused, unknown = in_force_overrides(tmp_path, load_settings())
+
+    assert overrides == {"digest": {"scoring": "deviation"}}
+    assert source_map == {"BRIAN_DIGEST_SCORING": "19"}
+    assert refused == ["BRIAN_WINDOW_SIZE_S"]
+    assert unknown == []
 
 def test_applying_a_promotion_reports_which_variables_it_actually_took(tmp_path):
     seed_versions(tmp_path)

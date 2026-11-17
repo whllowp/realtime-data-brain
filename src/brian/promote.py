@@ -40,6 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from .config import ENV_VARS, Settings
+from .deploy import overrides_from_state
 from .evolve import Candidate, EvolveRules, Measurement
 
 CURRENT = "current.json"
@@ -228,6 +230,32 @@ def _write_state(root: Path, state: Mapping[str, Any]) -> Path:
     return path
 
 
+def in_force_overrides(root: Path, settings: Settings) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str],
+                                                               List[str], List[str]]:
+    """The overrides a round must adopt so its baseline is the deployment, not the factory default.
+
+    ``load_settings()`` is what the code ships with; ``var/evolve/current.json`` is what the deployment is
+    running. Until this function existed every round compared candidates against the former, so an
+    "accepted" change could be worse than the configuration already live — round 20 accepted a patch whose
+    shipped recall is 0.211 while the in-force v019 gives 0.807, which is a finding about the baseline
+    rather than about the patch.
+
+    Only reloadable fields are adopted, because those are the ones a running process could take; anything
+    else is reported as refused rather than silently ignored. The second return value maps environment
+    variable name to the version that owns it, so the caller can print where each value came from — it is
+    filtered to the variables that were actually adopted, because a refused setting is not in the baseline
+    and labelling it would describe a configuration that is not running.
+    """
+    state = current_state(root)
+    overrides, refused, unknown = overrides_from_state(state, settings)
+    adopted = {ENV_VARS[(section, field)]
+               for section, values in overrides.items()
+               for field in values
+               if (section, field) in ENV_VARS}
+    sources = {name: source for name, source in dict(state.get("sources") or {}).items() if name in adopted}
+    return overrides, sources, refused, unknown
+
+
 def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = True) -> Dict[str, Any]:
     """Merge one version's assignments into the deployment state, recording where each came from.
 
@@ -304,11 +332,18 @@ def interacting_variables(state: Mapping[str, Any], promotion: "Promotion") -> L
 
 
 def _version_label(source: Optional[str]) -> str:
-    """`v003` for a numeric source, the raw string otherwise, `?` when the state never said."""
-    if source is None or not str(source).strip():
+    """``v019`` for a recorded source, ``?`` when the state does not say where a value came from."""
+    if source is None or str(source).strip() == "":
         return "?"
     text = str(source).strip()
+    if text.lower().startswith("v"):
+        return text
     return "v%03d" % int(text) if text.isdigit() else text
+
+
+def version_label(source: Optional[str]) -> str:
+    """Public form of `_version_label`, for callers that print where a value came from."""
+    return _version_label(source)
 
 
 def revert_promotion(root: Path, promotion: Promotion) -> Path:
