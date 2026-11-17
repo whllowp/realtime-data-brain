@@ -37,7 +37,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .bus import Bus, Record
 from .calibration import CalibrationFit
-from .config import Settings
+from .config import Settings, apply_overrides
+from .deploy import DeploymentState
 from .contracts import (
     ALERTING_ACTIONS,
     new_id,
@@ -88,6 +89,10 @@ class Counters:
     rca_reused: int = 0
     rca_prompt_tokens: int = 0
     rca_completion_tokens: int = 0
+    #: Deployment-state reloads applied while this pipeline was running. Counted rather than logged
+    #: because the number is the evidence that a revert reached a live process: zero here means the
+    #: change is still waiting for a restart, whatever the ledger says.
+    settings_reloads: int = 0
 
     def as_dict(self) -> Dict[str, Any]:
         payload = dict(vars(self))
@@ -157,8 +162,51 @@ class Pipeline:
         #: shows up in production.
         self._recent: Dict[str, List[Event]] = {}
         self._keep_events = max(0, keep_events)
+        #: Watches the deployment state file, when one is configured. Not created by default: a
+        #: process that silently follows a file under `var/` is a surprising thing to enable by
+        #: accident, and an evaluation harness must not be steered by whatever a loop last wrote.
+        self.deploy: Optional[DeploymentState] = (
+            DeploymentState(settings.deploy.state_file) if settings.deploy.state_file else None
+        )
+        #: Every reload applied, oldest first — the record behind `Counters.settings_reloads`.
+        self.reloads: List[Dict[str, Any]] = []
         self.traces: List[WindowTrace] = []
         self._started_at = time.time()
+
+    # -- hot reload ------------------------------------------------------------
+    def reload_from_deployment(self) -> Optional[Dict[str, Any]]:
+        """Pick up the deployment state if it moved since the last window; `None` when nothing changed.
+
+        Called once per `drain_ready`, so the granularity is one window: a revert written between two
+        windows is seen by the second one. Fields the live process cannot own (window geometry, the
+        baseline tracker, the fitted calibration, the Laya client) are reported as `refused` instead of
+        being applied — swapping the window size mid-stream would re-label every boundary in the run's
+        own traces, which is a different experiment rather than a configuration change.
+        """
+        if self.deploy is None:
+            return None
+        poll = self.deploy.poll(self.settings)
+        if poll is None:
+            return None
+        before = self.settings
+        self.settings = apply_overrides(self.settings, poll["overrides"])
+        if self.settings.digest.rolling_window != before.digest.rolling_window:
+            # The window's history belongs to the size it was built for. Keeping it would rank the new
+            # size against samples the old one collected, so it restarts and the counter says so.
+            size = self.settings.digest.rolling_window
+            self.rolling = RollingWindow(size) if size > 0 else None
+        record = {
+            "stamp": poll["stamp"],
+            "changed": sorted("%s.%s" % (section, field_name)
+                              for section, values in poll["overrides"].items()
+                              for field_name in values),
+            "refused": poll["refused"],
+            "unknown": poll["unknown"],
+        }
+        self.reloads.append(record)
+        self.deploy.last = record
+        self.counters.settings_reloads += 1
+        return record
 
     # -- ingest ----------------------------------------------------------------
     def ingest(self, event: Event, publish: bool = True) -> Record:
@@ -192,6 +240,7 @@ class Pipeline:
     # -- windows ---------------------------------------------------------------
     def drain_ready(self, final: bool = False) -> List[WindowTrace]:
         """Close and process every window the watermark has released (or all, if `final`)."""
+        self.reload_from_deployment()
         aggregators = self.windower.flush() if final else self.windower.ready()
         traces: List[WindowTrace] = []
         for aggregator in aggregators:

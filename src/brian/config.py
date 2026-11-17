@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .topics import DEFAULT_PREFIX, env_prefix
 
@@ -375,6 +375,23 @@ class DigestSettings:
 
 
 @dataclass
+class DeploySettings:
+    """Where the deployment state lives, and therefore whether a running pipeline watches it.
+
+    `var/evolve/current.json` is what `brian evolve --apply` and `--verify` write: the environment
+    variables in force, each with the version that put it there. A pipeline started with this path set
+    re-reads the file between windows, so an accepted change and an automatic revert both take effect
+    without a restart. Empty means "start-up configuration only", which is the shipped default: a
+    process that silently follows a file under `var/` is a surprising thing to enable by accident.
+    """
+
+    state_file: str = ""
+
+    def to_dict(self) -> Dict[str, object]:
+        return {"state_file": self.state_file}
+
+
+@dataclass
 class Settings:
     kafka: KafkaSettings = field(default_factory=KafkaSettings)
     laya: LayaSettings = field(default_factory=LayaSettings)
@@ -383,6 +400,7 @@ class Settings:
     window: WindowSettings = field(default_factory=WindowSettings)
     digest: DigestSettings = field(default_factory=DigestSettings)
     calibration: CalibrationSettings = field(default_factory=CalibrationSettings)
+    deploy: DeploySettings = field(default_factory=DeploySettings)
     log_level: str = "info"
     #: Emit every record to stdout as JSON (useful when the journal is the only memory).
     echo: bool = False
@@ -445,12 +463,43 @@ class Settings:
         }
 
     def with_overrides(self, **kwargs: object) -> "Settings":
-        """A copy with top-level sections replaced —?used by the CLI and tests."""
+        """A copy with top-level sections replaced — used by the CLI and tests."""
         return replace(self, **kwargs)  # type: ignore[arg-type]
 
 
 def _dataclass_dict(obj: object) -> Dict[str, object]:
     return {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+
+
+def apply_overrides(settings: Settings,
+                    overrides: Mapping[str, Mapping[str, Any]]) -> Settings:
+    """A copy of `settings` with `{section: {field: value}}` applied, validated field by field.
+
+    Strict on purpose: an unknown section or field raises instead of being dropped, because a domain
+    profile with a typo would otherwise be *silently* the default profile, and the measurement would
+    report a property of the default while the operator believes it measured the change. That
+    distinction has already cost this project a round (``docs/RSI_LOOP.zh.md`` 3.5).
+
+    Lives here rather than in `evolve` so the improvement loop and the running pipeline share one
+    implementation: a hot reload that merged settings slightly differently from the loop that proposed
+    them would be a second definition of "in force".
+    """
+    changed: Dict[str, Any] = {}
+    for section, values in overrides.items():
+        if not hasattr(settings, section):
+            raise ValueError("unknown settings section %r" % section)
+        current = getattr(settings, section)
+        fields = {f.name for f in fields_of(type(current))}
+        unknown = sorted(set(values) - fields)
+        if unknown:
+            raise ValueError("unknown field(s) %s in section %r" % (", ".join(unknown), section))
+        changed[section] = replace(current, **values)
+    return replace(settings, **changed)
+
+
+def fields_of(cls: type) -> Tuple[object, ...]:
+    """The dataclass fields of `cls`, without importing `dataclasses.fields` at every call site."""
+    return tuple(getattr(cls, "__dataclass_fields__").values())
 
 
 def _resolve_path(value: str) -> Path:
@@ -540,6 +589,7 @@ def load_settings() -> Settings:
             path=_env("BRIAN_CALIBRATION_PATH", DEFAULT_CALIBRATION_PATH) or DEFAULT_CALIBRATION_PATH,
             enabled=_flag("BRIAN_CALIBRATION_ENABLED", True),
         ),
+        deploy=DeploySettings(state_file=_env("BRIAN_DEPLOY_STATE", "") or ""),
         log_level=_env("BRIAN_LOG_LEVEL", "info") or "info",
         echo=_flag("BRIAN_ECHO", False),
     )
@@ -575,4 +625,5 @@ ENV_VARS: Dict[Tuple[str, str], str] = {
     ("digest", "host_ratio_floor"): "BRIAN_DIGEST_HOST_RATIO_FLOOR",
     ("digest", "scoring"): "BRIAN_DIGEST_SCORING",
     ("digest", "rolling_window"): "BRIAN_DIGEST_ROLLING_WINDOW",
+    ("deploy", "state_file"): "BRIAN_DEPLOY_STATE",
 }

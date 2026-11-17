@@ -862,20 +862,63 @@ $ brian evolve --verify --verify-version 3            # 换了域：SMD 上立�
 
 ---
 
-## 4. 分级：为什么是 L2，不是 L3
+### 3.24 让改动到达运行中的进程：热加载，以及它只覆盖一半的设置
+
+3.23 节让"接受"变成"承诺"，让"失效"变成"自动撤回"，但两者都写在文件里。文件由进程启动时读取，而**进程一直在跑**——于是每一次接受的潜伏期都是"下一次重启"。这一轮把最后这一段接上。
+
+`src/brian/deploy.py`：
+
+- `RELOADABLE_FIELDS`：**能在一个正在运行的进程里换掉的字段**，逐个列出而不是按 section 一刀切。只包含"每个窗口读一次、且不拥有启动时累积状态"的设置：`gate.*`（每次决策读）、`digest.profile/host_features/scoring/host_precision/host_ratio_floor`（渲染时读）、`digest.rolling_window`（窗口重建，历史重置）、`llm.max_context_events`（取事件时读）。
+- `overrides_from_state(state, settings)`：把状态文件的 `env` 分成**三类**——可热加载、**拒绝**（该进程确实拥有这个设置，但它在启动时建好了状态）、**未知**（这个构建不认识这个名字，通常是版本错配）。后两类分开报，因为只有一类是版本问题。
+- `DeploymentState.poll(settings)`：用状态文件的 `updated_at` 判断"动过没有"。**比较时间戳而不是文件内容**：内容比较在空白改动上也会触发，mtime 在 `git checkout` 不改变值时也会触发；两种情况下重载都是空操作，但会被计成一次，而一个会为无关原因跳动的计数不值得打印。
+- `Pipeline.reload_from_deployment()`：每次 `drain_ready()` 开头调用一次，粒度是一个窗口。换掉的设置在下一窗生效；拒绝的字段（窗口几何、基线、校准、Laya 客户端）保留启动值并**记进 `reloads`**——原因是换窗口大小不是配置变更，而是另一个实验：它会把这次运行自己 trace 里已经划好的每一个边界重新标注一遍。
+- `Counters.settings_reloads`：重载次数。这个数字是"撤回真的到达了活进程"的唯一证据；它是 0 就说明这次改动还在等重启，台账上写着什么都没用。
+
+真实演示（`var/deploy_reload_demo.py`，SMD 流，一次真实 `revert_promotion(v011)` 插在两次窗口批之间）：
 
 ```
-level            L2
+state at start   {'BRIAN_DIGEST_SCORING': 'auto', 'BRIAN_DIGEST_ROLLING_WINDOW': '100', 'BRIAN_GATE_RANK_P': '0.9'}
+before       windows 120  actions ['deep_analysis', 'observe']      reloads=1
+revert now       var\evolve\current.json
+state after      {'BRIAN_DIGEST_SCORING': 'auto', 'BRIAN_DIGEST_ROLLING_WINDOW': '100'}
+sources after    {'BRIAN_DIGEST_SCORING': '10', 'BRIAN_DIGEST_ROLLING_WINDOW': '10'}
+after        windows  60  actions ['deep_analysis', 'observe']      reloads=2
+
+reload ...22:55:49Z  changed=['digest.rolling_window', 'digest.scoring', 'gate.rank_probability'] refused=- unknown=-
+reload ...22:56:02Z  changed=['digest.rolling_window', 'digest.scoring']                        refused=- unknown=-
+settings_reloads = 2
+```
+
+注意第二次重载里 `rank_probability` 不在 `changed` 里：撤回把它从状态文件里删掉了，而它回落到默认值 0.90——**恰好等于**被撤回的值，所以这一次没有可观察的变化。数值相同的撤回等于没撤回，这不是缺陷而是事实，`changed` 列表说的就是"真的动了什么"。
+
+`tests/test_deploy.py` 用行为而不是字段来钉住这件事：同一条流水线（引擎恒定答 0.9），阈值 0.95 时动作集合与阈值 0.20 时**不同**，且后一批出现 `page_human`。字段被替换只是实现细节，动作变了才是"改动到达了进程"。
+
+分级也随之变了：`brian evolve --grade` 现在打印 **L3**，因为"无需人工地让改动生效"这条能力由 `reload_capable()`（一个对 `Pipeline.reload_from_deployment` 是否存在的检查）给出，而不是由意图给出。
+
+两条边界：
+
+- **热加载只覆盖一半设置。** 窗口几何、基线窗口、校准、Laya 客户端仍然要重启；它们拥有一段"这次运行"的累积状态，换掉它们等于换一次实验。所以准确的说法不是"任何改动都免重启"，而是"**改判与改读**免重启，改窗口不免"。
+- **"代码能"不等于"这个进程在跟"。** 分级看的是能力，而一个没有设 `BRIAN_DEPLOY_STATE` 的部署会一直用启动配置——它照样是"能热加载的构建"，却不是"在跟状态的部署"。唯一的可观测信号是 `settings_reloads`：它是 0 就说明这个部署没有在跟。把这两件事混为一谈，就是这一节最容易犯的自夸。
+
+---
+
+## 4. 分级：从 L2 到 L3 的那一步是什么
+
+```
+level            L3
 capabilities
   + proposes changes from a fixed catalogue, each with a testable hypothesis
   + evaluates them against labels, prompt evidence and a token ledger
   + records an accepted change as a version file with env and rollback
   + puts an accepted change into a deployment state file with per-variable provenance, and reverts it when its claim stops holding
+  + applies an accepted change to the running configuration without a human
 missing for the next level
-  - a running process that picks the change up without a restart
+  - a mutable improvement mechanism (the catalogue and the objective are fixed)
 ```
 
-`grade()` 把"写版本文件"、"写入部署状态"、"改动在运行中生效"当成三个事实，只有第三个才给 L3。3.23 节之后，前两件和"承诺失效就自动撤回"都已经是循环自己做的，剩下的唯一人的动作是**重启**：`current.json` 由进程启动时读取，本仓库没有活的服务句柄，所以它仍然是 L2。给一个会自动写 JSON 的系统评 L3，正是综述警告的那种自夸；而把"把状态写对"说成"无需人工"，是同一句话的另一种说法。
+`grade()` 把"写版本文件"、"写入部署状态"、"改动在运行中生效"当成三个事实，只有第三个才给 L3。3.23 节让前两件和"承诺失效就自动撤回"成为循环自己做的事；3.24 节把最后一段接上——`Pipeline` 在窗口之间重读 `current.json`，于是接受与撤回都到达了运行中的进程。
+
+这个 L3 是**有条件**的，而条件写在代码里而不是写在文档里：`applies_changes` 来自 `reload_capable()`，它检查 `Pipeline.reload_from_deployment` 是否存在；而一个没设 `BRIAN_DEPLOY_STATE` 的部署仍然只读启动配置（边界 36）。给一个会自动写 JSON 的系统评 L3，正是综述警告的那种自夸；同样地，把"这个构建有能力"说成"这个部署在跟状态"，是同一句话的另一种说法。
 
 `grade()` 刻意不读文件系统、只收事实参数：一个自己报告自己等级的评估器，是自证循环的第一个例子。
 
@@ -918,6 +961,8 @@ missing for the next level
 32. **"生效"不等于"热加载"。** 3.23 节的 `current.json` 是部署启动时读的东西；本仓库没有活的服务句柄，所以一次自动撤回要等进程下次启动才被看见。这条边界是它仍为 L2 的原因——把状态写对不构成"无需人工"。
 33. **复核的结论依赖你指向哪条流。** 同一条流上是重复检验，换一条流上是迁移检验；两者在表格里都叫 `holds`，只有 `stream` 字段能区分。代码没有替读者分辨这件事。
 34. **承诺的可信度上限就是立约时那把尺子的可信度。** 承诺里的召回是循环扫出来的切点上的召回（边界 11 的同一条限制）：复核能发现"数字不再兑现"，发现不了"这个数字当初就不该当作承诺"。
+35. **热加载只覆盖一半设置。** 3.24 节的 `RELOADABLE_FIELDS` 只列每窗口读取、且不拥有启动时累积状态的字段：`gate.*`、`digest` 的渲染与排序设置、`llm.max_context_events`。窗口几何、基线窗口、校准、Laya 客户端改了要重启——它们拥有一段"这次运行"的状态，换掉等于换一次实验；所以准确的说法是"改判与改读免重启"，不是"任何改动免重启"。
+36. **"这个构建能热加载"不等于"这个部署在跟状态"。** 分级检查的是代码路径（`reload_capable()`），而一个没设 `BRIAN_DEPLOY_STATE` 的进程会一直用启动配置。唯一可观测的信号是 `Counters.settings_reloads`：为 0 就说明它没在跟。把能力当成事实，是 3.24 节最容易犯的自夸。
 
 ---
 
@@ -929,5 +974,5 @@ missing for the next level
 4. **（3.22 已完成）"改了规则就重审全部历史"已经是一条命令。** `brian evolve --audit` 把 22 轮、77 个候选测量在今天的目标下重判一遍：6 条判决会翻，17 条判决不变但理由换了；`--strict` 时有翻案就以退出码 1 结束，这才让它成为 CI 里的一道门而不是一篇报告。剩下的缺口是边界 29：指纹管不到判定代码本身。
 5. **（3.20 / 3.21 已完成）读者切点的"标定"问题被换成了"平稳性"问题。** 不是给每台主机各选一个常数，而是发现常数在这条流上不可用：记录内部电平摆动 0.4、类别均值差 0.03，所以固定切点在时间上不迁移。3.21 节把排序规则接进了产品（`RollingWindow` + `digest.rolling_window`，`Pipeline`/`Evaluator` 各一份状态），候选 `host-rolling-rank` 被接受：预算内召回 0.060 → 0.224，每窗口 token −87%。剩下的仍是产品决策：**要不要在生产上把主机状态交给读者**，以及上线后谁来监控它的漂移（这条规则会随流量自我调整，所以"告警率突然上升"可能是流量变了而不是故障变了）。
 6. **真模型校准**：配 API key 后重跑一轮，把 `coverage` 与真实解释质量对比，看这个代理到底代理了什么。
-7. **（3.23 完成一半）让 `apply` 真生效**（L3 的唯一缺口）：现在"在役状态"有了（`current.json` 带来源版本号），"自动回滚"也有了（复核失败即撤回），缺的是**不需要人工重启**这一步——热加载或进程内切换。这一半做完之后 L3 只剩这个开关，而它恰好是"改配置"和"改部署"的分界。
+7. **（3.23 / 3.24 已完成）`apply` 真生效，分级到 L3。** "在役状态"（`current.json` 带来源版本号）、"自动回滚"（复核失败即撤回）、"不需要人工重启"（`Pipeline` 在窗口之间重读状态，`Counters.settings_reloads` 为证）三件事都齐了，所以 `--grade` 从 L2 变成 L3。但它有两条边界：**只覆盖每窗口读取的设置**（窗口几何、基线、校准、Laya 客户端仍要重启，边界 35），以及**"能热加载的构建"不等于"在跟状态的部署"**（没设 `BRIAN_DEPLOY_STATE` 的进程照旧用启动配置，边界 36）。下一个 L3 之后的问题是：谁来启动这个进程、谁看 `settings_reloads`。
 8. **让 `Imp` 可变**（L4）：候选目录由循环根据账本自己生成。3.12 节已经把"提议的形状"放宽过一次（单字段 → 补丁），那是这一方向上安全的一小步；再往前就需要更强的验证器，否则就是自证循环的教科书案例。

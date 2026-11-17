@@ -758,7 +758,7 @@ def test_an_override_naming_an_unknown_section_or_field_is_rejected():
     settings = load_settings()
     with pytest.raises(ValueError, match="unknown settings section"):
         apply_overrides(settings, {"gateway": {"anomaly_probability": 0.5}})
-    with pytest.raises(ValueError, match="no field"):
+    with pytest.raises(ValueError, match="unknown field"):
         apply_overrides(settings, {"gate": {"anomaly_probabilty": 0.5}})
 
 

@@ -44,6 +44,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from .bus import MemoryBus
 from .calibration import auc
 from .config import ENV_VARS, Settings
+from .config import apply_overrides as config_apply_overrides
 from .contracts import Event
 from .cost import CostLedger, ledger_from_traces
 from .eval import EvalReport, Evaluator
@@ -510,19 +511,14 @@ def apply_overrides(settings: Settings, overrides: Dict[str, Any]) -> Settings:
     this pipeline on this dataset at all (a different domain needs its own threshold, because the
     shipped one was calibrated elsewhere). They are applied once, outside the loop, so every
     candidate is compared on the same base and the round record says what that base was.
+
+    Delegates to `config.apply_overrides` so the loop and a hot-reloading pipeline share one
+    implementation — two merge rules would be two definitions of "in force", and a candidate could be
+    accepted under one and loaded under the other.
     """
-    changed: Dict[str, Any] = {}
-    for section, values in overrides.items():
-        current = getattr(settings, section, None)
-        if current is None:
-            raise ValueError("stream overrides name an unknown settings section: %r" % section)
-        if not isinstance(values, dict):
-            raise ValueError("stream overrides for %r must be an object of fields" % section)
-        unknown = sorted(set(values) - set(vars(current)))
-        if unknown:
-            raise ValueError("%s has no field(s) %s" % (section, ", ".join(unknown)))
-        changed[section] = replace(current, **values)
-    return settings.with_overrides(**changed)
+    if not isinstance(overrides, dict):
+        raise ValueError("stream overrides must be an object of sections")
+    return config_apply_overrides(settings, overrides)
 
 
 def _tally(report: EvalReport) -> Dict[str, int]:

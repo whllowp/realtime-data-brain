@@ -54,6 +54,7 @@ from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .laya.gate import explain_thresholds
 from .laya.qcatalog import CATALOG_VERSION, catalog_hash, describe as describe_catalog, validate_questions
 from .llm.rca import RcaEngine
+from .deploy import reload_capable
 from .promote import (
     FAILED,
     UNMEASURABLE,
@@ -286,7 +287,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         except OSError:
             rounds = []
         result = grade(has_catalogue=bool(catalogue()), has_history=bool(rounds),
-                       mutates_mechanism=False, applies_changes=False,
+                       mutates_mechanism=False, applies_changes=reload_capable(),
                        promotes=bool(load_promotions(root)))
         _print("=" * 78)
         _print("brian evolve - how much of the loop is autonomous")
@@ -301,11 +302,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         for line in result["missing_for_next"]:
             _print("  - %s" % line)
         _print("")
-        _print("Note: an accepted change is recorded as a version file and put into the deployment")
-        _print("state file, and a version whose claim stops holding is reverted automatically. What")
-        _print("is still a human step is the restart: nothing here reloads a running process, so the")
-        _print("ladder puts this at L2 however autonomous the selection is. Grading it L3 for writing")
-        _print("tidy JSON would be the self-flattery the survey warns about.")
+        _print("Note: the pipeline reloads the deployment state between windows, so an accepted")
+        _print("change and an automatic revert both reach a running process; a process started")
+        _print("without BRIAN_DEPLOY_STATE keeps its start-up configuration, and grading that")
+        _print("case L3 is the self-flattery the survey warns about.")
         return 0
 
     laya = LayaClient(settings.laya)
