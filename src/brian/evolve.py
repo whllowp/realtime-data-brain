@@ -38,9 +38,10 @@ import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .bus import MemoryBus
+from .calibration import auc
 from .config import ENV_VARS, Settings
 from .contracts import Event
 from .cost import CostLedger, ledger_from_traces
@@ -48,6 +49,7 @@ from .eval import EvalReport, Evaluator
 from .laya import LayaClient
 from .llm.prompts import evidence_coverage
 from .pipeline import Pipeline, WindowTrace
+from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 from .streams import Stream, flatten_streams, summarise
 
 #: Build the reference evidence pool at this cap, so every candidate's coverage is measured against the
@@ -455,6 +457,95 @@ def cost_run(settings: Settings,
     return ledger_from_traces(traces), traces, reasoner
 
 
+def _deviation(entry: Mapping[str, Any]) -> Optional[float]:
+    """How far one rendered line is from its baseline, on the horizon the renderer shows.
+
+    The host renderer prefers the long horizon (`_render_host_digest`), so the reader uses it too: a
+    reader that peaked at a number the renderer never prints would be measuring a different system.
+    """
+    value = entry.get("long_delta_ratio")
+    if value is None:
+        value = entry.get("delta_ratio")
+    if value is None:
+        return None
+    try:
+        return abs(float(value) - 1.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def state_ceiling(settings: Settings, streams: Sequence[Stream]) -> Dict[str, Any]:
+    """How much of the label a *trivial* reader of the same state recovers, per recording.
+
+    This is the number every model has to beat to justify itself. It renders each window exactly as the
+    pipeline does, takes the loudest deviation the renderer would show (`max |ratio - 1|`), and measures
+    that single number against the labels. No Laya call is involved, so it is a hard ceiling on what the
+    state can support and it costs nothing to compute.
+
+    Reported per recording rather than pooled: two hosts put their answers on different scales, so a
+    pooled AUC would measure the scale difference as much as the signal. `None` where a recording has one
+    class only — a ceiling that cannot be computed is not evidence of a weak state.
+
+    On SMD this reader reaches 0.796 (machine-1-6) and 0.589 (machine-2-2) while the engine reaches
+    0.674 and 0.347, which is the fact a cost-only round table cannot show.
+    """
+    by_stream: Dict[str, Optional[float]] = {}
+    for stream in streams:
+        windower = Windower(
+            size_s=settings.window.size_s,
+            slide_s=settings.window.slide_s,
+            allowed_lateness_s=settings.window.allowed_lateness_s,
+            min_events=settings.window.min_events,
+            specs=digest_specs(settings.digest.profile, settings.digest.host_features),
+        )
+        baselines = BaselineTracker(
+            window=settings.window.baseline_windows,
+            long_window=settings.window.baseline_windows_long,
+            keys=baseline_keys(settings.digest.profile, settings.digest.host_features),
+        )
+        labels = {(window.service, int(window.window_start.timestamp())):
+                  bool((window.expected or {}).get("is_anomaly")) for window in stream.windows}
+        scores: List[float] = []
+        truth: List[int] = []
+
+        def record(digest: Any) -> None:
+            key = (digest.service, int(digest.window_start.timestamp()))
+            if key not in labels:
+                return
+            comparison = digest.metrics.get("comparison") or {}
+            deviations = [value for value in
+                          (_deviation(entry) for entry in _comparison_values(comparison))
+                          if value is not None]
+            scores.append(max(deviations) if deviations else 0.0)
+            truth.append(1 if labels[key] else 0)
+
+        def consume(aggregators: Sequence[Any]) -> None:
+            for aggregator in aggregators:
+                digest = build_digest(aggregator, baselines, profile=settings.digest.profile)
+                baselines.observe(digest.service, digest.metrics)
+                record(digest)
+
+        for event in flatten_streams([stream]):
+            windower.add(event)
+            consume(windower.ready())
+        consume(windower.flush())
+        by_stream[stream.name] = auc(scores, [bool(v) for v in truth]) if scores else None
+    return {"by_stream": by_stream, "windows": sum(len(s.windows) for s in streams)}
+
+
+def _comparison_values(comparison: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    """The flat list of rendered comparison entries, whatever nesting the payload uses."""
+    values: List[Mapping[str, Any]] = []
+    for entry in comparison.values():
+        if not isinstance(entry, Mapping):
+            continue
+        if "value" in entry:
+            values.append(entry)
+            continue
+        values.extend(_comparison_values(entry))
+    return values
+
+
 def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequence[Stream],
             pool: Sequence[Sequence[Event]], clock=None, budget: float = 0.10) -> Measurement:
     """Measure one configuration: detection from labels, cost from the ledger, coverage from the pool.
@@ -692,6 +783,7 @@ class RoundResult:
     rules: EvolveRules
     baseline: Measurement
     trials: List[Tuple[Candidate, Measurement, Verdict]] = field(default_factory=list)
+    ceiling: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def accepted(self) -> List[str]:
@@ -710,6 +802,7 @@ class RoundResult:
                 for candidate, measurement, verdict in self.trials
             ],
             "accepted": self.accepted,
+            "ceiling": self.ceiling,
         }
 
 
@@ -734,6 +827,7 @@ def run_round(settings: Settings, streams: Sequence[Stream],
     active_rules = rules if rules is not None else EvolveRules()
     chosen = list(selected) if selected is not None else catalogue()
     pool = build_pool(settings, streams)
+    ceiling = state_ceiling(settings, streams)
     baseline = measure(settings, None, streams, pool, budget=active_rules.fpr_budget)
 
     trials: List[Tuple[Candidate, Measurement, Verdict]] = []
@@ -751,6 +845,7 @@ def run_round(settings: Settings, streams: Sequence[Stream],
         rules=active_rules,
         baseline=baseline,
         trials=trials,
+        ceiling=ceiling,
     )
 
 
@@ -925,6 +1020,15 @@ def format_round(result: RoundResult) -> str:
                                       _wrap(verdict.reason, 68)))
     if not result.trials:
         lines.append("no candidates were tried")
+    if result.ceiling:
+        by_stream = result.ceiling.get("by_stream") or {}
+        lines.append("")
+        lines.append("state ceiling  what a trivial reader of the same digest recovers")
+        for name in sorted(by_stream):
+            value = by_stream[name]
+            lines.append("  %-22s %s" % (name, "n/a" if value is None else "%.3f" % value))
+        lines.append("  a threshold on the loudest rendered deviation from the baseline; the engine has")
+        lines.append("  to beat this to be worth its own cost, and no cost change can move it")
     lines.append("")
     lines.append("Interpretation: 'accept' means one measured configuration was better than another on this")
     lines.append("stream and lost nothing this evaluator can see. It is not a claim that the change is right")

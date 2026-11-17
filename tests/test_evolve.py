@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from brian.config import ENV_VARS, load_settings
+from brian.contracts import Event
+from brian.demo import LabeledWindow
 from brian.evolve import (
     Candidate,
     EvolveRules,
@@ -28,8 +31,10 @@ from brian.evolve import (
     operating_point_by_recording,
     persist,
     previously_rejected,
+    state_ceiling,
 )
 from brian.llm.prompts import evidence_coverage, evidence_floor
+from brian.streams import Stream
 
 
 PERFECT = {"log_retention": 1.0, "signature_retention": 1.0,
@@ -582,4 +587,110 @@ def test_an_override_naming_an_unknown_section_or_field_is_rejected():
         apply_overrides(settings, {"gateway": {"anomaly_probability": 0.5}})
     with pytest.raises(ValueError, match="no field"):
         apply_overrides(settings, {"gate": {"anomaly_probabilty": 0.5}})
+
+
+# --------------------------------------------------------------------------------------
+# the state ceiling: what a trivial reader of the same digest recovers
+# --------------------------------------------------------------------------------------
+def _cpu_stream(*, spikes: bool, count: int = 40, name: str = "s", scale: float = 0.50,
+                ) -> Stream:
+    """One metric event per minute: healthy windows flat, anomalous windows either a
+    single-window spike (`spikes=True`) or a sustained step (`spikes=False`).
+
+    A sustained step is deliberately available: a rolling median follows it, and the ceiling here
+    inherits that blindness — which is the reason the tracker keeps a second, longer horizon.
+    """
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    windows = []
+    for index in range(count):
+        when = start + timedelta(minutes=index)
+        anomalous = (index >= 12 and index % 4 == 0) if spikes else index >= count - 8
+        event = Event(
+            event_time=when,
+            service="svc-a",
+            kind="metric",
+            payload={"cpu_util": 0.95 * scale if anomalous else 0.50 * scale,
+                     "memory_util": 0.4 * scale},
+            event_id="%s-e%d" % (name, index),
+        )
+        windows.append(LabeledWindow(
+            service="svc-a",
+            window_start=when,
+            scenario="cpu" if anomalous else "normal",
+            events=[event],
+            expected={"is_anomaly": anomalous},
+            scored=True,
+        ))
+    return Stream(name=name, windows=windows, meta={})
+
+
+def _ceiling_settings():
+    settings = load_settings()
+    window = dataclasses.replace(settings.window, size_s=60, slide_s=60, min_events=1,
+                                 baseline_windows=6, baseline_windows_long=12)
+    return settings.with_overrides(window=window)
+
+
+def test_the_ceiling_is_what_a_trivial_reader_of_the_digest_recovers():
+    """A spike on the loudest rendered ratio separates the classes, without any model call."""
+    ceiling = state_ceiling(_ceiling_settings(), [_cpu_stream(spikes=True)])
+
+    assert ceiling["by_stream"]["s"] == pytest.approx(1.0)
+    assert ceiling["windows"] == 40
+
+
+def test_a_sustained_fault_is_absorbed_by_the_rolling_baseline_and_the_ceiling_says_so():
+    """The reader inherits the tracker's blind spot instead of hiding it.
+
+    A fault that outlasts the short window becomes the new median, so `max |ratio - 1|` collapses
+    right where the fault is worst. That is exactly why the tracker carries a long horizon, and a
+    ceiling of 1.0 here would mean the measurement, not the data, was wrong.
+    """
+    ceiling = state_ceiling(_ceiling_settings(), [_cpu_stream(spikes=False)])
+
+    assert 0.5 < ceiling["by_stream"]["s"] < 1.0
+
+
+def test_a_recording_with_one_class_has_no_ceiling_rather_than_a_perfect_one():
+    stream = _cpu_stream(spikes=True, count=12)          # the first 12 windows are all healthy
+    stream.windows = [dataclasses.replace(window, expected={"is_anomaly": False})
+                      for window in stream.windows]
+
+    ceiling = state_ceiling(_ceiling_settings(), [stream])
+
+    assert ceiling["by_stream"]["s"] is None
+
+
+def test_a_recording_with_no_events_has_no_ceiling():
+    stream = _cpu_stream(spikes=True, count=0)
+
+    ceiling = state_ceiling(_ceiling_settings(), [stream])
+
+    assert ceiling["by_stream"]["s"] is None
+    assert ceiling["windows"] == 0
+
+
+def test_the_ceiling_is_per_recording_because_two_hosts_do_not_share_a_scale():
+    """Pooling the scores would measure the scale difference between the hosts, not the signal."""
+    low = _cpu_stream(spikes=True, name="low", scale=0.01)
+    high = _cpu_stream(spikes=True, name="high", scale=1.0)
+
+    ceiling = state_ceiling(_ceiling_settings(), [low, high])
+
+    assert set(ceiling["by_stream"]) == {"low", "high"}
+    assert "pooled" not in ceiling
+    assert all(value is not None for value in ceiling["by_stream"].values())
+
+
+def test_the_table_shows_the_ceiling_beside_the_candidates(tmp_path):
+    """A round table that hides the ceiling invites attributing the state's signal to the model."""
+    result = _round(tmp_path, accepted=True)
+    result.ceiling = {"by_stream": {"machine-1-6": 0.8269, "machine-2-2": None}, "windows": 948}
+
+    table = format_round(result)
+
+    assert "state ceiling" in table
+    assert "machine-1-6" in table and "0.827" in table
+    assert "n/a" in table
+    assert "beat this to be worth its own cost" in table
 
