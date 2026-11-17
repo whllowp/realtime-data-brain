@@ -159,8 +159,31 @@ def test_a_misspelled_mode_is_a_configuration_error_not_a_silent_fallback():
     assert "unknown digest scoring" in str(excinfo.value)
 
 
-def test_the_modes_are_the_two_documented_ones():
-    assert SCORING_MODES == ("model", "deviation")
+def test_the_modes_are_the_documented_ones():
+    assert SCORING_MODES == ("model", "deviation", "auto")
+
+
+def test_auto_picks_the_reader_for_host_state_and_the_model_for_service_state():
+    """`auto` resolves against the profile, because the two domains are different text problems.
+
+    On host-shaped state the engine's answers do not track the signal (round 12 measured five
+    renderings under two question wordings, every cell between 0.17 and 0.67 AUC, with the best
+    variant flipping between the two hosts), while on service-shaped state the model separates
+    incidents from normal windows. One switch, two answers, decided by which renderer produced the
+    text.
+    """
+    sentinel = LayaResult(answers={"is_anomaly": {"type": "noul", "noul": 0.9}},
+                          routing=Routing(model="laya"), latency_ms=12.0)
+    base = load_settings()
+
+    host = base.with_overrides(digest=dataclasses.replace(base.digest, profile="host", scoring="auto"))
+    reader = judge(_digest({"cpu": _entry(delta=1.5)}), host, _Exploding())
+    assert reader.routing is not None and reader.routing.model == "deviation-reader"
+
+    service = base.with_overrides(digest=dataclasses.replace(base.digest, profile="service", scoring="auto"))
+    client = _Fixed(sentinel)
+    assert judge(_digest({"cpu": _entry(delta=1.5)}), service, client) is sentinel
+    assert client.calls == 1
 
 
 def test_the_mode_has_an_environment_variable_and_a_default_of_model():

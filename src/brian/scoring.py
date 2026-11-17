@@ -29,7 +29,12 @@ from .laya.client import LayaClient, LayaResult
 
 #: Which judge answers a digest. Any other value is a configuration error, not a silent fallback:
 #: a typo that quietly restored the model would make the measurement describe the wrong system.
-SCORING_MODES: Tuple[str, str] = ("model", "deviation")
+#: `"auto"` picks by profile — the reader for `host`, the model for `service` — because the two
+#: domains are not the same text problem: on service-shaped state the model separates incidents from
+#: normal windows (0.875 recall / 0.000 false positives on the synthetic suite), and on host-shaped
+#: state it does not (round 12: five renderings of the same window, two question wordings, every
+#: cell between 0.17 and 0.67 AUC with the direction flipping between the two SMD hosts).
+SCORING_MODES: Tuple[str, ...] = ("model", "deviation", "auto")
 
 #: The deviation at which the reading crosses the shipped `anomaly_probability` bar (0.33 for the
 #: SMD stream). Not a tuned constant — it is the arithmetic of `dev / (1 + dev)` at dev = 0.5.
@@ -135,11 +140,16 @@ def judge(digest: Digest, settings: Settings, laya: LayaClient) -> LayaResult:
     Falls back to the model when the deterministic reader has nothing to read (the first windows of a
     recording have no baseline yet), because "no deviation to measure" is not the same finding as
     "no incident" and must not be silently reported as a normal verdict.
+
+    `scoring="auto"` resolves against the digest profile rather than the payload, so one deployment
+    can serve two domains whose text this engine reads very differently.
     """
     mode = settings.digest.scoring
     if mode not in SCORING_MODES:
         raise ValueError("unknown digest scoring %r (pick from %s)"
                          % (mode, ", ".join(SCORING_MODES)))
+    if mode == "auto":
+        mode = "deviation" if settings.digest.profile == "host" else "model"
     if mode == "deviation":
         result = deviation_result(digest)
         if result is not None:
