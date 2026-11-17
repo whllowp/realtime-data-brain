@@ -1115,6 +1115,13 @@ class RoundResult:
     baseline: Measurement
     trials: List[Tuple[Candidate, Measurement, Verdict]] = field(default_factory=list)
     ceiling: Dict[str, Any] = field(default_factory=dict)
+    proposal: Dict[str, Any] = field(default_factory=dict)
+    """Which proposal rule produced this round's candidate list, and why.
+
+    Recorded for the same reason the ruleset is: "the mechanism changed" is a claim, and without the
+    mode, the space fingerprint and the stated reason next to the numbers, two rounds that differ cannot
+    be told apart from two rounds that were asked different questions.
+    """
 
     @property
     def accepted(self) -> List[str]:
@@ -1139,6 +1146,10 @@ class RoundResult:
             ],
             "accepted": self.accepted,
             "ceiling": self.ceiling,
+            # Absent in rounds written before the mechanism became mutable; `None` says "this round was
+            # proposed by whatever the code did at the time", which is exactly what a reader should
+            # conclude about them.
+            "proposal": self.proposal or None,
         }
 
 
@@ -1162,6 +1173,7 @@ def run_round(settings: Settings, streams: Sequence[Stream],
               rules: Optional[EvolveRules] = None,
               source: str = "demo",
               on_candidate: Optional[Callable[[Candidate, Measurement, Verdict], None]] = None,
+              proposal: Optional[Dict[str, Any]] = None,
               ) -> RoundResult:
     """One full pass: build the reference pool, measure the baseline, then each candidate.
 
@@ -1169,6 +1181,11 @@ def run_round(settings: Settings, streams: Sequence[Stream],
     cannot improve its own score by changing what it is scored on. `source` records where the
     recordings came from, because "accept" against a hand-written suite and "accept" against
     fault-injection data are different claims and the version file must not conflate them.
+
+    `proposal` is the record of *how* `selected` was arrived at (`propose.Proposal.to_dict()`). The
+    round does not need it to measure anything, which is the point: the mechanism that chooses what to
+    propose stays outside the measurement, so a different policy changes the question and never the
+    answer.
     """
     started = _now()
     active_rules = rules if rules is not None else EvolveRules()
@@ -1193,6 +1210,7 @@ def run_round(settings: Settings, streams: Sequence[Stream],
         baseline=baseline,
         trials=trials,
         ceiling=ceiling,
+        proposal=dict(proposal or {}),
     )
 
 
@@ -1365,6 +1383,14 @@ def format_round(result: RoundResult) -> str:
     lines.append("=" * 96)
     lines.append("reasoner          %s" % (result.baseline.reasoner or "unknown"))
     lines.append("stream            %s" % json.dumps(result.stream, sort_keys=True))
+    if result.proposal:
+        lines.append("proposal          %s  space %s  (%s)"
+                     % (result.proposal.get("mode") or "?",
+                        result.proposal.get("space_fingerprint") or "?",
+                        result.proposal.get("space") or "?"))
+        for reason_line in _wrap("why               "
+                                 + (result.proposal.get("reason") or ""), 96):
+            lines.append(reason_line)
     lines.append("objective         accept a Pareto move: tokens/report down >= %.0f%%, recall at"
                  " <=%.0f%% false positives up >= %.0f%%, or a recorded configuration that becomes"
                  " deployable; never at a cost of another column"
@@ -1409,7 +1435,7 @@ def format_round(result: RoundResult) -> str:
     lines.append("")
     for candidate, _measurement, verdict in result.trials:
         lines.append("%s %-22s %s" % ("+" if verdict.accepted else "x", candidate.name,
-                                      _wrap(verdict.reason, 68)))
+                                      _hang("", verdict.reason, 68, 26)))
     if not result.trials:
         lines.append("no candidates were tried")
     if result.ceiling:
@@ -1529,9 +1555,9 @@ def format_rejudge(result: Rejudge) -> str:
             if old.accepted != new.accepted:
                 lines.append("%-22s was %s: %s" % (candidate.name,
                                                    "accepted" if old.accepted else "rejected",
-                                                   _wrap(old.reason, 60)))
+                                                   _hang("", old.reason, 60, 32)))
                 lines.append("%-22s now  %s: %s" % ("", "accepted" if new.accepted else "rejected",
-                                                   _wrap(new.reason, 60)))
+                                                   _hang("", new.reason, 60, 32)))
         lines.append("")
         lines.append("%d verdict(s) changed. The stored measurements were not re-run; only the rules moved."
                      % len(changed))
@@ -1665,7 +1691,12 @@ def format_audit(result: Audit) -> str:
     return "\n".join(lines)
 
 
-def _wrap(text: str, width: int) -> str:
+def _wrap(text: str, width: int) -> List[str]:
+    """Greedy word wrap. Returns lines, because every caller appends them one by one.
+
+    It used to return one joined string; a caller then iterated it and printed the reason one
+    character per line, which is how a formatting helper turns into a very quiet bug.
+    """
     words = text.split()
     lines: List[str] = []
     current = ""
@@ -1678,7 +1709,17 @@ def _wrap(text: str, width: int) -> str:
             current = candidate
     if current:
         lines.append(current)
-    return ("\n" + " " * 25).join(lines)
+    return lines
+
+
+def _hang(prefix: str, text: str, width: int, indent: int) -> str:
+    """Wrap one cell of a table so its continuation lines stay under it.
+
+    A row whose reason is a paragraph has to be a single string with newlines, because the caller is
+    doing `"%s %s" % (...)`. Keeping the wrap width and the indent together here is what makes the
+    table readable instead of one very long line.
+    """
+    return ("\n" + " " * indent).join(_wrap(prefix + (text or ""), width))
 
 
 # --------------------------------------------------------------------------------------
@@ -1709,7 +1750,7 @@ def grade(has_catalogue: bool, has_history: bool, mutates_mechanism: bool = Fals
 
     capabilities: List[str] = []
     if has_propose:
-        capabilities.append("proposes changes from a fixed catalogue, each with a testable hypothesis")
+        capabilities.append("proposes changes from a catalogue of hand-written hypotheses")
     if has_evaluate:
         capabilities.append("evaluates them against labels, prompt evidence and a token ledger")
     if has_integrate:
@@ -1721,7 +1762,10 @@ def grade(has_catalogue: bool, has_history: bool, mutates_mechanism: bool = Fals
     if applies_changes:
         capabilities.append("applies an accepted change to the running configuration without a human")
     if mutates_mechanism:
-        capabilities.append("revises its own improvement mechanism, not only the settings it moves")
+        capabilities.append(
+            "selects the proposal rule from its own ledger — the catalogue's hypotheses, or a bounded "
+            "search around magnitudes that already moved a column — and records the rule, the space "
+            "fingerprint and the reason with every round")
 
     level = "L1"
     missing: List[str] = ["a candidate catalogue with testable hypotheses"]
@@ -1735,9 +1779,11 @@ def grade(has_catalogue: bool, has_history: bool, mutates_mechanism: bool = Fals
         missing = ["a mutable improvement mechanism (the catalogue and the objective are fixed)"]
     if level == "L3" and mutates_mechanism:
         level = "L4"
-        missing = ["transfer beyond this stream and this catalogue"]
+        missing = ["transfer beyond this stream and this declared space"]
     return {
         "level": level,
+        "scope": ("the proposal rule only; the objective, decide() and the evaluator stay outside"
+                  if mutates_mechanism else ""),
         "capabilities": capabilities,
         "missing_for_next": missing,
         "note": "Graded from the primitives that exist, not from intent. The evaluator is external and "

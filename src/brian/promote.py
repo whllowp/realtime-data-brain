@@ -342,8 +342,32 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
             lines.append("in force  %s" % ", ".join("%s=%s" % item for item in sorted(env.items())))
         else:
             lines.append("in force  (nothing: no promotion has been applied)")
-        lines.append("a process reads these at start-up; nothing here reloads a running one.")
+        worn = combined_versions(state)
+        if len(worn) > 1:
+            lines.append("!")
+            lines.append("! the variables in force come from %d versions: %s." % (len(worn), ", ".join(worn)))
+            lines.append("! Each was measured as a patch against the same baseline, so their sum is a")
+            lines.append("! configuration nobody measured. Put one of them in force instead.")
+        lines.append("a process reads these at start-up; a pipeline started with BRIAN_DEPLOY_STATE")
+        lines.append("follows them between windows, and one started without it does not.")
     return "\n".join(lines)
+
+
+def combined_versions(state: Optional[Mapping[str, Any]]) -> List[str]:
+    """The versions contributing at least one variable to the configuration in force, in order.
+
+    A round can accept several patches, and they are alternatives measured against the same baseline;
+    applying all of them merges three measurements into a fourth configuration. Round 18 did exactly
+    that (`rolling_window` from one version, the bars from another) and the merged state was a
+    configuration no round had measured, so the count is now something the tool says out loud.
+    """
+    sources = dict((state or {}).get("sources") or {})
+    seen = []
+    for name in sorted(sources):
+        version = "v%03d" % int(sources[name]) if str(sources[name]).isdigit() else str(sources[name])
+        if version not in seen:
+            seen.append(version)
+    return seen
 
 
 def _first_line(text: str) -> str:

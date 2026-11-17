@@ -900,27 +900,112 @@ settings_reloads = 2
 - **热加载只覆盖一半设置。** 窗口几何、基线窗口、校准、Laya 客户端仍然要重启；它们拥有一段"这次运行"的累积状态，换掉它们等于换一次实验。所以准确的说法不是"任何改动都免重启"，而是"**改判与改读**免重启，改窗口不免"。
 - **"代码能"不等于"这个进程在跟"。** 分级看的是能力，而一个没有设 `BRIAN_DEPLOY_STATE` 的部署会一直用启动配置——它照样是"能热加载的构建"，却不是"在跟状态的部署"。唯一的可观测信号是 `settings_reloads`：它是 0 就说明这个部署没有在跟。把这两件事混为一谈，就是这一节最容易犯的自夸。
 
----
+### 3.25 让循环决定"提议什么"：可变的是提问，不是判分
 
-## 4. 分级：从 L2 到 L3 的那一步是什么
+十六轮里有一个不说话的前提：候选目录是一份写死的列表。循环能在一堆提议里挑，却从来不能改变**提议从哪里来**。综述的 L4 正是这一步——改进机制本身可变，而改进在有限域内继续。
+
+`src/brian/propose.py` 实现了它，并把大部分篇幅花在**边界**上而不是变更上，因为一个不受限的提议生成器，就是循环开始给自己判分的起点。边界是四条可读的声明：
+
+- **`SPACE_FIELDS`**：哪些设置可以被提议。它由目录里已经出现过的字段 ∩ `LIMITS` 决定——一个没人声明过的字段不可达，所以"循环发现了一个我们没想到的旋钮"这件事不会靠语言模型编出来。
+- **`LIMITS`**：每个数值字段的区间。区间外的邻居不提议；**没有声明区间的字段根本无法被邻居化**（`digest.scoring` 是字符串选择，没有"介于 auto 和 deviation 之间"，所以它只能由人手写进目录）。
+- **邻居规则本身**：一个邻居是**同一个改动在另一个量级**，不是新维度。计数减半/加倍，小计数再加一，比率沿区间走一步（±0.05 或 ±0.10）。写成别的样子就是搜索一个没人声明过的空间。
+- **`MAX_PROPOSALS`**：只限制生成的提议，不限制目录——手写的条目是有人已经论证过的断言，把它悄悄截掉会让 `--catalogue` 名不副实。
+
+写这条规则时否掉了两个形状，都记在 docstring 里：对 `rolling_window = 100` 提 101 不是"另一个量级"而是同一个量级加误差；把 `rank_probability = 0.90` 减半成 0.45 不是"一步"而是换了个制度（变成"前 55% 都告警"）。两者都会去测一个没人提出的假设。
+
+**成对字段按整条带子移动**（`PAIRS`）：第 5 轮已经测过拆开的代价——`digest.scoring=deviation` 把概率整体挪了刻度，单换它会让 93% 的窗口告警，修法是 0.87/0.87 这对一起动。所以生成器不单独拨 `anomaly_probability` 而留着 `notify_probability`：那是在提议"半个修复"并测一个没人提出的假设。`PAIRS` 是一份数据声明，不是隐含在代码里的常识。
+
+**什么时候扩充空间，由账本说，不由日程说**（`mode_from_history`）：
+
+- 最近 `EMPTY_ROUNDS = 3` 轮一届都没接受 → 目录不再付钱，这是关于**目录**的证据，不是关于设置的证据；
+- 最近一轮接受了带数值的改动 → 那个量级成了"已测点"，曲线在已测点两侧弯不弯是量级问题该待的地方。
+
+其余情况用目录：它带的是人手写的机制断言，生成的邻居没有这种东西，所以生成是退路，不是默认。
+
+两个"想扩展但扩展不了"的退路也写明了原因：**从来没有接受过任何改动**时没有已测点可绕（"没有已测量级"），**已接受值的邻居全部落在区间外**时空间已耗尽。两种情况都退回目录，并把理由写在 `Proposal.reason` 里，而不是悄悄生成一堆凭空的候选。
+
+**种子按流来源隔离**（`source`）：量级是**痕迹的属性**，不是流水线的属性。合成流上接受过 `reuse_report_within_s = 600`，因为那条流里同一个场景每分钟重复一次；把 600 搬到一条故障间隔二十分钟的主机记录上，是一个没人测过的提议。所以 `_accepted_measurements(rounds, source=...)`、`mode_from_history(..., source=...)` 都只读**这条流**的轮次，"最近三轮都没接受"也按这条流数。提议记录里因此多一个 `seeds` 字段——`brian evolve --propose --stream-file data\smd\stream.json` 会打印 `seeds SMD`，而一个不带来源的旧账本会打印 `seeds any stream`（那是第 18 轮之前的全部轮次）。
+
+这条隔离是写这一轮代码时被自己的账本抓出来的：先跑了一次 demo 域的整轮（为验证渲染），再跑 SMD 的空转，发现候选里出现了 `reuse-300-600-1200` 这种"把 demo 的量级翻倍再翻倍"的名字——机制没有错，错的是它把两条流的量级当成了同一个刻度。
+
+每一轮把**提议规则**记进 round 文件：
 
 ```
-level            L3
+proposal          expand  space dccb2a7b0b81  (10 field(s), 13 bounded, at most 8 proposals)
+why               the last round accepted host-rolling-rank, so those magnitudes are measured
+                  points; the curve one step either side of a measured point is where a
+                  magnitude question belongs
+```
+
+`space` 指纹是必需的，不是装饰：没有它，"机制变了"就是一句无法对照的话——两轮产生不同候选，可能因为空间动了，而记录里什么都不会说。
+
+`brian evolve --propose` 是这条规则的干跑，**不需要 Laya**：它是关于账本的一句话，让引擎去回答只会更慢也更难核。`--catalogue` 强制回到固定列表以复现旧轮，`--expand` 强制扩充。
+
+分级因此到 **L4**，`--grade` 也把范围写在同一行：
+
+```
+level            L4  (the proposal rule only; the objective, decide() and the evaluator stay outside)
+```
+
+第一次真正由机制提问的整轮（`var/evolve/round-20261117T230958Z.json`，SMD，8 个生成的邻居，基线 `recall@10% 0.060 / 3328.6 tokens/window`）：
+
+| 候选 | recall@b | fpr@b | tok/win | 记录配置的 recall | 告警/千窗 | 判决 |
+|---|---|---|---|---|---|---|
+| `host-rolling-rank-50` | 0.187 | 0.079 | 484.5 | 0.194 | 133 | 接受（operational） |
+| `host-rolling-rank-200` | **0.507** | 0.091 | 503.0 | 0.336 | 97 | 拒绝（比预算曲线少 34%） |
+| `host-rolling-rank-0-95` | 0.224 | 0.091 | 286.8 | 0.127 | 79 | 拒绝（少 43%） |
+| `host-rolling-rank-0-85` | 0.224 | 0.091 | 651.2 | 0.321 | 157 | 接受（operational） |
+| `host-rolling-rank-0-8` | 0.224 | 0.091 | 792.6 | **0.410** | 184 | 接受（operational） |
+| `…band-0-92` | 0.142 | 0.094 | 106.2 | 0.030 | 30 | 拒绝（少 79%） |
+| `…band-0-82` | 0.142 | 0.094 | 622.2 | 0.306 | 169 | 接受（operational） |
+| `…band-0-97` | 0.142 | 0.094 | 10.5 | 0.000 | 1 | 拒绝（少 100%） |
+
+四接受四拒绝，而且**八个候选全都朝"告警更多"的方向移动**——因为基线在记录配置上是 1000 告警/千窗，任何把条子调低的方向都是它唯一能去的方向。这一轮真正的发现不是"哪个邻居赢了"，而是三件机制自己暴露出来的事：
+
+1. **`rolling_window` 与 `rank_probability` 是一对，不能分开判。** K=200 的候选在预算曲线上最好（0.507，2.5 倍于基线），却因为它的记录配置（0.336）比自己的预算曲线少 34% 而被 `operational` 守卫拒绝；K=100 + 0.85 的记录配置 0.321 反而在容差内通过。同一个 K、不同的条，决定的是"记录的那一刀落在预算曲线附近还是远处"。目录里从没有表达过这个交互——是生成器把它摆上桌的。
+2. **零成本被拒绝是对的，但它说明条子不能再低。** `…band-0-97` 每千窗只发 1 个告警、`tok/win 10.5`，代价低了两个数量级；它少发了 100% 的失败，所以拒绝的理由与省钱无关。
+3. **一轮接受多个补丁之后，"在生效的配置"不再等于任何一次测量。** `--apply` 把四个接受的版本依次合并进 `current.json`，结果把 v012 的 `rolling_window`、v014 的 `rank_p`、v015 的 `anomaly_p/notify_p` 拼成了一个没有任何一轮测过的配置。修法分两处：
+
+```
+in force: (nothing changed)
+4 patches were accepted and they are alternatives measured against the same
+baseline, so merging them would produce a configuration nobody measured. Put one of
+them in force with:  brian evolve --verify --verify-version <n>
+```
+
+状态文件里一旦出现来自多个版本的变量，`format_promotions` 也会自己说出来（`the variables in force come from 2 versions … a configuration nobody measured`）。这不是排版：第 16 轮给每个变量记了来源，正是为了让"合并"这件事可见，而它花了一轮才真的用上。
+
+多个接受之间怎么选**不是循环的判决**：它们的 `recall@b` 有并列（0.224 出现三次），Pareto 比较只在同 recall 时能排开成本。这里把 `v013`（K=100、条 0.85，`recall@b 0.224`、`tok/win 651.2`）放进生效状态，并在晚段数据上复验：`holds: recall 0.336 at the 10% budget against a promised 0.224, 3354 tokens per report against a promised 3355`。
+
+三条边界：
+
+- **空间是手写的，循环扩充的是量级，不是维度。** `SPACE_FIELDS` 与 `LIMITS` 由人声明；循环能在区间内加减、能选规则，不能提议"试试一个新的信号源"。所以它是"有界 RSI"（L4）而不是自主研究。
+- **生成出来的假设比测出来的弱。** 邻居的假设是从父候选推出来的（"值不是活性成分"），所以接受一个邻居确认的是一个**量级断言**，它不能发现新机制。把这种接受读成"循环发现了什么"，就是把一次参数搜索说成一次发现。
+- **一轮里的多个接受是备选，不是叠加。** 它们对同一个基线测量，所以合并它们得到的是第四个配置；工具现在拒绝合并，但"选哪一个"仍然是人（或另一条规则）的判断——`current.json` 的来源字段只是让这个选择可见、可回滚。
+
+---
+
+## 4. 分级：从 L2 到 L4 的三步是什么
+
+```
+level            L4  (the proposal rule only; the objective, decide() and the evaluator stay outside)
 capabilities
-  + proposes changes from a fixed catalogue, each with a testable hypothesis
+  + proposes changes from a catalogue of hand-written hypotheses
   + evaluates them against labels, prompt evidence and a token ledger
   + records an accepted change as a version file with env and rollback
   + puts an accepted change into a deployment state file with per-variable provenance, and reverts it when its claim stops holding
   + applies an accepted change to the running configuration without a human
+  + selects the proposal rule from its own ledger — the catalogue's hypotheses, or a bounded search around magnitudes that already moved a column — and records the rule, the space fingerprint and the reason with every round
 missing for the next level
-  - a mutable improvement mechanism (the catalogue and the objective are fixed)
+  - transfer beyond this stream and this declared space
 ```
 
-`grade()` 把"写版本文件"、"写入部署状态"、"改动在运行中生效"当成三个事实，只有第三个才给 L3。3.23 节让前两件和"承诺失效就自动撤回"成为循环自己做的事；3.24 节把最后一段接上——`Pipeline` 在窗口之间重读 `current.json`，于是接受与撤回都到达了运行中的进程。
+`grade()` 把"写版本文件"、"写入部署状态"、"改动在运行中生效"、"改进机制可变"当成四个独立事实：3.23 节让前两件和"承诺失效就自动撤回"成为循环自己做的事，3.24 节把第三件接上（`Pipeline` 在窗口之间重读 `current.json`），3.25 节把第四件接上（`propose()` 从账本里选提议规则）。每一级都只由它自己那件事给出，所以"多写了几个函数"买不到一级。
 
-这个 L3 是**有条件**的，而条件写在代码里而不是写在文档里：`applies_changes` 来自 `reload_capable()`，它检查 `Pipeline.reload_from_deployment` 是否存在；而一个没设 `BRIAN_DEPLOY_STATE` 的部署仍然只读启动配置（边界 36）。给一个会自动写 JSON 的系统评 L3，正是综述警告的那种自夸；同样地，把"这个构建有能力"说成"这个部署在跟状态"，是同一句话的另一种说法。
+这个 L4 是**有界且被声明范围**的，而且范围写在打印出来的那一行里：`(the proposal rule only; the objective, decide() and the evaluator stay outside)`。可变的是"问什么"，不变的是"怎么判"——`decide()` 的规则、评测器的两条流、目标函数都不在循环手里。一个能同时改写自己的判分规则的循环，可以在不改任何设置的情况下把判决变好看，那就不是改进了。
 
 `grade()` 刻意不读文件系统、只收事实参数：一个自己报告自己等级的评估器，是自证循环的第一个例子。
+
 
 ---
 
@@ -928,7 +1013,7 @@ missing for the next level
 
 1. **不改进检测。** 结构上 System 2 在 `publish decision` 之后才跑，token 花多花少改不了 recall/FPR。循环能优化的只有分析成本与证据完整性。
 2. **解释质量没被测。** 无 API key，reasoner 是 `offline`；`coverage` 是"有没有把证据喂进去"的代理，不是"报告写得好不好"。
-3. **catalogue 是手写的，目标函数是固定的。** 这两件事都在循环之外，正是它停在 L2/L3 的原因，也是它不变成自证循环的原因。
+3. **目录条目是手写的，目标函数是固定的。** 3.25 节让"提议规则"可变（目录 vs 有界扩充），但两条边界还在循环之外：目录里的**假设**仍由人写（生成器只能在已声明字段的区间内做量级邻居，边界 37），目标函数与判定规则仍由人定。这就是它停在 L4 而不是 L5 的原因，也是它不变成自证循环的原因。
 4. **真实数据上的第一次接受，只有一半被两层证据支撑。** 3.10 节接受了三个候选：`host-features-3` 由标签列（0.060 → 0.187）加成本列同时支撑；`events-8`/`events-4` 只由成本列支撑，因为这条流的证据列结构性失效（无日志可丢）。同时，接受发生在"两台主机的合计"上，而机器 2-2 单独低于机会线；在它被解释清楚之前，这些数字不能外推成"SMD 可检测了"。
 5. **"接受"的含义有限。** 它只说明：在同一条流、同一个评测器、同一份证据池上，一个配置严格优于另一个，且没有丢掉评测器看得见的东西。
 6. **真实域的静音可能再次来自接线。** 第 3.5 节已经抓到三个这样的 bug；`digest_specs`/`baseline_keys` 的测试挡住了同一类错误，但挡不住别的（例如未来新增的域需要新的目录或新的基线 key）。
@@ -963,6 +1048,10 @@ missing for the next level
 34. **承诺的可信度上限就是立约时那把尺子的可信度。** 承诺里的召回是循环扫出来的切点上的召回（边界 11 的同一条限制）：复核能发现"数字不再兑现"，发现不了"这个数字当初就不该当作承诺"。
 35. **热加载只覆盖一半设置。** 3.24 节的 `RELOADABLE_FIELDS` 只列每窗口读取、且不拥有启动时累积状态的字段：`gate.*`、`digest` 的渲染与排序设置、`llm.max_context_events`。窗口几何、基线窗口、校准、Laya 客户端改了要重启——它们拥有一段"这次运行"的状态，换掉等于换一次实验；所以准确的说法是"改判与改读免重启"，不是"任何改动免重启"。
 36. **"这个构建能热加载"不等于"这个部署在跟状态"。** 分级检查的是代码路径（`reload_capable()`），而一个没设 `BRIAN_DEPLOY_STATE` 的进程会一直用启动配置。唯一可观测的信号是 `Counters.settings_reloads`：为 0 就说明它没在跟。把能力当成事实，是 3.24 节最容易犯的自夸。
+37. **可变空间是人声明的，循环扩充的是量级，不是维度。** 3.25 节的 `SPACE_FIELDS` 与 `LIMITS` 由人写定；循环能在区间内加减、能选提议规则，不能提议"换一个新的信号源"或"试试另一个指标"。所以它拿到的是 L4（有界 RSI），不是自主研究。任何"循环发现了我们没想到的旋钮"的说法，在这份代码里都不可能成立——那个旋钮必须先被人写进 `SPACE_FIELDS`。
+38. **生成出来的假设比测出来的弱。** 邻居的假设是从父候选推出来的（"这个值不是活性成分"），不是从机制推出来的。接受一个邻居因此只确认了一个**量级断言**，它不可能发现新机制；`--audit` 里那些"邻居被接受"的记录，读法必须是"量级不敏感"而不是"循环想出了新办法"。同一条限制也解释了为什么生成是退路：目录里手写的假设带机制，邻居没有。
+39. **量级不能跨流迁移，3.25 节已把种子按来源隔离。** 一条流上测出的 600 秒是那条流的属性；换一条记录，故障间隔与重复模式都变了。代码现在按 `stream.source` 过滤种子，但这条规则只保护"生成"这一步：手写目录里的绝对值（例如 300 秒复用）依旧被两条流共用，因为那是人给出的假设，不是从数据里读出来的。
+40. **一轮里的多个接受是备选，不是叠加；合并它们得到的是第四个配置。** 3.25 节那一轮接受了四个补丁，`--apply` 曾把它们依次合并进 `current.json`，于是 `rolling_window` 来自一个版本、两条阈值来自另一个版本，合成出一个没有任何一轮测过的配置。现在 `--apply` 只在恰好接受一个时自动生效，多个时打印"它们是同一基线上的备选"；状态文件里出现跨版本变量时 `format_promotions` 也会报警。但**"选哪一个"仍是判断**：`recall@b` 并列时只有成本能排开，而"用多少误报换多少召回"是产品口径，不是循环的判决。
 
 ---
 
@@ -975,4 +1064,4 @@ missing for the next level
 5. **（3.20 / 3.21 已完成）读者切点的"标定"问题被换成了"平稳性"问题。** 不是给每台主机各选一个常数，而是发现常数在这条流上不可用：记录内部电平摆动 0.4、类别均值差 0.03，所以固定切点在时间上不迁移。3.21 节把排序规则接进了产品（`RollingWindow` + `digest.rolling_window`，`Pipeline`/`Evaluator` 各一份状态），候选 `host-rolling-rank` 被接受：预算内召回 0.060 → 0.224，每窗口 token −87%。剩下的仍是产品决策：**要不要在生产上把主机状态交给读者**，以及上线后谁来监控它的漂移（这条规则会随流量自我调整，所以"告警率突然上升"可能是流量变了而不是故障变了）。
 6. **真模型校准**：配 API key 后重跑一轮，把 `coverage` 与真实解释质量对比，看这个代理到底代理了什么。
 7. **（3.23 / 3.24 已完成）`apply` 真生效，分级到 L3。** "在役状态"（`current.json` 带来源版本号）、"自动回滚"（复核失败即撤回）、"不需要人工重启"（`Pipeline` 在窗口之间重读状态，`Counters.settings_reloads` 为证）三件事都齐了，所以 `--grade` 从 L2 变成 L3。但它有两条边界：**只覆盖每窗口读取的设置**（窗口几何、基线、校准、Laya 客户端仍要重启，边界 35），以及**"能热加载的构建"不等于"在跟状态的部署"**（没设 `BRIAN_DEPLOY_STATE` 的进程照旧用启动配置，边界 36）。下一个 L3 之后的问题是：谁来启动这个进程、谁看 `settings_reloads`。
-8. **让 `Imp` 可变**（L4）：候选目录由循环根据账本自己生成。3.12 节已经把"提议的形状"放宽过一次（单字段 → 补丁），那是这一方向上安全的一小步；再往前就需要更强的验证器，否则就是自证循环的教科书案例。
+8. **（3.25 已完成，有界）让 `Imp` 可变，分级到 L4。** 提议规则现在从账本里选（目录 vs 有界扩充），每一轮记录 mode、空间指纹、`seeds` 与理由；可变的是**问什么**，`decide()`、评测器与目标函数仍在循环之外（边界 37/38）。种子按流隔离（边界 39），所以一次扩充只在这条流上有意义。剩下的路是 L5 的**迁移**：把同一套循环搬到第二个域（RCAEval 的服务指标与 SMD 的主机指标已经是两种域，但候选目录只服务后者）而不重写机制。

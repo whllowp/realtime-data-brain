@@ -19,6 +19,7 @@ from brian.promote import (
     Claim,
     apply_promotion,
     claim_check,
+    combined_versions,
     current_state,
     format_promotions,
     load_promotions,
@@ -236,7 +237,51 @@ def test_the_table_says_what_is_in_force_and_whether_a_claim_was_rechecked(tmp_p
     assert "recall 0.224" in table
     assert "failed: promised recall 0.224" in table
     assert "in force  BRIAN_DIGEST_ROLLING_WINDOW=100" in table
-    assert "nothing here reloads a running one" in table
+    assert "BRIAN_DEPLOY_STATE" in table
+    assert "follows them between windows" in table
+
+
+def _write_version(directory, number: int, env: str, change: str):
+    """A version file with the two fields a merge test needs, and nothing that has to be measured."""
+    import json
+
+    path = directory / "var" / "evolve" / "versions" / ("v%03d.json" % number)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "version": number,
+        "created_at": "2026-11-17T20:00:00+00:00",
+        "candidate": {"name": "c%d" % number, "hypothesis": "h",
+                      "changes": [["digest", "rolling_window", 100]], "veto": None},
+        "change": change,
+        "env": env,
+        "measurement": {},
+        "stream": {"source": "SMD"},
+        "rollback": "unset X",
+    }, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def test_the_table_says_when_the_configuration_in_force_came_from_several_patches(tmp_path):
+    # Round 18 accepted four patches measured against the same baseline; applying them one after
+    # another produced `rolling_window` from one version and the bars from another, which is a
+    # configuration no round measured. The count is now printed rather than left to the reader.
+    _write_version(tmp_path, 1, "BRIAN_DIGEST_ROLLING_WINDOW=100", "digest.rolling_window = 100")
+    _write_version(tmp_path, 2, "BRIAN_GATE_RANK_P=0.85", "gate.rank_probability = 0.85")
+    for promotion in load_promotions(tmp_path):
+        apply_promotion(tmp_path, promotion)
+    assert combined_versions(current_state(tmp_path)) == ["v001", "v002"]
+
+    table = format_promotions(load_promotions(tmp_path), current_state(tmp_path))
+
+    assert "come from 2 versions: v001, v002" in table
+    assert "configuration nobody measured" in table
+
+
+def test_one_version_in_force_is_not_a_combination(tmp_path):
+    seed_versions(tmp_path)
+    apply_promotion(tmp_path, load_promotions(tmp_path)[0])
+    assert combined_versions(current_state(tmp_path)) == ["v001"]
+    assert "come from" not in format_promotions(load_promotions(tmp_path), current_state(tmp_path))
 
 
 def test_an_empty_ledger_says_there_is_nothing_to_verify(tmp_path):

@@ -55,6 +55,7 @@ from .laya.gate import explain_thresholds
 from .laya.qcatalog import CATALOG_VERSION, catalog_hash, describe as describe_catalog, validate_questions
 from .llm.rca import RcaEngine
 from .deploy import reload_capable
+from .propose import Mode, Proposal, describe_proposal, format_proposal, propose, proposal_capable
 from .promote import (
     FAILED,
     UNMEASURABLE,
@@ -287,12 +288,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         except OSError:
             rounds = []
         result = grade(has_catalogue=bool(catalogue()), has_history=bool(rounds),
-                       mutates_mechanism=False, applies_changes=reload_capable(),
+                       mutates_mechanism=proposal_capable(), applies_changes=reload_capable(),
                        promotes=bool(load_promotions(root)))
         _print("=" * 78)
         _print("brian evolve - how much of the loop is autonomous")
         _print("=" * 78)
-        _print("level            %s" % result["level"])
+        _print("level            %s%s" % (result["level"],
+                                           "" if not result.get("scope") else "  (%s)" % result["scope"]))
         _print("")
         _print("capabilities")
         for line in result["capabilities"]:
@@ -306,6 +308,41 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("change and an automatic revert both reach a running process; a process started")
         _print("without BRIAN_DEPLOY_STATE keeps its start-up configuration, and grading that")
         _print("case L3 is the self-flattery the survey warns about.")
+        _print("")
+        _print("L4 comes from the proposal rule being selected from the ledger (bounded by a declared")
+        _print("space); the objective, decide() and the evaluator stay outside. Each round records")
+        _print("which rule proposed it, so 'the mechanism changed' is a fact with a fingerprint.")
+        return 0
+
+    if args.propose:
+        # No Laya: this is a statement about the ledger, and asking the engine to answer it would only
+        # make it slower and less checkable.
+        try:
+            rounds = history(root)
+        except OSError:
+            rounds = []
+        mode = None
+        if args.expand:
+            mode = Mode("expand", "forced by --expand, so the bounded space is listed even though the "
+                                  "ledger did not ask for it")
+        # The seeds must come from the stream this round will be measured on, so the dry run has to name
+        # the same source the real round would: a magnitude accepted on one trace is not a prior for
+        # another one.
+        if args.stream_file:
+            try:
+                source = load_stream_file(Path(args.stream_file)).dataset or Path(args.stream_file).stem
+            except (OSError, ValueError) as error:
+                _print("cannot read %s: %s" % (args.stream_file, error))
+                return 2
+        else:
+            source = "demo"
+        proposal = propose(rounds, mode=mode, source=source)
+        if args.catalogue:
+            proposal = Proposal(
+                "catalogue",
+                "forced by --catalogue: the fixed list, so the rule selection was not consulted",
+                list(catalogue()), proposal.space, proposal.source)
+        _print(format_proposal(proposal))
         return 0
 
     laya = LayaClient(settings.laya)
@@ -357,6 +394,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     settings, streams, source, base_overrides = _evolve_streams(args, settings)
 
     known = {candidate.name: candidate for candidate in catalogue()}
+    proposal_record: dict = {}
     if args.candidates:
         names = [name.strip() for name in args.candidates.split(",") if name.strip()]
         unknown = [name for name in names if name not in known]
@@ -365,8 +403,28 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("available: %s" % ", ".join(sorted(known)))
             return 2
         selected = [known[name] for name in names]
+        proposal_record = {"mode": "named", "reason": "the caller named these candidates, so the "
+                            "proposal rule was not consulted", "candidates": names}
     else:
-        selected = list(known.values())
+        # The mechanism chooses what to measure, from what the ledger already says. This is the part of
+        # the loop that is now mutable: `propose` reads the recorded rounds and decides between the
+        # catalogue's hand-written hypotheses and a bounded search around magnitudes that have moved a
+        # column. `--catalogue` keeps the fixed list for a reproduction.
+        mode = None
+        if args.expand:
+            mode = Mode("expand", "forced by --expand, so the bounded space is measured even though the "
+                                  "ledger did not ask for it")
+        proposal = propose(history(root), mode=mode, source=source) if not args.catalogue else None
+        if proposal is None:
+            selected = list(known.values())
+            proposal_record = {"mode": "catalogue", "reason": "forced by --catalogue",
+                               "candidates": list(known)}
+        else:
+            selected = list(proposal.candidates)
+            proposal_record = proposal.to_dict()
+            for line in describe_proposal(proposal):
+                _print(line)
+            _print("")
 
     rules = EvolveRules(min_gain=args.min_gain)
     prior = previously_rejected(root, rules)
@@ -384,7 +442,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
            % (totals["streams"], totals["windows"], totals["scored"], totals["anomalous"],
               totals["events"]))
     _print("measuring baseline…")
-    result = run_round(settings, streams, selected=selected, rules=rules, source=source)
+    result = run_round(settings, streams, selected=selected, rules=rules, source=source,
+                       proposal=proposal_record)
     _print("")
     _print(format_round(result))
 
@@ -402,11 +461,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     if written.get("versions"):
         # A version file the deployment state does not mention is a claim nobody made live; put the
         # accepted configuration into force here, so `--verify` has something to re-check later.
-        for promotion in load_promotions(root):
-            if str(promotion.path) in (written.get("versions") or []):
-                apply_promotion(root, promotion)
-        _print("in force: %s" % ", ".join("%s=%s" % item for item in
-                                         sorted(current_state(root)["env"].items())))
+        fresh = [promotion for promotion in load_promotions(root)
+                 if str(promotion.path) in (written.get("versions") or [])]
+        if len(fresh) == 1:
+            apply_promotion(root, fresh[0])
+            _print("in force: %s" % ", ".join("%s=%s" % item for item in
+                                             sorted(current_state(root)["env"].items())))
+        elif fresh:
+            # They were measured against the same baseline, so they are alternatives. Applying all of
+            # them merges several measurements into a configuration no round has looked at.
+            _print("in force: (nothing changed)")
+            _print("%d patches were accepted and they are alternatives measured against the same" % len(fresh))
+            _print("baseline, so merging them would produce a configuration nobody measured. Put one of")
+            _print("them in force with:  brian evolve --verify --verify-version <n>")
     if result.accepted and not args.apply:
         _print("Dry run: the round is recorded so the next run will not re-propose it, but no version")
         _print("file was written. Re-run with --apply to record the environment assignment too.")
@@ -1348,7 +1415,13 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--warmup", type=int, default=20)
     evolve.add_argument("--seed", type=int, default=7)
     evolve.add_argument("--candidates", default="",
-                        help="comma list of catalogue names (default: every candidate)")
+                        help="comma list of catalogue names (default: whatever the proposal rule chooses)")
+    evolve.add_argument("--propose", action="store_true",
+                        help="print what the proposal rule would measure and why, then exit (no Laya)")
+    evolve.add_argument("--catalogue", action="store_true",
+                        help="force the fixed catalogue instead of letting the ledger choose the rule")
+    evolve.add_argument("--expand", action="store_true",
+                        help="force a bounded search around magnitudes that have already moved a column")
     evolve.add_argument("--min-gain", type=float, default=0.05,
                         help="fraction of tokens/report a change must save to be accepted")
     evolve.add_argument("--apply", action="store_true",

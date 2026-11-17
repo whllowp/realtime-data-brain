@@ -667,6 +667,36 @@ def test_a_round_with_no_candidates_says_so(tmp_path):
     assert "no candidates were tried" in format_round(result)
 
 
+def test_a_verdict_reason_wraps_under_its_column_instead_of_one_character_per_line(tmp_path):
+    """The reason is a paragraph, so the table has to hang it — not print it vertically.
+
+    `_wrap` returned one joined string until round 18 and a caller iterated it, which printed
+    "w\\nh\\ny" in the proposal block. A wrap helper is the kind of thing whose bug looks like a
+    formatting preference, so the assertion is on the shape of the output, not on a helper's type.
+    """
+    result = _round(tmp_path, accepted=True)
+    candidate, measurement, verdict = result.trials[0]
+    verdict.reason = " ".join(["this reason is long enough to need more than one line"] * 4)
+    text = format_round(result)
+    assert "\n".join(verdict.reason.split()) not in text  # the paragraph was wrapped
+    rows = [line for line in text.splitlines() if "this reason" in line or "more than" in line]
+    assert rows, "the reason did not reach the table"
+    assert all(len(row) > 20 for row in rows), rows
+
+
+def test_the_table_records_which_proposal_rule_asked_the_question(tmp_path):
+    result = _round(tmp_path, accepted=True)
+    result.proposal = {"mode": "expand", "reason": "the last round accepted events-8",
+                       "space": "10 field(s), 13 bounded, at most 8 proposals",
+                       "space_fingerprint": "dccb2a7b0b81", "source": "SMD",
+                       "candidates": ["events-8-4"]}
+    text = format_round(result)
+    assert "proposal" in text
+    assert "expand" in text
+    assert "dccb2a7b0b81" in text
+    assert "the last round accepted events-8" in text
+
+
 # --------------------------------------------------------------------------------------
 # evidence guardrail
 # --------------------------------------------------------------------------------------
