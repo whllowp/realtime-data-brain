@@ -319,6 +319,14 @@ class DigestSettings:
     #: the number of series changes. The narrow set is a deployment choice, not a property of the
     #: dataset, so it lives in settings where the improvement loop can propose and reverse it.
     host_features: str = ""
+    host_precision: int = 2
+    """Decimals for host-level numbers, with a significant-digit fallback for values that round to zero.
+
+    machine-2-2's CPU sits around 0.0016, so plain two-decimal formatting printed "0.00" for every
+    window and the digest carried no level at all; the diagnosis for round 8 measured the cost of that
+    (the engine ranked faulted windows *below* healthy ones, AUC 0.347). Three decimals widens the
+    window; whether it helps the model is a measurement, not a preference.
+    """
 
     #: Who answers "is this window an incident": ``"model"`` (the shipped path) or ``"deviation"``
     #: (a threshold on the loudest deviation the renderer prints, no inference at all).
@@ -491,6 +499,7 @@ def load_settings() -> Settings:
         digest=DigestSettings(
             profile=_env("BRIAN_DIGEST_PROFILE", "service") or "service",
             host_features=_env("BRIAN_DIGEST_HOST_FEATURES", ""),
+            host_precision=_int("BRIAN_DIGEST_HOST_PRECISION", 2),
             scoring=_env("BRIAN_DIGEST_SCORING", "model") or "model",
         ),
         calibration=CalibrationSettings(
@@ -527,5 +536,6 @@ ENV_VARS: Dict[Tuple[str, str], str] = {
     ("window", "min_events"): "BRIAN_MIN_WINDOW_EVENTS",
     ("digest", "profile"): "BRIAN_DIGEST_PROFILE",
     ("digest", "host_features"): "BRIAN_DIGEST_HOST_FEATURES",
+    ("digest", "host_precision"): "BRIAN_DIGEST_HOST_PRECISION",
     ("digest", "scoring"): "BRIAN_DIGEST_SCORING",
 }

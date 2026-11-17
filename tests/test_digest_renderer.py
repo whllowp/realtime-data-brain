@@ -358,3 +358,60 @@ def test_the_benchmark_renderer_agrees_with_production() -> None:
         sys.path.pop(0)
     for name in ("prose",):
         assert compare_renderers.RENDERERS[name](BASELINE_METRICS) == render_digest(BASELINE_METRICS)[0]
+
+
+# --------------------------------------------------------------------------------------
+# host levels that two decimals cannot express
+# --------------------------------------------------------------------------------------
+
+TINY_HOST_FIXTURE = {
+    "service": "machine-2-2",
+    "window_seconds": 300.0,
+    "event_count": 5,
+    "baseline_samples": 30,
+    "comparison": {
+        "host": {
+            "cpu": {"key": "host.cpu", "label": "CPU", "unit": "", "value": 0.0016,
+                    "baseline": 0.0015, "delta_ratio": 1.07, "n": 30},
+            "swap": {"key": "host.swap_used", "label": "swap used", "unit": "", "value": 0.0,
+                     "baseline": 0.0, "delta_ratio": 1.0, "n": 30},
+        }
+    },
+}
+
+
+def test_a_level_too_small_for_two_decimals_is_not_printed_as_zero() -> None:
+    """machine-2-2's CPU is 0.0016, and `"%.2f"` printed `0.00` for every window.
+
+    The digest then carried no level at all — only ratios of rounding noise — and the engine ranked
+    faulted windows below healthy ones (AUC 0.347). This is a rendering defect, not a preference: a
+    number that is present in the window and absent from the text cannot be judged.
+    """
+    text, _ = render_digest(TINY_HOST_FIXTURE, profile="host")
+    assert "CPU 0.0016" in text
+    assert "CPU 0.00 " not in text
+
+
+def test_precision_widens_the_digits_without_hiding_the_level() -> None:
+    """More decimals must add information, not trade one wrong reading for another.
+
+    With three decimals a fixed-precision formatter would print 0.0016 as `0.002` — a 25% error on the
+    one number that carries the signal — so the widening follows significant digits, not the setting.
+    """
+    two, _ = render_digest(TINY_HOST_FIXTURE, profile="host", precision=2)
+    three, _ = render_digest(TINY_HOST_FIXTURE, profile="host", precision=3)
+    assert "0.0016" in two
+    assert "0.0016" in three
+    assert two != three
+
+
+def test_an_exact_zero_still_reads_as_zero() -> None:
+    text, _ = render_digest(TINY_HOST_FIXTURE, profile="host")
+    assert "swap used 0.00 (baseline 0.00" in text
+
+
+def test_the_service_profile_is_not_affected_by_host_precision() -> None:
+    """The service digest was tuned against a labelled suite; a host formatting knob must not touch it."""
+    two, _ = render_digest(BASELINE_METRICS, precision=2)
+    four, _ = render_digest(BASELINE_METRICS, precision=4)
+    assert two == four

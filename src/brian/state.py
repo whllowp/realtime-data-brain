@@ -887,7 +887,7 @@ METRIC_UNITS: Dict[str, str] = {spec.key: spec.unit for spec in DEFAULT_METRICS}
 
 
 def render_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_WORDS,
-                  profile: str = "service") -> Tuple[str, List[str]]:
+                  profile: str = "service", precision: int = 2) -> Tuple[str, List[str]]:
     """Render the digest text: the state Laya actually reads. Returns (text, dropped_lines).
 
     **This function is a model parameter, not formatting.** Laya is an encoder over text, so these
@@ -915,7 +915,7 @@ def render_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_WORDS,
     partial evidence, and that must be visible in the record rather than inferred from a word count.
     """
     if profile == "host":
-        return _render_host_digest(metrics, max_words)
+        return _render_host_digest(metrics, max_words, precision=precision)
     if profile != "service":
         raise ValueError("unknown digest profile %r (service|host)" % (profile,))
     lines: List[str] = []
@@ -1070,7 +1070,36 @@ def _deviation(entry: Mapping[str, Any]) -> str:
     return text
 
 
-def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_WORDS) -> Tuple[str, List[str]]:
+def _host_num(value: Any, precision: int) -> str:
+    """Format a host-level number so that a small value is still visible.
+
+    `_num(value, 2)` is right for percentages and milliseconds and wrong for a host series measured in
+    units of one: machine-2-2's CPU sits around 0.0016, so `"%.2f"` prints `0.00` for every window and
+    the digest carries no level at all — only ratios of rounding noise. That is not a styling choice,
+    it is the difference between a readable state and a blank one, so a value that would round to zero
+    falls back to significant digits (`0.0016`, `0.00051`) instead.
+    """
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(number) >= 1000:
+        return "%d" % round(number)
+    digits = precision
+    if 0.0 < abs(number) < 0.01:
+        # Widen the decimals so a small number keeps `precision` significant digits: machine-2-2's CPU
+        # is 0.0016, which two fixed decimals print as "0.00" — a level that is present in the window
+        # and absent from the text. The threshold is 0.01 rather than "anything below 1" because two
+        # decimals already give two significant digits from 0.01 upward, and the pinned host rendering
+        # (`0.08`, `0.25`) is a measured artefact that must not move for a formatting preference.
+        digits = max(precision, precision - 1 - int(math.floor(math.log10(abs(number)))))
+    return ("%%.%df" % digits) % number
+
+
+def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_WORDS,
+                        precision: int = 2) -> Tuple[str, List[str]]:
     """Render a window of **host** telemetry: one line per measured signal, each with its baseline.
 
     This is a second profile rather than a tweak to the service one, because the two have incompatible
@@ -1118,9 +1147,9 @@ def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_
             reference_ratio = entry.get("delta_ratio")
         lines.append("%s %s (baseline %s%s)."
                      % (label,
-                        _num(entry["value"], 2),
-                        _num(reference, 2),
-                        ", %sx" % _num(reference_ratio, 2)
+                        _host_num(entry["value"], precision),
+                        _host_num(reference, precision),
+                        ", %sx" % _host_num(reference_ratio, precision)
                         if reference_ratio is not None else ""))
         rendered += 1
 
@@ -1321,7 +1350,8 @@ def _plain(value: Any) -> str:
 
 
 def build_digest(aggregator: ServiceAggregator, baselines: Optional[BaselineTracker] = None,
-                 version: Optional[str] = None, profile: str = "service") -> Digest:
+                 version: Optional[str] = None, profile: str = "service",
+                 precision: int = 2) -> Digest:
     """Turn an aggregated window into the contract record Laya will judge.
 
     `profile` selects the rendering: `"service"` for HTTP-service telemetry (the shipped catalog) or
@@ -1329,7 +1359,7 @@ def build_digest(aggregator: ServiceAggregator, baselines: Optional[BaselineTrac
     both — see `render_digest` for the numbers that forced the split.
     """
     metrics = aggregator.reduce(baselines)
-    text, dropped = render_digest(metrics, profile=profile)
+    text, dropped = render_digest(metrics, profile=profile, precision=precision)
     version = version or (DIGEST_HOST_VERSION if profile == "host" else DIGEST_VERSION)
     render_meta: Dict[str, Any] = {"words": len(text.split()), "digest_version": version,
                                    "profile": profile}

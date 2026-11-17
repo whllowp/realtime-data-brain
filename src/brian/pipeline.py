@@ -188,7 +188,8 @@ class Pipeline:
         aggregators = self.windower.flush() if final else self.windower.ready()
         traces: List[WindowTrace] = []
         for aggregator in aggregators:
-            digest = build_digest(aggregator, self.baselines, profile=self.settings.digest.profile)
+            digest = build_digest(aggregator, self.baselines, profile=self.settings.digest.profile,
+                              precision=self.settings.digest.host_precision)
             trace = self.process_digest(digest, events=self.recent_events(digest.service, self.settings.llm.max_context_events))
             # Only now does this window become baseline material for *later* windows.
             self.baselines.observe(digest.service, digest.metrics)

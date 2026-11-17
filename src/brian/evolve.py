@@ -230,6 +230,17 @@ def catalogue() -> List[Candidate]:
             value="deviation",
             also=(("gate", "anomaly_probability", 0.87), ("gate", "notify_probability", 0.87)),
         ),
+        Candidate(
+            name="host-precision-3",
+            hypothesis="A host series measured in units of one needs a third digit before the model can "
+                       "tell two windows apart: machine-2-2's CPU is 0.0016, which two decimals print as "
+                       "0.00. Giving the digest one more digit ranked machine-2-2 at AUC 0.436 against "
+                       "0.297 on the same windows, so the labels are the arbiter of whether that is a "
+                       "gain worth the longer text.",
+            section="digest",
+            field="host_precision",
+            value=3,
+        ),
     ]
 
 
@@ -602,7 +613,8 @@ def state_ceiling(settings: Settings, streams: Sequence[Stream]) -> Dict[str, An
 
         def consume(aggregators: Sequence[Any]) -> None:
             for aggregator in aggregators:
-                digest = build_digest(aggregator, baselines, profile=settings.digest.profile)
+                digest = build_digest(aggregator, baselines, profile=settings.digest.profile,
+                                  precision=settings.digest.host_precision)
                 baselines.observe(digest.service, digest.metrics)
                 record(digest)
 
