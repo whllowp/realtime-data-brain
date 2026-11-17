@@ -382,7 +382,8 @@ class Evaluator:
 
         for aggregator in sorted(windower.flush(), key=lambda a: (a.window_start, a.service)):
             digest = build_digest(aggregator, baselines, profile=self.settings.digest.profile,
-                                      precision=self.settings.digest.host_precision)
+                                      precision=self.settings.digest.host_precision,
+                                      ratio_floor=self.settings.digest.host_ratio_floor)
             key = (digest.service, int(digest.window_start.timestamp()))
             label = labels.get(key)
             if label is None or not label.scored:

@@ -415,3 +415,50 @@ def test_the_service_profile_is_not_affected_by_host_precision() -> None:
     two, _ = render_digest(BASELINE_METRICS, precision=2)
     four, _ = render_digest(BASELINE_METRICS, precision=4)
     assert two == four
+
+
+# --------------------------------------------------------------------------------------
+# ratios that divide by nothing
+# --------------------------------------------------------------------------------------
+
+NEAR_ZERO_BASELINE_FIXTURE = {
+    "service": "machine-2-2",
+    "window_seconds": 300.0,
+    "event_count": 5,
+    "baseline_samples": 30,
+    "comparison": {
+        "host": {
+            "cpu_system": {"key": "host.cpu_system", "label": "CPU system", "unit": "",
+                           "value": 0.00080, "baseline": 0.00019, "delta_ratio": 4.17, "n": 30},
+            "mem_free": {"key": "host.mem_free", "label": "free memory", "unit": "",
+                         "value": 0.34, "baseline": 0.29, "delta_ratio": 1.15, "n": 30},
+        }
+    },
+}
+
+
+def test_a_ratio_over_a_negligible_baseline_can_be_omitted_without_losing_the_measurement() -> None:
+    """40% of machine-2-2's printed ratios divide by a baseline below 0.02.
+
+    `4.17x` over two numbers around 0.0002 is arithmetic noise wearing the clothes of a measurement, and
+    the ratio column separates at AUC 0.47-0.54 on that host while the level column reaches 0.69-0.78.
+    Suppressing the ratio keeps what was measured: the level and the baseline.
+    """
+    text, _ = render_digest(NEAR_ZERO_BASELINE_FIXTURE, profile="host", ratio_floor=0.02)
+    cpu_line = [line for line in text.splitlines() if line.startswith("CPU system")][0]
+    assert "0.00080" in cpu_line
+    assert "(baseline 0.00019)" in cpu_line
+    assert "x)" not in cpu_line
+
+
+def test_a_ratio_over_a_real_baseline_survives_the_floor() -> None:
+    text, _ = render_digest(NEAR_ZERO_BASELINE_FIXTURE, profile="host", ratio_floor=0.02)
+    mem_line = [line for line in text.splitlines() if line.startswith("free memory")][0]
+    assert mem_line.endswith("1.15x).")
+
+
+def test_the_ratio_floor_is_off_by_default_so_the_pinned_rendering_does_not_move() -> None:
+    default, _ = render_digest(HOST_METRICS_FIXTURE, profile="host")
+    explicit, _ = render_digest(HOST_METRICS_FIXTURE, profile="host", ratio_floor=0.0)
+    assert default == HOST_EXPECTED
+    assert explicit == HOST_EXPECTED

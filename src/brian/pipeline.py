@@ -189,7 +189,8 @@ class Pipeline:
         traces: List[WindowTrace] = []
         for aggregator in aggregators:
             digest = build_digest(aggregator, self.baselines, profile=self.settings.digest.profile,
-                              precision=self.settings.digest.host_precision)
+                              precision=self.settings.digest.host_precision,
+                              ratio_floor=self.settings.digest.host_ratio_floor)
             trace = self.process_digest(digest, events=self.recent_events(digest.service, self.settings.llm.max_context_events))
             # Only now does this window become baseline material for *later* windows.
             self.baselines.observe(digest.service, digest.metrics)

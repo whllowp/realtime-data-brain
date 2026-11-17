@@ -336,6 +336,15 @@ class DigestSettings:
     #: both numbers every round as the state ceiling, so this switch is the smallest change that lets
     #: the labelled data decide which of the two answers the domain, instead of a comment in a doc.
     #: Default stays ``"model"``: a rule measured on two hosts must not become a default by accident.
+    host_ratio_floor: float = 0.0
+    """Suppress the ratio when the baseline it divides by is below this, keeping the level.
+
+    A ratio against a near-zero baseline is arithmetic noise: machine-2-2 prints 40% of its ratios from
+    |baseline| < 0.02, where "6.00x" describes two numbers that are both effectively zero, and its ratio
+    column separates at AUC 0.47-0.54 while the level column reaches 0.69-0.78. Zero keeps every ratio
+    (the shipped form); a positive value drops the ratio and keeps the measurement.
+    """
+
     scoring: str = "model"
 
     def to_dict(self) -> Dict[str, object]:
@@ -500,6 +509,7 @@ def load_settings() -> Settings:
             profile=_env("BRIAN_DIGEST_PROFILE", "service") or "service",
             host_features=_env("BRIAN_DIGEST_HOST_FEATURES", ""),
             host_precision=_int("BRIAN_DIGEST_HOST_PRECISION", 2),
+            host_ratio_floor=_float("BRIAN_DIGEST_HOST_RATIO_FLOOR", 0.0),
             scoring=_env("BRIAN_DIGEST_SCORING", "model") or "model",
         ),
         calibration=CalibrationSettings(
@@ -537,5 +547,6 @@ ENV_VARS: Dict[Tuple[str, str], str] = {
     ("digest", "profile"): "BRIAN_DIGEST_PROFILE",
     ("digest", "host_features"): "BRIAN_DIGEST_HOST_FEATURES",
     ("digest", "host_precision"): "BRIAN_DIGEST_HOST_PRECISION",
+    ("digest", "host_ratio_floor"): "BRIAN_DIGEST_HOST_RATIO_FLOOR",
     ("digest", "scoring"): "BRIAN_DIGEST_SCORING",
 }

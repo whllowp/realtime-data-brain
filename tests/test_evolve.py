@@ -1101,3 +1101,38 @@ def test_inheriting_the_deployed_threshold_is_not_a_new_deployability_claim():
 
     assert verdict.accepted, verdict.reason
     assert verdict.rule == "cost"
+
+
+def test_a_hair_thin_move_in_the_shipped_rate_still_inherits_the_deployment():
+    """Round 9: a rendering candidate moved the shipped rate from 1.000 to 0.999.
+
+    Exact equality called that a new deployability claim, so the deploy floor rejected it — hiding that
+    the label column had already rejected it for losing recall at the budget. Half a percent of windows is
+    not a different deployment, so the candidate inherits the defect and is judged on its labels.
+    """
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr = 1.0
+    baseline.recall = 1.0
+    trial = at_budget("ratio-floor", recall=0.045, fpr=0.049)
+    trial.fpr = 0.999
+    trial.recall = 1.0
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule == "recall", verdict.reason
+    assert "0.060 -> 0.045" in verdict.reason
+
+
+def test_the_inheritance_tolerance_is_a_rule_not_a_constant():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046)
+    baseline.fpr = 1.0
+    baseline.recall = 1.0
+    trial = at_budget("ratio-floor", recall=0.045, fpr=0.049)
+    trial.fpr = 0.999
+    trial.recall = 1.0
+
+    verdict = decide(baseline, trial, EvolveRules(deploy_fpr_tolerance=0.0))
+
+    assert not verdict.accepted
+    assert verdict.rule == "deploy", verdict.reason

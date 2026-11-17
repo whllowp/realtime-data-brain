@@ -887,7 +887,8 @@ METRIC_UNITS: Dict[str, str] = {spec.key: spec.unit for spec in DEFAULT_METRICS}
 
 
 def render_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_WORDS,
-                  profile: str = "service", precision: int = 2) -> Tuple[str, List[str]]:
+                  profile: str = "service", precision: int = 2,
+                  ratio_floor: float = 0.0) -> Tuple[str, List[str]]:
     """Render the digest text: the state Laya actually reads. Returns (text, dropped_lines).
 
     **This function is a model parameter, not formatting.** Laya is an encoder over text, so these
@@ -915,7 +916,8 @@ def render_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_WORDS,
     partial evidence, and that must be visible in the record rather than inferred from a word count.
     """
     if profile == "host":
-        return _render_host_digest(metrics, max_words, precision=precision)
+        return _render_host_digest(metrics, max_words, precision=precision,
+                                   ratio_floor=ratio_floor)
     if profile != "service":
         raise ValueError("unknown digest profile %r (service|host)" % (profile,))
     lines: List[str] = []
@@ -1099,7 +1101,7 @@ def _host_num(value: Any, precision: int) -> str:
 
 
 def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_WORDS,
-                        precision: int = 2) -> Tuple[str, List[str]]:
+                        precision: int = 2, ratio_floor: float = 0.0) -> Tuple[str, List[str]]:
     """Render a window of **host** telemetry: one line per measured signal, each with its baseline.
 
     This is a second profile rather than a tweak to the service one, because the two have incompatible
@@ -1145,12 +1147,20 @@ def _render_host_digest(metrics: Mapping[str, Any], max_words: int = MAX_DIGEST_
         if reference is None:
             reference = entry.get("baseline")
             reference_ratio = entry.get("delta_ratio")
+        ratio_text = ""
+        if reference_ratio is not None:
+            # A ratio against a near-zero baseline is arithmetic noise wearing the clothes of a
+            # measurement: machine-2-2 prints 40% of its ratios from |baseline| < 0.02, and a ratio line
+            # there says "6.00x" about two numbers that are both effectively zero. `ratio_floor` drops
+            # the ratio and keeps the level, so the state still states what was measured.
+            if not (ratio_floor > 0.0 and (reference is None
+                                           or abs(float(reference)) < ratio_floor)):
+                ratio_text = ", %sx" % _host_num(reference_ratio, precision)
         lines.append("%s %s (baseline %s%s)."
                      % (label,
                         _host_num(entry["value"], precision),
                         _host_num(reference, precision),
-                        ", %sx" % _host_num(reference_ratio, precision)
-                        if reference_ratio is not None else ""))
+                        ratio_text))
         rendered += 1
 
     # No summarising sentence about how many signals moved. That was tried and measured: appending
@@ -1351,7 +1361,7 @@ def _plain(value: Any) -> str:
 
 def build_digest(aggregator: ServiceAggregator, baselines: Optional[BaselineTracker] = None,
                  version: Optional[str] = None, profile: str = "service",
-                 precision: int = 2) -> Digest:
+                 precision: int = 2, ratio_floor: float = 0.0) -> Digest:
     """Turn an aggregated window into the contract record Laya will judge.
 
     `profile` selects the rendering: `"service"` for HTTP-service telemetry (the shipped catalog) or
@@ -1359,7 +1369,8 @@ def build_digest(aggregator: ServiceAggregator, baselines: Optional[BaselineTrac
     both — see `render_digest` for the numbers that forced the split.
     """
     metrics = aggregator.reduce(baselines)
-    text, dropped = render_digest(metrics, profile=profile, precision=precision)
+    text, dropped = render_digest(metrics, profile=profile, precision=precision,
+                                  ratio_floor=ratio_floor)
     version = version or (DIGEST_HOST_VERSION if profile == "host" else DIGEST_VERSION)
     render_meta: Dict[str, Any] = {"words": len(text.split()), "digest_version": version,
                                    "profile": profile}

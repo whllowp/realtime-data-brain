@@ -241,6 +241,27 @@ def catalogue() -> List[Candidate]:
             field="host_precision",
             value=3,
         ),
+        Candidate(
+            name="host-ratio-floor-02",
+            hypothesis="A ratio over a near-zero baseline is arithmetic noise: machine-2-2 prints 40% "
+                       "of its ratios from |baseline| < 0.02, where the ratio column separates at AUC "
+                       "0.47-0.54 while the level column reaches 0.69-0.78. Dropping those ratios while "
+                       "keeping the levels is a rendering change the labels can judge, and the reader "
+                       "that scores the fields is unaffected by construction.",
+            section="digest",
+            field="host_ratio_floor",
+            value=0.02,
+        ),
+        Candidate(
+            name="host-ratio-floor-10",
+            hypothesis="Same rendering change at a stricter floor, as a dose-response check: if 0.02 "
+                       "helps only because it removes a few lines, 0.10 removes most ratios on this "
+                       "domain (every baseline below a tenth of a unit) and should show the trend "
+                       "rather than one point.",
+            section="digest",
+            field="host_ratio_floor",
+            value=0.1,
+        ),
     ]
 
 
@@ -614,7 +635,8 @@ def state_ceiling(settings: Settings, streams: Sequence[Stream]) -> Dict[str, An
         def consume(aggregators: Sequence[Any]) -> None:
             for aggregator in aggregators:
                 digest = build_digest(aggregator, baselines, profile=settings.digest.profile,
-                                  precision=settings.digest.host_precision)
+                                  precision=settings.digest.host_precision,
+                                  ratio_floor=settings.digest.host_ratio_floor)
                 baselines.observe(digest.service, digest.metrics)
                 record(digest)
 
@@ -732,6 +754,12 @@ class EvolveRules:
     #: not a comparison against the baseline — a baseline that alerts on everything is a finding about the
     #: deployed configuration, not a licence for the candidate to do the same.
     deploy_fpr_ceiling: float = 0.50
+    #: How far the shipped false-positive rate may move and still count as *inheriting* the deployed
+    #: configuration rather than claiming a new one. Exact equality was too strict: round 9 found a
+    #: rendering candidate that moved 1.000 to 0.999 and was rejected by the deploy floor, hiding that the
+    #: label column had already rejected it for losing recall at the budget. Half a percent of windows is
+    #: the scale at which an operator would not call the behaviour different, and it is a judgement.
+    deploy_fpr_tolerance: float = 0.005
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -742,6 +770,7 @@ class EvolveRules:
             "fpr_tolerance": self.fpr_tolerance,
             "fpr_budget": self.fpr_budget,
             "deploy_fpr_ceiling": self.deploy_fpr_ceiling,
+            "deploy_fpr_tolerance": self.deploy_fpr_tolerance,
         }
 
 
@@ -842,9 +871,9 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
         # defect is printed as a warning instead.
         inherited = (
             baseline.fpr is not None
-            and abs(trial.fpr - baseline.fpr) <= 1e-9
+            and abs(trial.fpr - baseline.fpr) <= rules.deploy_fpr_tolerance
             and (baseline.recall is None or trial.recall is None
-                 or abs(trial.recall - baseline.recall) <= 1e-9)
+                 or abs(trial.recall - baseline.recall) <= rules.deploy_fpr_tolerance)
         )
         if not inherited:
             return Verdict(trial.candidate, False, "deploy",
