@@ -167,6 +167,15 @@ def catalogue() -> List[Candidate]:
             field="anomaly_probability",
             value=0.40,
         ),
+        Candidate(
+            name="host-features-3",
+            hypothesis="On host telemetry the digest should read three series (cpu_r, load_1, mem_free) "
+                       "rather than all eight: the archived bench runs reach AUC 0.75 with three and "
+                       "0.42 with eight, so the extra series are attention spent on the noisiest one.",
+            section="digest",
+            field="host_features",
+            value="cpu_r,load_1,mem_free",
+        ),
     ]
 
 
@@ -191,6 +200,23 @@ class Measurement:
     windows: int = 0
     """Judged windows behind the rates. Carried because a rate without its sample size is a rumour."""
     confusion: Dict[str, int] = field(default_factory=dict)
+    recall_at_budget: Optional[float] = None
+    """Best recall this configuration reaches while staying inside the false-positive budget.
+
+    `recall` above is what the *shipped threshold* yields, and on a domain the threshold was not
+    calibrated for that number says more about the threshold than about the detector: on SMD every
+    answer sits between 0.30 and 0.47, so a cut at 0.5 reports recall 0 for a configuration whose
+    ranking is good. Comparing candidates at a common budget removes the constant from the
+    comparison, which is what makes a detector change and a cost change comparable at all.
+    """
+    fpr_at_budget: Optional[float] = None
+    threshold_at_budget: Optional[float] = None
+    budget: float = 0.0
+    """The false-positive budget the at-budget columns were measured at."""
+    thresholds_at_budget: Dict[str, Optional[float]] = field(default_factory=dict)
+    """The cut each recording chose at the budget; empty when one cut served all of them."""
+    at_budget_pooled: bool = False
+    """True when a recording could not be swept and the pooled sweep was used instead."""
 
     @property
     def coverage_floor(self) -> float:
@@ -212,7 +238,121 @@ class Measurement:
             "coverage_floor": _round(self.coverage_floor, 4),
             "trial_s": _round(self.trial_s, 2),
             "reasoner": self.reasoner,
+            "budget": _round(self.budget, 4),
+            "recall_at_budget": _round(self.recall_at_budget),
+            "fpr_at_budget": _round(self.fpr_at_budget),
+            "threshold_at_budget": _round(self.threshold_at_budget, 6),
+            "thresholds_at_budget": {k: _round(v, 6) for k, v in self.thresholds_at_budget.items()},
+            "at_budget_pooled": self.at_budget_pooled,
         }
+
+
+def operating_point(scores: Sequence[Any], budget: float) -> Dict[str, Optional[float]]:
+    """The best recall reachable at or below `budget` false positives per healthy window.
+
+    This is a sweep over the probabilities the run already produced, so it costs nothing beyond the
+    scoring pass and it is invariant to where the shipped threshold sits. It is the same construction
+    `scripts/real_data/bench_smd.py` uses, kept here so the loop and the bench cannot drift apart.
+
+    Thresholds are tried at the observed values, highest first: a cut at `p` alerts the windows whose
+    probability is at least `p`, so the reachable confusion pairs are finite and no interpolation is
+    needed. Ties go to the higher threshold, which is the stricter reading of the same recall.
+    """
+    usable = [
+        (float(score.predicted_probability), bool(score.expected_anomaly))
+        for score in scores
+        if score.predicted_probability is not None and score.error is None
+    ]
+    empty = {"budget": budget, "threshold": None, "recall": None, "fpr": None, "alerts": None}
+    if not usable:
+        return empty
+    positives = sum(1 for _p, y in usable if y)
+    negatives = len(usable) - positives
+    if not positives or not negatives:
+        # A budget is a ratio to the healthy population; with none of it there is nothing to hold.
+        return empty
+    best: Optional[Dict[str, Optional[float]]] = None
+    best_tp = -1
+    for threshold in sorted({p for p, _y in usable}, reverse=True):
+        tp = sum(1 for p, y in usable if y and p >= threshold)
+        fp = sum(1 for p, y in usable if not y and p >= threshold)
+        fpr = fp / negatives
+        if fpr > budget + 1e-12:
+            continue
+        if tp > best_tp:
+            best_tp = tp
+            best = {
+                "budget": budget,
+                "threshold": threshold,
+                "recall": tp / positives,
+                "fpr": fpr,
+                "alerts": float(tp + fp),
+            }
+    return best if best is not None else empty
+
+
+def operating_point_by_recording(groups: Sequence[Tuple[str, Sequence[Any]]],
+                                 budget: float) -> Dict[str, Any]:
+    """The same sweep, run once per recording and the counts summed.
+
+    Pooling the probabilities of two hosts and sweeping one cut across them answers a question about
+    a shared scale that does not exist: on SMD one machine's answers top out at 0.35 and the other's
+    bottom out at 0.30, so a pooled sweep silently mixes a cut that suits the first with negatives
+    that belong to the second. Measured here, machine-1-6 ranks at AUC 0.674 and machine-2-2 at 0.347
+    with the same three columns, and the pooled number is neither.
+
+    Each recording therefore chooses its own cut inside the same budget and the outcomes are added,
+    which is what a per-host calibration does in deployment. A recording with no positives or no
+    healthy windows cannot be swept; rather than dropping it (which would hide its false positives or
+    its incidents) the whole sweep falls back to the pooled one and says so.
+    """
+    readable = [(name, list(scores)) for name, scores in groups if scores]
+    if len(readable) <= 1:
+        name = readable[0][0] if readable else "baseline"
+        flat = readable[0][1] if readable else []
+        result = dict(operating_point(flat, budget))
+        result["thresholds"] = {name: result["threshold"]} if result["threshold"] is not None else {}
+        result["recordings"] = 1
+        result["pooled"] = True
+        return result
+
+    sweeps: List[Tuple[str, Dict[str, Optional[float]]]] = []
+    for name, scores in readable:
+        sweep = operating_point(scores, budget)
+        if sweep["recall"] is None:
+            pooled = dict(operating_point([s for _n, group in readable for s in group], budget))
+            pooled["thresholds"] = {}
+            pooled["recordings"] = len(readable)
+            pooled["pooled"] = True
+            return pooled
+        sweeps.append((name, sweep))
+
+    totals = {"tp": 0.0, "fp": 0.0, "positives": 0.0, "negatives": 0.0}
+    thresholds: Dict[str, Optional[float]] = {}
+    for (name, sweep), (_n, scores) in zip(sweeps, readable):
+        usable = [
+            (float(score.predicted_probability), bool(score.expected_anomaly))
+            for score in scores
+            if score.predicted_probability is not None and score.error is None
+        ]
+        positives = sum(1 for _p, y in usable if y)
+        negatives = len(usable) - positives
+        cut = float(sweep["threshold"])  # type: ignore[arg-type]
+        totals["tp"] += sum(1 for p, y in usable if y and p >= cut)
+        totals["fp"] += sum(1 for p, y in usable if not y and p >= cut)
+        totals["positives"] += positives
+        totals["negatives"] += negatives
+        thresholds[name] = sweep["threshold"]
+    return {
+        "budget": budget,
+        "threshold": None,
+        "recall": totals["tp"] / totals["positives"] if totals["positives"] else None,
+        "fpr": totals["fp"] / totals["negatives"] if totals["negatives"] else None,
+        "alerts": totals["tp"] + totals["fp"],
+        "thresholds": thresholds,
+        "recordings": len(readable),
+        "pooled": False,
+    }
 
 
 def _round(value: Optional[float], digits: int = 4) -> Optional[float]:
@@ -316,7 +456,7 @@ def cost_run(settings: Settings,
 
 
 def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequence[Stream],
-            pool: Sequence[Sequence[Event]], clock=None) -> Measurement:
+            pool: Sequence[Sequence[Event]], clock=None, budget: float = 0.10) -> Measurement:
     """Measure one configuration: detection from labels, cost from the ledger, coverage from the pool.
 
     A fresh `LayaClient` and a fresh `Pipeline` per measurement *and per recording*, so no result
@@ -331,11 +471,13 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
 
     counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
     latencies: List[float] = []
+    score_groups: List[Tuple[str, List[Any]]] = []
     for stream in streams:
         report = Evaluator(applied, laya=LayaClient(applied.laya)).run(stream.windows)
         for key, value in _tally(report).items():
             counts[key] += value
         latencies.extend(score.latency_ms for score in report.scores if score.latency_ms)
+        score_groups.append((stream.name, list(report.scores)))
 
     ledger, _traces, reasoner = cost_run(applied, streams)
     cap = applied.llm.max_context_events
@@ -350,6 +492,7 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
               "first_error_kept": 1.0, "context_retention": 1.0}
     )
 
+    operating = operating_point_by_recording(score_groups, budget)
     return Measurement(
         candidate=candidate.name if candidate is not None else "baseline",
         recall=_rate(counts, "tp", "fn"),
@@ -364,6 +507,12 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
         reasoner=reasoner,
         windows=counts["tp"] + counts["fp"] + counts["tn"] + counts["fn"],
         confusion=counts,
+        recall_at_budget=operating["recall"],
+        fpr_at_budget=operating["fpr"],
+        threshold_at_budget=operating["threshold"],
+        budget=budget,
+        thresholds_at_budget=operating.get("thresholds") or {},
+        at_budget_pooled=bool(operating.get("pooled")),
     )
 
 
@@ -381,16 +530,26 @@ class EvolveRules:
 
     #: Tokens per report must fall by at least this fraction to count as a gain.
     min_gain: float = 0.05
+    #: At-budget recall must rise by at least this fraction to count as a quality gain.
+    min_quality_gain: float = 0.05
+    #: A quality gain may cost this much more per report and still be accepted.
+    cost_tolerance: float = 0.05
     #: Allowed regression in recall / FPR. Zero: a cheaper system that detects less is a different
     #: system, not a better one.
     recall_tolerance: float = 0.0
     fpr_tolerance: float = 0.0
+    #: The false-positive budget the label comparison is made at. A rate is only comparable at a stated
+    #: budget, and the budget is part of the objective, not of any candidate.
+    fpr_budget: float = 0.10
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "min_gain": self.min_gain,
+            "min_quality_gain": self.min_quality_gain,
+            "cost_tolerance": self.cost_tolerance,
             "recall_tolerance": self.recall_tolerance,
             "fpr_tolerance": self.fpr_tolerance,
+            "fpr_budget": self.fpr_budget,
         }
 
 
@@ -412,18 +571,62 @@ class Verdict:
 
 def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
            veto: Optional[str] = None) -> Verdict:
-    """Accept only a Pareto improvement: better on the objective, not worse on anything else."""
+    """Accept only a Pareto improvement: better on one axis, not worse on the other.
+
+    Two moves qualify, and both are checked in the same order. A cost move lowers tokens per report by
+    `min_gain` at no loss of at-budget recall, false-positive rate, or evidence. A quality move raises
+    at-budget recall by `min_quality_gain` without raising the false-positive rate and without costing
+    more than `cost_tolerance` per report (undefined cost counts as no objection, because a domain the
+    shipped threshold silences has no bill to compare and refusing to decide there would leave the
+    dilution this loop exists to find in place).
+
+    The label check reads the *at-budget* pair when both sides have one. A fixed absolute threshold on
+    an uncalibrated answer is not a shared yardstick: on SMD every answer lands between 0.30 and 0.47,
+    so a cut at the shipped 0.5 reports recall 0 for a detector whose ranking is 0.75 AUC, and a
+    candidate that shifted the probabilities without changing the ranking would look like an
+    improvement. Comparing at a common false-positive budget asks the question the label column is
+    meant to answer: can this configuration find more incidents for the same number of false alarms?
+    """
     if veto:
         return Verdict(trial.candidate, False, "veto", veto)
 
-    if baseline.recall is not None and trial.recall is not None:
-        if trial.recall < baseline.recall - rules.recall_tolerance:
+    if baseline.recall_at_budget is not None and trial.recall_at_budget is not None:
+        if trial.recall_at_budget < baseline.recall_at_budget - rules.recall_tolerance:
             return Verdict(trial.candidate, False, "recall",
-                           "recall %.3f -> %.3f" % (baseline.recall, trial.recall))
-    if baseline.fpr is not None and trial.fpr is not None:
-        if trial.fpr > baseline.fpr + rules.fpr_tolerance:
+                           "recall at %.0f%% false positives %.3f -> %.3f"
+                           % (100 * baseline.budget, baseline.recall_at_budget,
+                              trial.recall_at_budget))
+        # Inside a fixed budget the false-positive rate is a *permission*, not a score to minimise:
+        # the sweep already guarantees it cannot exceed the budget, so rejecting every increase would
+        # reject a detector that finds three times as many incidents for four more percentage points of
+        # a budget it was allowed to spend. Spending more of the budget without finding more incidents
+        # is still a regression, because those are pages somebody has to answer.
+        if trial.fpr_at_budget is not None and trial.fpr_at_budget > rules.fpr_budget + 1e-9:
             return Verdict(trial.candidate, False, "fpr",
-                           "false-positive rate %.3f -> %.3f" % (baseline.fpr, trial.fpr))
+                           "false-positive rate %.3f exceeds the %.0f%% budget"
+                           % (trial.fpr_at_budget, 100 * rules.fpr_budget))
+        quality_gain = (
+            trial.recall_at_budget >= baseline.recall_at_budget * (1.0 + rules.min_quality_gain)
+        )
+        if (not quality_gain
+                and trial.fpr_at_budget is not None
+                and baseline.fpr_at_budget is not None
+                and trial.fpr_at_budget > baseline.fpr_at_budget + rules.fpr_tolerance):
+            return Verdict(trial.candidate, False, "fpr",
+                           "spends %.3f of the %.0f%% false-positive budget against %.3f without "
+                           "finding more incidents: recall %.3f -> %.3f"
+                           % (trial.fpr_at_budget, 100 * rules.fpr_budget,
+                              baseline.fpr_at_budget, baseline.recall_at_budget,
+                              trial.recall_at_budget))
+    else:
+        if baseline.recall is not None and trial.recall is not None:
+            if trial.recall < baseline.recall - rules.recall_tolerance:
+                return Verdict(trial.candidate, False, "recall",
+                               "recall %.3f -> %.3f" % (baseline.recall, trial.recall))
+        if baseline.fpr is not None and trial.fpr is not None:
+            if trial.fpr > baseline.fpr + rules.fpr_tolerance:
+                return Verdict(trial.candidate, False, "fpr",
+                               "false-positive rate %.3f -> %.3f" % (baseline.fpr, trial.fpr))
 
     lost = sorted(
         key for key, value in trial.coverage.items()
@@ -435,7 +638,23 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
                        "keeps less evidence: %s" % detail)
 
     before, after = baseline.tokens_per_report, trial.tokens_per_report
+    before_recall = baseline.recall_at_budget
+    after_recall = trial.recall_at_budget
+    quality_gain = (
+        before_recall is not None
+        and after_recall is not None
+        and after_recall >= before_recall * (1.0 + rules.min_quality_gain)
+    )
     if before is None or after is None:
+        # No report on one side means no alert on that side, so there is no bill to compare. That is
+        # the normal case on a domain where the shipped threshold silences the detector: the whole cost
+        # ledger is empty. Refusing to decide would make the loop blind to the only change that can
+        # bring such a domain back, so the label column alone decides when it moves enough.
+        if quality_gain:
+            return Verdict(trial.candidate, True, "quality",
+                           "no report on either side, so cost is undefined; recall at %.0f%% "
+                           "false positives %.3f -> %.3f"
+                           % (100 * baseline.budget, before_recall, after_recall))
         side = "baseline" if before is None else "candidate"
         return Verdict(trial.candidate, False, "no-reports",
                        "the %s run produced no report, so tokens/report is undefined; "
@@ -444,9 +663,20 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
         return Verdict(trial.candidate, True, "cost",
                        "%.0f -> %.0f tokens/report (%.1f%%)"
                        % (before, after, 100 * (after / before - 1.0)))
+    if quality_gain and after <= before * (1.0 + rules.cost_tolerance):
+        return Verdict(trial.candidate, True, "quality",
+                       "recall at %.0f%% false positives %.3f -> %.3f for %.0f -> %.0f "
+                       "tokens/report"
+                       % (100 * baseline.budget, before_recall, after_recall, before, after))
+    if quality_gain:
+        return Verdict(trial.candidate, False, "cost",
+                       "recall improves but the bill rises %.0f -> %.0f tokens/report, more than "
+                       "the %.0f%% a quality gain may cost"
+                       % (before, after, 100 * rules.cost_tolerance))
     return Verdict(trial.candidate, False, "gain",
-                   "%.0f -> %.0f tokens/report is below the %.0f%% bar"
-                   % (before, after, 100 * rules.min_gain))
+                   "%.0f -> %.0f tokens/report is below the %.0f%% bar and recall at the budget "
+                   "did not rise by %.0f%%"
+                   % (before, after, 100 * rules.min_gain, 100 * rules.min_quality_gain))
 
 
 # --------------------------------------------------------------------------------------
@@ -504,11 +734,11 @@ def run_round(settings: Settings, streams: Sequence[Stream],
     active_rules = rules if rules is not None else EvolveRules()
     chosen = list(selected) if selected is not None else catalogue()
     pool = build_pool(settings, streams)
-    baseline = measure(settings, None, streams, pool)
+    baseline = measure(settings, None, streams, pool, budget=active_rules.fpr_budget)
 
     trials: List[Tuple[Candidate, Measurement, Verdict]] = []
     for candidate in chosen:
-        trial = measure(settings, candidate, streams, pool)
+        trial = measure(settings, candidate, streams, pool, budget=active_rules.fpr_budget)
         verdict = decide(baseline, trial, active_rules, veto=candidate.veto)
         trials.append((candidate, trial, verdict))
         if on_candidate is not None:
@@ -656,18 +886,20 @@ def format_round(result: RoundResult) -> str:
     lines.append("=" * 96)
     lines.append("reasoner          %s" % (result.baseline.reasoner or "unknown"))
     lines.append("stream            %s" % json.dumps(result.stream, sort_keys=True))
-    lines.append("objective         tokens/report must fall by >= %.0f%%; recall and FPR may not regress"
-                 % (100 * result.rules.min_gain))
+    lines.append("objective         accept a Pareto move: tokens/report down >= %.0f%% or recall at"
+                 " <=%.0f%% false positives up >= %.0f%%, never at a cost of the other column"
+                 % (100 * result.rules.min_gain, 100 * result.rules.fpr_budget,
+                    100 * result.rules.min_quality_gain))
     lines.append("")
-    lines.append("%-22s %7s %7s %9s %9s %8s %-9s" %
-                 ("candidate", "recall", "fpr", "tok/rep", "tok/win", "evidence", "verdict"))
+    lines.append("%-22s %8s %7s %9s %9s %8s %-9s" %
+                 ("candidate", "recall@b", "fpr@b", "tok/rep", "tok/win", "evidence", "verdict"))
     lines.append("-" * 96)
 
     def row(m: Measurement, label: str, verdict: str) -> str:
-        return "%-22s %7s %7s %9s %9s %8s %-9s" % (
+        return "%-22s %8s %7s %9s %9s %8s %-9s" % (
             label,
-            "n/a" if m.recall is None else "%.3f" % m.recall,
-            "n/a" if m.fpr is None else "%.3f" % m.fpr,
+            "n/a" if m.recall_at_budget is None else "%.3f" % m.recall_at_budget,
+            "n/a" if m.fpr_at_budget is None else "%.3f" % m.fpr_at_budget,
             "n/a" if m.tokens_per_report is None else "%.0f" % m.tokens_per_report,
             "n/a" if m.tokens_per_window is None else "%.1f" % m.tokens_per_window,
             "%.0f%%" % (100 * m.coverage_floor) if m.coverage else "n/a",
@@ -677,6 +909,16 @@ def format_round(result: RoundResult) -> str:
     lines.append(row(result.baseline, "baseline", "-"))
     for candidate, measurement, verdict in result.trials:
         lines.append(row(measurement, candidate.name, "accept" if verdict.accepted else "reject"))
+    lines.append("")
+    lines.append("recall@b: best recall at <=%.0f%% false positives, the cut chosen per configuration, because"
+                 % (100 * result.rules.fpr_budget))
+    lines.append("an absolute threshold was calibrated on another domain and is not comparable here.")
+    for candidate, measurement, _verdict in [(None, result.baseline, None)] + list(result.trials):
+        label = "baseline" if candidate is None else candidate.name
+        if measurement.recall is None or measurement.fpr is None:
+            continue
+        lines.append("  shipped threshold  %-22s recall %.3f  fpr %.3f"
+                     % (label, measurement.recall, measurement.fpr))
     lines.append("")
     for candidate, _measurement, verdict in result.trials:
         lines.append("%s %-22s %s" % ("+" if verdict.accepted else "x", candidate.name,

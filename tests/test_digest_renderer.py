@@ -26,7 +26,13 @@ import sys
 
 import pytest
 
-from brian.state import BASELINE_KEYS, DEFAULT_METRICS, baseline_keys, digest_specs, render_digest
+from brian.state import (
+    BASELINE_KEYS,
+    DEFAULT_METRICS,
+    baseline_keys,
+    digest_specs,
+    render_digest,
+)
 
 UTC = timezone.utc
 
@@ -239,6 +245,46 @@ def test_an_unknown_profile_name_is_rejected_by_the_helpers_too() -> None:
     for helper in (digest_specs, baseline_keys):
         with pytest.raises(ValueError, match="service|host"):
             helper("nonsense")
+
+
+def test_a_host_feature_subset_narrows_the_catalog_and_the_keys_together() -> None:
+    """Three series instead of eight is a deployment choice, and all three sides must follow it.
+
+    The archived SMD runs reach AUC 0.75 with `cpu_r,load_1,mem_free` and 0.42 with all eight through
+    the same renderer, so this setting is the difference between a detector and a coin. Narrowing the
+    catalog while leaving the tracker on the full key set would re-create the wiring bug the profile
+    setting was introduced to fix, one column narrower.
+    """
+    subset = digest_specs("host", "cpu_r,load_1,mem_free")
+    assert tuple(spec.source for spec in subset) == ("cpu_r", "load_1", "mem_free")
+    assert baseline_keys("host", "cpu_r,load_1,mem_free") == tuple(spec.key for spec in subset)
+    assert digest_specs("host") == tuple(
+        spec for spec in digest_specs("host") if spec.source in
+        {"cpu_r", "cpu_s", "load_1", "mem_free", "swap_used", "disk_io_write", "net_in_bytes",
+         "net_out_bytes"}
+    )
+
+
+def test_the_feature_order_in_the_setting_does_not_change_the_catalog_order() -> None:
+    """Catalog order, not declaration order, so two deployments listing the same columns agree."""
+    one = digest_specs("host", "mem_free,cpu_r,load_1")
+    two = digest_specs("host", "cpu_r,load_1,mem_free")
+    assert one == two
+    assert one[0].source == "cpu_r"
+
+
+def test_an_unknown_host_feature_is_rejected_rather_than_dropped() -> None:
+    """A typo must not silently remove a series: the next measurement would report a worse detector."""
+    with pytest.raises(ValueError, match="unknown host feature"):
+        digest_specs("host", "cpu_r,cp_r")
+    with pytest.raises(ValueError, match="unknown host feature"):
+        baseline_keys("host", "not_a_column")
+
+
+def test_the_service_profile_ignores_the_host_feature_setting() -> None:
+    """The setting belongs to host telemetry; a service deployment must not be narrowed by it."""
+    assert digest_specs("service", "cpu_r") == DEFAULT_METRICS
+    assert baseline_keys("service", "cpu_r") == BASELINE_KEYS
 
 
 def test_service_profile_still_says_nothing_about_unpopulated_metrics() -> None:

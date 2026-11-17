@@ -311,9 +311,17 @@ class DigestSettings:
     """
 
     profile: str = "service"
+    #: Host columns to feed the ``host`` profile, comma separated; empty means all of them.
+    #:
+    #: This exists because the catalog, not the renderer, was measured to be what dilutes the signal.
+    #: The production host text reaches AUC 0.750 on SMD when it reads three columns
+    #: (``cpu_r,load_1,mem_free``) and 0.418 when it reads all eight: the renderer is identical, only
+    #: the number of series changes. The narrow set is a deployment choice, not a property of the
+    #: dataset, so it lives in settings where the improvement loop can propose and reverse it.
+    host_features: str = ""
 
     def to_dict(self) -> Dict[str, object]:
-        return {"profile": self.profile}
+        return {"profile": self.profile, "host_features": self.host_features}
 
 
 @dataclass
@@ -471,6 +479,7 @@ def load_settings() -> Settings:
         ),
         digest=DigestSettings(
             profile=_env("BRIAN_DIGEST_PROFILE", "service") or "service",
+            host_features=_env("BRIAN_DIGEST_HOST_FEATURES", ""),
         ),
         calibration=CalibrationSettings(
             path=_env("BRIAN_CALIBRATION_PATH", DEFAULT_CALIBRATION_PATH) or DEFAULT_CALIBRATION_PATH,
@@ -505,4 +514,5 @@ ENV_VARS: Dict[Tuple[str, str], str] = {
     ("window", "baseline_windows_long"): "BRIAN_BASELINE_WINDOWS_LONG",
     ("window", "min_events"): "BRIAN_MIN_WINDOW_EVENTS",
     ("digest", "profile"): "BRIAN_DIGEST_PROFILE",
+    ("digest", "host_features"): "BRIAN_DIGEST_HOST_FEATURES",
 }

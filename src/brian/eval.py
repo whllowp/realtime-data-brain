@@ -352,13 +352,13 @@ class Evaluator:
         baselines = BaselineTracker(
             window=self.settings.window.baseline_windows,
             long_window=self.settings.window.baseline_windows_long,
-            keys=baseline_keys(self.settings.digest.profile),
+            keys=baseline_keys(self.settings.digest.profile, self.settings.digest.host_features),
         )
         windower = Windower(
             size_s=self.settings.window.size_s,
             slide_s=self.settings.window.slide_s,
             allowed_lateness_s=0,
-            specs=digest_specs(self.settings.digest.profile),
+            specs=digest_specs(self.settings.digest.profile, self.settings.digest.host_features),
             min_events=1,          # every labelled window must be judged, even a thin one
         )
         report = EvalReport(

@@ -44,10 +44,22 @@ COLUMNS: Dict[str, int] = {
 }
 
 #: See the module docstring: five events per window, so the shipped minimum of ten would drop them all.
+#: What this dataset needs before the pipeline can read it at all.
+#:
+#: `min_events=1` because a 300-second host window carries five samples, not the ten events the
+#: service window requires. `anomaly_probability=0.33` because the engine's answers on this domain all
+#: land between 0.30 and 0.47 — a cut anywhere above that range silences the detector no matter how
+#: good its ranking is, and 0.33 is the operating point the archived bench runs found at a 10%
+#: false-positive budget. The loop still compares configurations at that budget rather than at this
+#: cut, so the constant decides whether alerts exist, not who wins.
+#: `notify_probability` must not sit above that same range: with the service default (0.5) every window
+#: is "anomalous but not worth raising", so the gate returns `OBSERVE`, no alert exists, System 2 never
+#: runs, and the cost column of every round is empty — a measurement artefact that reads exactly like
+#: "this domain never alerts". Detection, notification and billing are three separate settings.
 BASE_OVERRIDES = {
     "calibration": {"enabled": False},
     "digest": {"profile": "host"},
-    "gate": {"anomaly_probability": 0.5, "notify_probability": 0.5},
+    "gate": {"anomaly_probability": 0.33, "notify_probability": 0.33},
     "window": {"size_s": 300, "slide_s": 300, "min_events": 1},
 }
 

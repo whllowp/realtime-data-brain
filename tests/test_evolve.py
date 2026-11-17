@@ -24,6 +24,8 @@ from brian.evolve import (
     format_round,
     grade,
     history,
+    operating_point,
+    operating_point_by_recording,
     persist,
     previously_rejected,
 )
@@ -103,6 +105,154 @@ def test_a_veto_overrides_a_perfect_measurement():
     assert verdict.reason == veto
 
 
+# --------------------------------------------------------------------------------------
+# the threshold-invariant label signal
+# --------------------------------------------------------------------------------------
+def at_budget(name: str = "candidate", *, recall: float = 0.875, fpr: float = 0.10,
+              raw_recall: float | None = 0.0, tokens: float | None = 100.0) -> Measurement:
+    m = measure(name, recall=raw_recall if raw_recall is not None else 0.0, tokens=tokens)
+    m.recall_at_budget = recall
+    m.fpr_at_budget = fpr
+    m.threshold_at_budget = 0.33
+    m.budget = 0.10
+    return m
+
+
+def test_the_label_check_uses_the_at_budget_pair_when_both_sides_have_one():
+    """A cut calibrated on another domain must not decide a comparison on this one.
+
+    On SMD every answer lands between 0.30 and 0.47, so the shipped 0.5 reports recall 0 for a
+    detector whose ranking is 0.75 AUC. Judging at a common budget is what makes the label column
+    say something about the detector instead of about the constant.
+    """
+    baseline = at_budget("baseline", recall=0.030, raw_recall=0.0)
+    trial = at_budget("host-features-3", recall=0.386, raw_recall=0.0, tokens=60.0)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert verdict.accepted, verdict.reason
+    assert verdict.rule == "cost"
+
+
+def test_a_candidate_that_finds_fewer_incidents_at_the_budget_is_rejected():
+    baseline = at_budget("baseline", recall=0.386)
+    trial = at_budget("narrower", recall=0.030, tokens=10.0)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "recall"
+    assert "recall at 10% false positives 0.386 -> 0.030" in verdict.reason
+
+
+def test_a_candidate_that_exceeds_the_false_positive_budget_is_rejected():
+    baseline = at_budget("baseline", recall=0.386, fpr=0.10)
+    trial = at_budget("looser", recall=0.50, fpr=0.40, tokens=10.0)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "fpr"
+    assert "exceeds" in verdict.reason
+
+
+def test_spending_more_of_the_budget_for_more_incidents_is_accepted():
+    """The SMD round: 0.046 -> 0.089 of a 10% budget for recall 0.060 -> 0.187.
+
+    Inside a fixed budget the false-positive rate is permission, not a score. Rejecting any increase
+    would reject a detector that finds three times as many faults for four more points of a budget it
+    was allowed to spend; the pages cost is real, so the rate stays reported in every table.
+    """
+    baseline = at_budget("baseline", recall=0.060, fpr=0.046, tokens=None)
+    trial = at_budget("host-features-3", recall=0.187, fpr=0.089, tokens=None)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert verdict.accepted, verdict.reason
+    assert verdict.rule == "quality"
+
+
+def test_spending_more_of_the_budget_without_finding_more_is_rejected():
+    baseline = at_budget("baseline", recall=0.386, fpr=0.046)
+    trial = at_budget("noisier", recall=0.386, fpr=0.089, tokens=10.0)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "fpr"
+    assert "without finding more incidents" in verdict.reason
+
+
+def test_without_an_at_budget_pair_the_raw_rates_still_decide():
+    """A measurement that cannot sweep (no probabilities) must not silently pass the label gate."""
+    baseline = measure("baseline", recall=0.5, fpr=0.0)
+    trial = measure("cheaper", recall=0.4, fpr=0.0, tokens=10.0)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "recall"
+
+
+class _Score:
+    def __init__(self, probability, label, error=None):
+        self.predicted_probability = probability
+        self.expected_anomaly = label
+        self.error = error
+
+
+def test_the_operating_point_sweeps_the_observed_probabilities():
+    """The reachable confusion pairs are finite, so the sweep is exact rather than interpolated."""
+    scores = [_Score(0.9, True), _Score(0.8, True), _Score(0.7, False),
+              _Score(0.6, False), _Score(0.5, False), _Score(0.4, True)]
+    tight = operating_point(scores, budget=0.0)
+    assert tight["fpr"] == 0.0
+    assert tight["threshold"] == 0.8
+    assert tight["recall"] == pytest.approx(2 / 3)  # cut at 0.8 keeps both positives, no negatives
+    loose = operating_point(scores, budget=1.0)
+    assert loose["recall"] == 1.0
+    assert loose["threshold"] == 0.4
+
+
+def test_the_operating_point_reports_nothing_it_cannot_divide():
+    """A budget is a ratio to the healthy population; with no healthy windows there is no rate."""
+    assert operating_point([], budget=0.1)["recall"] is None
+    assert operating_point([_Score(0.9, True)], budget=0.1)["recall"] is None
+    assert operating_point([_Score(0.1, False)], budget=0.1)["recall"] is None
+
+
+def test_scores_that_errored_are_not_counted_as_healthy():
+    """A failed window has no probability; treating it as a negative would fake a low FPR."""
+    scores = [_Score(0.9, True), _Score(None, False)]
+    assert operating_point(scores, budget=1.0)["recall"] is None
+
+
+def test_each_recording_gets_its_own_cut_and_the_counts_are_added():
+    """Two hosts do not share a probability scale, so one cut across both is not a fair sweep.
+
+    On SMD machine-1-6 ranks at AUC 0.674 and machine-2-2 at 0.347 with identical columns; a pooled
+    cut mixes a threshold that suits the first with negatives that belong to the second.
+    """
+    high = [_Score(0.90, True), _Score(0.10, True), _Score(0.50, False)]
+    low = [_Score(0.30, True), _Score(0.20, True), _Score(0.05, False)]
+    pooled = operating_point(high + low, budget=0.0)
+    per_recording = operating_point_by_recording([("a", high), ("b", low)], budget=0.0)
+    assert per_recording["recall"] == 0.75
+    assert per_recording["fpr"] == 0.0
+    assert per_recording["recordings"] == 2
+    assert per_recording["pooled"] is False
+    assert per_recording["thresholds"] == {"a": 0.9, "b": 0.2}
+    assert pooled["recall"] == 0.25
+
+
+def test_one_recording_is_just_the_plain_sweep():
+    scores = [_Score(0.9, True), _Score(0.8, False)]
+    only = operating_point_by_recording([("solo", scores)], budget=0.0)
+    assert only["recall"] == 1.0
+    assert only["recordings"] == 1
+    assert only["pooled"] is True
+    assert only["thresholds"] == {"solo": 0.9}
+
+
+def test_an_unsweepable_recording_falls_back_to_the_pooled_sweep_and_says_so():
+    """Dropping the recording would hide its false positives; pretending is worse than pooling."""
+    healthy_only = [_Score(0.5, False), _Score(0.4, False)]
+    with_positives = [_Score(0.9, True), _Score(0.2, False)]
+    result = operating_point_by_recording([("a", with_positives), ("b", healthy_only)],
+                                          budget=1.0)
+    assert result["pooled"] is True
+    assert result["recordings"] == 2
+    assert result["recall"] == 1.0
+
+
 def test_a_zero_baseline_bill_does_not_divide_by_zero_and_is_not_a_gain():
     verdict = decide(measure("baseline", tokens=0.0), measure("zero", tokens=0.0), EvolveRules())
     assert not verdict.accepted
@@ -113,6 +263,53 @@ def test_equal_cost_is_not_a_win():
     verdict = decide(measure("baseline"), measure("same", tokens=100.0), EvolveRules())
     assert not verdict.accepted
     assert verdict.rule == "gain"
+
+
+def test_a_detection_gain_at_equal_cost_is_a_win():
+    """The loop's objective is the bill, but a stalled detector is not "no change" worth keeping.
+
+    On SMD the eight-column catalog scores AUC 0.511 and three columns score 0.674 through the same
+    production renderer at the same cost; a rule that only accepts cheaper configurations could never
+    record that, which is how a cost loop quietly freezes a diluted detector in place.
+    """
+    baseline = at_budget("baseline", recall=0.045, tokens=100.0)
+    trial = at_budget("host-features-3", recall=0.282, tokens=100.0)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert verdict.accepted, verdict.reason
+    assert verdict.rule == "quality"
+    assert "0.045 -> 0.282" in verdict.reason
+
+
+def test_a_detection_gain_and_no_bill_on_either_side_is_still_decidable():
+    """Nothing alerts on the domain, so the ledger is empty; the label column must still decide."""
+    baseline = at_budget("baseline", recall=0.030, tokens=None)
+    trial = at_budget("host-features-3", recall=0.282, tokens=None)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert verdict.accepted, verdict.reason
+    assert verdict.rule == "quality"
+    assert "cost is undefined" in verdict.reason
+
+
+def test_a_detection_gain_that_raises_the_bill_past_tolerance_is_rejected():
+    baseline = at_budget("baseline", recall=0.045, tokens=100.0)
+    trial = at_budget("host-features-3", recall=0.282, tokens=150.0)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "cost"
+
+
+def test_a_detection_gain_inside_the_cost_tolerance_is_accepted():
+    baseline = at_budget("baseline", recall=0.045, tokens=100.0)
+    trial = at_budget("host-features-3", recall=0.282, tokens=104.0)
+    assert decide(baseline, trial, EvolveRules()).accepted
+
+
+def test_an_empty_ledger_and_an_unchanged_detector_is_not_a_win():
+    baseline = at_budget("baseline", recall=0.030, tokens=None)
+    trial = at_budget("host-features-3", recall=0.030, tokens=None)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "no-reports"
 
 
 # --------------------------------------------------------------------------------------

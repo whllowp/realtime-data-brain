@@ -185,19 +185,28 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("brian evolve - recorded rounds (oldest first)")
         _print("=" * 78)
         for index, record in enumerate(rounds, start=1):
-            measured = (record.get("baseline") or {}).get("tokens_per_report")
+            baseline_row = record.get("baseline") or {}
+            measured = baseline_row.get("tokens_per_report")
             baseline = "n/a" if measured is None else "%.0f" % measured
+            before_recall = baseline_row.get("recall_at_budget")
+            baseline_recall = "n/a" if before_recall is None else "%.3f" % before_recall
             trials = record.get("trials") or []
             accepted = record.get("accepted") or []
-            kept = [(t.get("measurement") or {}).get("tokens_per_report")
-                    for t in trials if (t.get("verdict") or {}).get("accepted")]
-            kept = [value for value in kept if value is not None]
-            after = "%.0f" % min(kept) if kept else "(none accepted)"
+            kept = [t for t in trials if (t.get("verdict") or {}).get("accepted")]
+            # Both columns are printed because a round can be accepted on either one: a quality change
+            # leaves tokens/report untouched, so a history that shows only the bill reads "nothing
+            # happened" about a round that tripled recall at the budget.
+            costs = [value for value in ((t.get("measurement") or {}).get("tokens_per_report")
+                                         for t in kept) if value is not None]
+            after = "%.0f" % min(costs) if costs else "(none accepted)"
+            recalls = [value for value in ((t.get("measurement") or {}).get("recall_at_budget")
+                                           for t in kept) if value is not None]
+            recall_after = "%.3f" % max(recalls) if recalls else "-"
             applied = record.get("applied")
             mark = "" if applied is None or applied else "  [recorded, not applied]"
-            _print("%2d  %s  accepted=%-24s tokens/report %5s -> %s%s"
+            _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
-                      ",".join(accepted) or "-", baseline, after, mark))
+                      ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
         return 0
 
     if args.grade:

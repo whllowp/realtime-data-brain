@@ -310,7 +310,31 @@ HOST_METRICS: Tuple[MetricSpec, ...] = (
 HOST_BASELINE_KEYS: Tuple[str, ...] = tuple(spec.key for spec in HOST_METRICS)
 
 
-def digest_specs(profile: str) -> Tuple[MetricSpec, ...]:
+def host_specs(host_features: str = "") -> Tuple[MetricSpec, ...]:
+    """The host catalog narrowed to a comma-separated set of source columns.
+
+    Empty means the whole catalog. An unknown column name raises rather than being dropped: a typo
+    that silently removes a series would make the next measurement report a worse detector, and the
+    cause — a misspelled setting — would be invisible in the result.
+
+    Catalog order is preserved regardless of the order the names are given in, so the rendered digest
+    is stable across deployments that list the same columns differently.
+    """
+    names = [part.strip() for part in (host_features or "").split(",") if part.strip()]
+    if not names:
+        return HOST_METRICS
+    by_source = {spec.source: spec for spec in HOST_METRICS}
+    unknown = [name for name in names if name not in by_source]
+    if unknown:
+        raise ValueError(
+            "unknown host feature %r (pick from %s)"
+            % (", ".join(unknown), ", ".join(by_source))
+        )
+    wanted = set(names)
+    return tuple(spec for spec in HOST_METRICS if spec.source in wanted)
+
+
+def digest_specs(profile: str, host_features: str = "") -> Tuple[MetricSpec, ...]:
     """The metric catalog a digest profile reads.
 
     The catalogs live here because they describe what a metric *is*; this maps a deployment's profile
@@ -321,22 +345,25 @@ def digest_specs(profile: str) -> Tuple[MetricSpec, ...]:
     if profile == "service":
         return DEFAULT_METRICS
     if profile == "host":
-        return HOST_METRICS
+        return host_specs(host_features)
     raise ValueError("unknown digest profile %r (service|host)" % (profile,))
 
 
-def baseline_keys(profile: str) -> Tuple[str, ...]:
+def baseline_keys(profile: str, host_features: str = "") -> Tuple[str, ...]:
     """The baseline keys a profile accumulates.
 
     A tracker built with the service keys silently ignores host metrics: `observe` looks up each key
     in the window's metrics, finds none, and appends nothing. The window then renders "no baseline"
     forever, every request is identical, the Laya cache returns one answer, and the domain looks
     undetectable when the fault is in the wiring.
+
+    It follows `host_features` for the same reason: a tracker keeping keys the window does not carry
+    is the same bug one column narrower.
     """
     if profile == "service":
         return BASELINE_KEYS
     if profile == "host":
-        return HOST_BASELINE_KEYS
+        return tuple(spec.key for spec in host_specs(host_features))
     raise ValueError("unknown digest profile %r (service|host)" % (profile,))
 
 

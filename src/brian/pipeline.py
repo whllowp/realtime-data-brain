@@ -134,13 +134,13 @@ class Pipeline:
         self.baselines = baselines if baselines is not None else BaselineTracker(
             window=settings.window.baseline_windows,
             long_window=settings.window.baseline_windows_long,
-            keys=baseline_keys(settings.digest.profile),
+            keys=baseline_keys(settings.digest.profile, settings.digest.host_features),
         )
         self.windower = Windower(
             size_s=settings.window.size_s,
             slide_s=settings.window.slide_s,
             allowed_lateness_s=settings.window.allowed_lateness_s,
-            specs=digest_specs(settings.digest.profile),
+            specs=digest_specs(settings.digest.profile, settings.digest.host_features),
             min_events=settings.window.min_events,
         )
         self.counters = Counters()
