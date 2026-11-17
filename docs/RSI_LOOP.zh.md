@@ -727,6 +727,64 @@ smd-machine-2-2 rolling K=100 n=314  27      0.089   0.085   causal
 - **读者的可部署形态是排序规则，不是概率门限。** 这不是精度问题，是平稳性问题：一条记录内部电平摆动 0.4，任何常数都会被漂移吃掉。
 - **今天的流水线还表达不了这个规则。** `judge()` 是无状态的，读者只能吐一个概率，交给 `apply_gate` 与固定的 `anomaly_probability` 比较。要让上面那张表变成产品行为，需要一个**按服务维护滚动窗口的门限**（`Pipeline`/`Evaluator` 各一份状态），这是下一轮的工作，已写进第 6 节。
 
+### 3.21 把"最近 K 个窗口的前 10%"变成产品行为，然后被自己的一条规则挡下
+
+3.20 节的结论是"能用的形态是排序"，可当时的代码只会吐电平。这一节把排序做进产品，并让循环去评判它。
+
+**实现（`src/brian/scoring.py`）**：`RollingWindow(size, min_samples=ROLLING_MIN_SAMPLES)` 按服务维护 `deque`，`rank(service, score)` 先入队再算 `sum(v <= score) / len(trail)`——窗口里最响的那个得到 1.0，于是门限的 `anomaly_probability=0.90` 变成一句"比最近九成的窗口都响"。历史不足 `min_samples`（默认 10）时返回 `None`，`judge()` 退回电平，`raw["reported_as"]` 如实写 `"level"` 还是 `"rank"`。状态是**传进去的**，不是模块级全局：`Pipeline` 持有一份（`digest.rolling_window > 0` 时才建），`Evaluator.run()` 每次调用新建一份——"两条记录是两次部署，不是一段历史"。设置面：`digest.rolling_window` / `BRIAN_DIGEST_ROLLING_WINDOW`，默认 0（关），关掉时渲染与行为逐字节不变。
+
+**候选 `host-rolling-rank`** 是一份四设置项的补丁：`digest.scoring=auto`、`digest.rolling_window=100`、`gate.anomaly_probability=0.90`、`gate.notify_probability=0.90`。（这里写 `auto` 而不是 `deviation`：在主机流上两者解析成同一个读者，本轮测量完全一样；但导出 `deviation` 会把读者一起发给服务域的文本，而那段文本从没验过。候选应当导出"在这条流上等价的、更小的"那份配置。）
+
+```
+candidate              recall@b   fpr@b   tok/rep   tok/win evidence verdict
+baseline                  0.060   0.072      3350    3328.6     100% -
+host-rolling-rank         0.224   0.091      3358     435.7     100% reject
+  shipped threshold  baseline            recall 1.000  alerts/1k 1000  fpr 1.000
+  shipped threshold  host-rolling-rank   recall 0.216  alerts/1k   89  fpr 0.089
+x host-rolling-rank  the recorded configuration would page on fewer failures than the cut
+                     the budget rule already computes: shipped recall 0.216 against 0.224
+                     at the 10% budget
+```
+
+**这一行是错的，而且错在"规则的对象"上。** 候选把预算内召回从 0.060 提到 0.224（3.7 倍），每窗口 token 从 3328.6 降到 435.7（−87%），上线态误报 0.089。它被拒的唯一理由是：记录下来的 0.90 切点拿到 0.216，而循环自己扫出的最优切点拿到 0.224——**差 0.008，占免费切点的 3.6%**。3.6 节的 `operational` 回归规则本来是要挡"拿沉默换钱"（`anomaly-p-40`：上线态 0.007 对预算切点 0.060，差 88%），它被写成了"`not beats_own_cut(trial)`"这种**两值**判定，于是把 3.6% 的差距和 88% 的差距当成同一件事。
+
+修法是给它一个尺寸：`own_cut_shortfall(measurement)` 返回"记录配置相对免费切点让出了多大比例的召回"，规则改为**只有让出量超过 `operational_tolerance`（默认 0.10）才算回归**，且基线本身在容差内（即这次候选是引入短差的一方）。同时删掉了阅读 `decide()` 时发现的一处**逐字重复的 `silence` 分支**（同一段判断写了两遍）。重跑后同一份测量被判 `accept quality`。
+
+**但"被接受"立刻暴露了第二个问题，这次是我自己的验证抓到的。** 把版本文件里的导出原样加载（`BRIAN_DIGEST_SCORING=deviation`、`BRIAN_GATE_ANOMALY_P=0.9`、`BRIAN_GATE_NOTIFY_P=0.9`）再跑一次服务域合成套件：
+
+```
+recall              0.625  (95% CI [0.3057, 0.8632])
+false positive rate 0.000
+  recall                 0.625  (FAIL)
+  ! recall=0.625 does not meet the bar (0.85)
+```
+
+默认配置下同一条套件是 **0.875**。原因不是读者也不是排序，而是**同一个数字被两种量纲共用**：在排序量纲上 `0.90` 是"进最近的前一成"，在概率量纲上 `0.90` 是"几乎确定"。补丁把排序的门限写进了 `anomaly_probability`，于是在服务域把告警门槛从 0.5583 抬到 0.90，召回掉了 0.25。这正是边界 13 说的"补丁里可以藏一个坏的一半"——只是这次藏的不是候选的一半，而是**导出被搬到另一个域时**的一半。
+
+修法是把量纲做成显式的：新增 `gate.rank_probability`（默认 0.90，环境变量 `BRIAN_GATE_RANK_P`）。`apply_gate` 不再问配置，而是问答案：`result.raw["reported_as"] == "rank"` 时用 `rank_probability` 当存在门限与通知门限，否则用 `anomaly_probability`/`notify_probability`。补丁相应改成 `digest.scoring=auto`、`digest.rolling_window=100`、`gate.rank_probability=0.90`——**不再碰那两个概率门限**，于是同一个部署可以同时承载两个域。验证：同一份导出下服务域回到 **0.875 / 0.000**，SMD 上的测量数字一位不变（排序量纲下存在门限与通知门限同值，行为与之前完全相同）。
+
+一个附带的语义后果要写下来：排序量纲下 `normal_probability=0.35` 也变成分位，所以"确信正常"意味着"落在最近三分之一里"，而不是"概率低于 0.35"。这是合理的（漂移流里中位数的窗口确实谈不上确信正常），但它和 `anomaly_probability` 共用字段名的做法一样，都属于"同一个名字、两种量纲"，只能靠这条文档和 `raw` 里的 `reported_as` 提醒使用者。
+
+最终记录（`var/evolve/round-20261117T223614Z.json`、`var/evolve/versions/v011.json`）：
+
+```
+digest.scoring = 'auto', digest.rolling_window = 100, gate.rank_probability = 0.9
+export BRIAN_DIGEST_SCORING=auto; BRIAN_DIGEST_ROLLING_WINDOW=100; BRIAN_GATE_RANK_P=0.9
+rollback: unset BRIAN_DIGEST_SCORING  unset BRIAN_DIGEST_ROLLING_WINDOW  unset BRIAN_GATE_RANK_P
+
+confusion tp 29 fp 79 tn 615 fn 105     shipped recall 0.216  fpr 0.114  precision 0.269
+reports 138   tokens/report 3355.9   tokens/window 488.5
+recall@10% 0.2239   fpr@10% 0.0908   cuts: 1-6 0.89, 2-2 0.91
+```
+
+与上面那张"被拒"的表相比，预算内召回与误报（0.224 / 0.091）完全一致——排序量纲没变——只有**上线态**那一列从 74 个误报变成 79 个、报告数从 123 变成 138：因为导出不再把概率门限抬到 0.90，只有排序门限在起作用。差的这几个窗口出在分位并列与 0.90 边界上，属于噪声量级，但两个数都如实记下来，不挑好看的那个。
+
+三点收束：
+
+- **容差不是放松，是把"比例"写进规则。** 0.10 是判断不是测量（和 `deploy_fpr_tolerance=0.005` 同类），它唯一的依据是"样本内拟合的切点不可能恰好最优"；边界 18 已经说过，这类常数要显式承认。
+- **排序一旦进了产品，`anomaly_probability` 的含义就变了。** 0.90 不再表示"概率 90%"，而是"比最近 K 个窗口里的九成都响"。这个语义切换没有改字段名，只在 `raw` 与设置项的 docstring 里说明——这是本轮最容易被误读的一处。
+- **冷启动仍走电平。** 一条新记录的窗口数不足 `min_samples` 时，`reported_as` 是 `"level"`，行为与 3.20 之前完全一致；差别只在累积够历史之后。
+
 ---
 
 ## 4. 分级：为什么是 L2，不是 L3
@@ -773,6 +831,10 @@ missing for the next level
 22. **3.19 的格子是"最强窗口"上的可读性，不是部署流行度。** 样本按打印出的最大偏离均衡挑选（每类 100 个），所以在自然分布上引擎的数字会更低（3.18 的 0.517 / 0.299 对 3.19 的 0.6062 / 0.4704）。引用时必须带上样本口径；n≈180 时 AUC 标准误约 0.045，格子中大部分数值落在 ±2σ 内。
 23. **"换问句就跳 0.17"说明这条流水线的答案由提示词决定的那一部分大于状态贡献的那一部分。** 这不是说改问句能修好它——本轮的三个问句没有一个把四个臂都拉起来；它说的是在本仓库当前这台上，主机状态的边际值不值得再调提示词，值得的是换裁决者（`auto`）。
 24. **`auto` 是分工，不是改进。** 它把主机状态交给读者、服务状态留给模型，实测在服务路径上逐位不变、在 SMD 流上等同于 `deviation`。它没有提高任何一条流的召回，也不构成"主机检测已解决"。
+25. **排序一进产品，`anomaly_probability` 的含义就变了，而字段名没变。** 3.21 节把 `digest.rolling_window>0` 时的答案改成分位（0.90 = "比最近 K 个窗口里的九成都响"），语义切换只写在 `raw["reported_as"]` 和设置项的 docstring 里。任何按"概率 90%"读这个数字的外部消费者都会读错，而本仓库没有能强制这一点的接口。
+26. **`operational_tolerance = 0.10` 是判断。** 依据是"样本内拟合的切点不可能恰好最优"，不是扫描出来的；它把 3.21 节那个 3.6% 的短差从"回归"改成"落在容差内"，换任何 0.05–0.2 的值，本轮结论都一样，但未来某个候选的判决会随它翻转。
+27. **排序规则只在累积够 `min_samples`（默认 10）个窗口后才生效。** 一条新记录的前 9 个窗口仍按电平判（`reported_as="level"`），所以"上线即用排序"这句只在稳态成立；冷启动段的可比性没有被单独测量。
+28. **一个数字不能同时是概率和分位。** 3.21 节把这条踩实了两次：补丁把排序门限写进 `anomaly_probability` 后，服务域召回从 0.875 掉到 0.625；修法是新增 `gate.rank_probability` 并让 `apply_gate` 按 `raw["reported_as"]` 选门限。字段名没有变，量纲随答案走——任何把 `anomaly_probability` 当"唯一存在门限"读的外部消费者，在排序部署上都会读错。
 
 ---
 
@@ -782,7 +844,7 @@ missing for the next level
 2. **（3.18 已完成）逐窗分层做完了，答案是一个偏置。** 改名、放大、抹平三种替换都指向同一件事：引擎在这类文本上不读信息。因此"继续在候选目录里调参"这条路被关闭——下一个动作不是试配置，而是**改喂法**。
 3. **（3.19 已完成）"换措辞能不能救"已被五渲染 × 两问句回答：不能。** 同一批主机数字渲染成五种形状、问两个问题，四臂横跨 0.17–0.67 且方向在两条记录之间翻转，控制组（无数字文本）精确落在 0.5000。于是落地的不是新渲染，而是分工：`digest.scoring="auto"` 按 profile 选裁决者（主机 → 确定性读者，服务 → 模型）。由此剩下的是一条**产品决策**而非实验：主机状态在线上是否交给读者，以及是否接受它在 10% 误报预算下的 0.142 召回（3.12、3.19 的边界 24）。
 4. **把 `--rejudge` 变成每次改规则的固定动作。** 3.16 节第一次真实用上它（`deploy` → `recall`，判决不变），证明这条审计轨迹有用；但它还靠人记得跑。下一步是让"改了 `EvolveRules` 就重审全部历史轮次"成为一条检查（CI 或 `brian evolve --audit`），结果写进账本。
-5. **（3.20 已完成）读者切点的"标定"问题被换成了"平稳性"问题。** 不是给每台主机各选一个常数，而是发现常数在这条流上不可用：记录内部电平摆动 0.4、类别均值差 0.03，所以固定切点在时间上不迁移。下一步是把排序规则接进产品——按服务维护一个滚动窗口的门限（`Pipeline` 与 `Evaluator` 各一份状态，`digest.scoring=deviation` 时生效，K 与预算可配），并把 3.20 的表作为它的验收数字。
+5. **（3.20 / 3.21 已完成）读者切点的"标定"问题被换成了"平稳性"问题。** 不是给每台主机各选一个常数，而是发现常数在这条流上不可用：记录内部电平摆动 0.4、类别均值差 0.03，所以固定切点在时间上不迁移。3.21 节把排序规则接进了产品（`RollingWindow` + `digest.rolling_window`，`Pipeline`/`Evaluator` 各一份状态），候选 `host-rolling-rank` 被接受：预算内召回 0.060 → 0.224，每窗口 token −87%。剩下的仍是产品决策：**要不要在生产上把主机状态交给读者**，以及上线后谁来监控它的漂移（这条规则会随流量自我调整，所以"告警率突然上升"可能是流量变了而不是故障变了）。
 6. **真模型校准**：配 API key 后重跑一轮，把 `coverage` 与真实解释质量对比，看这个代理到底代理了什么。
 7. **让 `apply` 真生效**（L3 的唯一缺口）：配置热加载 + 自动回滚窗口，才够格说 L3。
 8. **让 `Imp` 可变**（L4）：候选目录由循环根据账本自己生成。3.12 节已经把"提议的形状"放宽过一次（单字段 → 补丁），那是这一方向上安全的一小步；再往前就需要更强的验证器，否则就是自证循环的教科书案例。

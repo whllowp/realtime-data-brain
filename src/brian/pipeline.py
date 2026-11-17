@@ -56,7 +56,7 @@ from .contracts import (
 from .laya.gate import GateOutcome, apply_gate
 from .laya.client import LayaClient, LayaError
 from .llm.rca import RcaEngine
-from .scoring import judge
+from .scoring import RollingWindow, judge
 from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 from .topics import Topic
 
@@ -145,6 +145,13 @@ class Pipeline:
             min_events=settings.window.min_events,
         )
         self.counters = Counters()
+        #: Per-service history behind `digest.rolling_window`. Owned here rather than in `scoring`
+        #: because two evaluations running in one process must not share a window: the second one's
+        #: first windows would inherit the first one's drift.
+        self.rolling: Optional[RollingWindow] = (
+            RollingWindow(settings.digest.rolling_window)
+            if settings.digest.rolling_window > 0 else None
+        )
         #: Bounded per-service event buffer, handed to System 2 as raw context. Bounded on
         #: purpose: this is a stream, and an unbounded buffer is a slow memory leak that only
         #: shows up in production.
@@ -231,7 +238,7 @@ class Pipeline:
         self.counters.digests += 1
 
         try:
-            result = judge(digest, self.settings, self.laya)
+            result = judge(digest, self.settings, self.laya, self.rolling)
         except LayaError as exc:
             # The engine is unreachable. Do not invent a verdict: dead-letter the digest with the
             # reason so it can be re-judged from the events once Laya is back. The memory makes

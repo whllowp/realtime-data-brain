@@ -20,7 +20,9 @@ from brian.contracts import Digest, Lineage, Routing
 from brian.laya.client import LayaResult
 from brian.scoring import (
     CROSSOVER_DEVIATION,
+    ROLLING_MIN_SAMPLES,
     SCORING_MODES,
+    RollingWindow,
     deviation_probability,
     deviation_result,
     deviation_score,
@@ -115,7 +117,51 @@ def test_the_reader_answers_the_detection_question_and_claims_nothing_else():
     assert result.routing.model == "deviation-reader"
     assert result.latency_ms == 0.0
     assert result.raw["scoring"] == "deviation"
+    assert result.raw["reported_as"] == "level"
     assert "category" in result.raw["answers_absent"]
+
+
+def test_the_rank_says_where_the_score_sits_in_its_own_recent_history():
+    window = RollingWindow(5, min_samples=3)
+    assert window.rank("svc-a", 0.10) is None          # nothing to rank against yet
+    assert window.rank("svc-a", 0.20) is None
+    assert window.rank("svc-a", 0.30) == pytest.approx(1.0)     # loudest thing yet seen
+    assert window.rank("svc-a", 0.05) == pytest.approx(0.25)    # lowest of the four
+    assert window.rank("svc-a", 0.25) == pytest.approx(0.8)     # only 0.30 is louder than it
+
+
+def test_the_window_forgets_what_fell_out_of_it():
+    window = RollingWindow(2, min_samples=1)
+    window.rank("svc-a", 0.90)                          # the loudest score the system ever saw
+    window.rank("svc-a", 0.10)
+    window.rank("svc-a", 0.20)                          # 0.90 has just been evicted
+    rank = window.rank("svc-a", 0.30)
+    assert rank == pytest.approx(1.0)   # a rank that still remembered 0.90 would say 0.5 here
+
+
+def test_two_services_do_not_rank_against_each_other():
+    window = RollingWindow(5, min_samples=1)
+    window.rank("svc-a", 0.10)
+    assert window.rank("svc-b", 0.10) == pytest.approx(1.0)  # first sample of its own history
+
+
+def test_a_window_size_of_zero_is_a_configuration_error_not_a_silent_noop():
+    with pytest.raises(ValueError):
+        RollingWindow(0)
+
+
+def test_the_reader_reports_a_rank_only_once_there_is_enough_history():
+    settings = load_settings().with_overrides(
+        digest=dataclasses.replace(load_settings().digest, scoring="deviation"))
+    digest = _digest({"cpu": _entry(delta=1.5)})
+    window = RollingWindow(50)                      # ROLLING_MIN_SAMPLES worth of history needed
+    first = judge(digest, settings, _Exploding(), window)
+    assert first.raw["reported_as"] == "level"      # a rank of one sample is not a rank
+    for _ in range(ROLLING_MIN_SAMPLES):
+        judge(digest, settings, _Exploding(), window)
+    later = judge(digest, settings, _Exploding(), window)
+    assert later.raw["reported_as"] == "rank"
+    assert later.raw["window"] == 50
 
 
 def test_a_deterministic_reading_costs_no_tokens_and_no_gpu():

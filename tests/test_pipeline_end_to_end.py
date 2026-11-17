@@ -15,6 +15,7 @@ real checkpoint judges well is a separate question, answered by `brian eval`.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
@@ -256,6 +257,15 @@ def test_a_contract_violation_is_routable_rather_than_fatal() -> None:
 # --------------------------------------------------------------------------------------
 # the baseline
 # --------------------------------------------------------------------------------------
+
+
+def test_a_rolling_window_is_created_only_when_the_setting_asks_for_one() -> None:
+    settings = _settings()
+    assert _pipeline(FakeLaya(), settings).rolling is None
+    wider = settings.with_overrides(
+        digest=dataclasses.replace(settings.digest, rolling_window=8))
+    rolling = _pipeline(FakeLaya(), wider).rolling
+    assert rolling is not None and rolling.size == 8
 
 
 def test_a_window_is_judged_against_history_and_never_against_itself() -> None:

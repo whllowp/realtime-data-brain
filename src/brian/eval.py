@@ -44,7 +44,7 @@ from .contracts import Severity
 from .demo import LabeledWindow
 from .laya.client import LayaClient, LayaError
 from .laya.gate import apply_gate
-from .scoring import judge
+from .scoring import RollingWindow, judge
 
 from .state import BaselineTracker, Windower, baseline_keys, build_digest, digest_specs
 
@@ -350,6 +350,12 @@ class Evaluator:
 
     def run(self, windows: Sequence[LabeledWindow], warmup: int = 0,
             on_window: Optional[Callable[[WindowScore], None]] = None) -> EvalReport:
+        # One history per `run`, not per `Evaluator`: two recordings evaluated in sequence are two
+        # separate deployments, and a window carried across them would rank with a stranger's past.
+        rolling: Optional[RollingWindow] = (
+            RollingWindow(self.settings.digest.rolling_window)
+            if self.settings.digest.rolling_window > 0 else None
+        )
         baselines = BaselineTracker(
             window=self.settings.window.baseline_windows,
             long_window=self.settings.window.baseline_windows_long,
@@ -402,7 +408,7 @@ class Evaluator:
                 digest_text=digest.interpretation,
             )
             try:
-                result = judge(digest, self.settings, self.laya)
+                result = judge(digest, self.settings, self.laya, rolling)
                 outcome = apply_gate(digest, result, self.settings.gate, calibrator=self.calibrator)
                 decision = outcome.decision
                 score.predicted_anomaly = decision.is_anomaly

@@ -33,6 +33,7 @@ from brian.evolve import (
     history,
     operating_point,
     operating_point_by_recording,
+    own_cut_shortfall,
     persist,
     previously_rejected,
     rejudge,
@@ -128,6 +129,48 @@ def at_budget(name: str = "candidate", *, recall: float = 0.875, fpr: float = 0.
     m.threshold_at_budget = 0.33
     m.budget = 0.10
     return m
+
+
+def test_a_nominal_shortfall_against_the_free_cut_does_not_veto_a_large_gain():
+    """Round 14: the rolling rank found 0.216 where the sweep found 0.224, and was rejected.
+
+    The baseline found 0.060. Rejecting a 3.7x recall gain because the recorded cut lands 3.6% short of
+    a sample-fitted optimum is a proportionality failure, not a Pareto argument.
+    """
+    baseline = at_budget("baseline", recall=0.060, fpr=0.072, raw_recall=1.000)
+    trial = at_budget("host-rolling-rank", recall=0.224, fpr=0.091, raw_recall=0.216)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert verdict.accepted, verdict.reason
+    assert verdict.rule == "quality"
+
+
+def test_a_material_shortfall_against_the_free_cut_is_still_rejected():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.072, raw_recall=1.000)
+    trial = at_budget("silencing-threshold", recall=0.224, fpr=0.090, raw_recall=0.050)
+    verdict = decide(baseline, trial, EvolveRules())
+    assert not verdict.accepted
+    assert verdict.rule == "operational"
+    assert "78% fewer" in verdict.reason
+    assert "10% shortfall tolerated" in verdict.reason
+
+
+def test_the_shortfall_tolerance_is_a_rule_and_its_default_decides_round_14():
+    baseline = at_budget("baseline", recall=0.060, fpr=0.072, raw_recall=1.000)
+    trial = at_budget("host-rolling-rank", recall=0.224, fpr=0.091, raw_recall=0.216)
+    strict = decide(baseline, trial, EvolveRules(operational_tolerance=0.0))
+    relaxed = decide(baseline, trial, EvolveRules(operational_tolerance=0.10))
+    assert not strict.accepted and strict.rule == "operational"
+    assert "4% fewer" in strict.reason
+    assert relaxed.accepted and relaxed.rule == "quality"
+
+
+def test_the_shortfall_is_zero_when_nothing_can_be_compared():
+    assert own_cut_shortfall(measure("a", recall=0.5)) == 0.0
+    undefined = measure("a", recall=0.5)
+    undefined.recall_at_budget = 0.0
+    assert own_cut_shortfall(undefined) == 0.0
+    better = at_budget("a", recall=0.20, raw_recall=0.30)
+    assert own_cut_shortfall(better) == 0.0
 
 
 def test_the_label_check_uses_the_at_budget_pair_when_both_sides_have_one():

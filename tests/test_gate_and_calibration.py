@@ -21,7 +21,7 @@ from brian.calibration import (
     log_loss,
 )
 from brian.config import GateThresholds
-from brian.contracts import DecisionAction, Digest, Severity, Verdict
+from brian.contracts import DecisionAction, Digest, Routing, Severity, Verdict
 from brian.laya.client import LayaResult
 from brian.laya.gate import apply_gate, calibrate_anomaly_probability
 from brian.laya.qcatalog import (
@@ -168,6 +168,45 @@ def _routing():
     from brian.contracts import Routing
 
     return Routing(model="typed-decisions", reason="explicit model='typed-decisions'")
+
+
+def _rank_answer(rank: float, severity: float = 3.0) -> LayaResult:
+    """A result from the deterministic reader: the number is a rank, not a probability."""
+    base = _answer(rank, 0.9, severity=severity)
+    return LayaResult(
+        answers=base.answers,
+        routing=Routing(model="deviation-reader", reason="deterministic digest scoring"),
+        latency_ms=0.0,
+        raw={"scoring": "deviation", "deviation": 0.5, "reported_as": "rank", "window": 100},
+    )
+
+
+def test_a_rank_is_judged_by_the_rank_bar_not_the_probability_bar() -> None:
+    # 0.60 is above `anomaly_probability` (0.50) but far below the rank bar (0.90). Reading it as a
+    # probability would page on six windows in ten; as a rank it is the middle of the recent past, which
+    # is recorded (`uncertain_normal`) rather than declared healthy — `normal_probability` becomes a
+    # quantile too, so "confidently normal" means "in the quiet third of the recent past".
+    from brian.laya.gate import apply_gate as gate
+
+    outcome = gate(_digest(), _rank_answer(0.60), _policy(rank_probability=0.90))
+    assert outcome.decision.verdict is Verdict.NORMAL
+    assert outcome.decision.action is DecisionAction.OBSERVE
+    assert outcome.rule == "uncertain_normal"
+
+
+def test_a_rank_in_the_top_tenth_pages_at_once_because_a_rank_has_no_notify_band() -> None:
+    outcome = apply_gate(_digest(), _rank_answer(0.95), _policy(rank_probability=0.90))
+    assert outcome.decision.verdict is Verdict.ANOMALY
+    assert outcome.decision.action is DecisionAction.PAGE_HUMAN
+
+
+def test_a_probability_answer_ignores_the_rank_bar() -> None:
+    # The same 0.60 with no `reported_as` is a probability: above the 0.50 existence bar, below the
+    # 0.65 notify bar, so it is observed rather than dropped.
+    outcome = apply_gate(_digest(), _answer(0.60, 0.9), _policy(rank_probability=0.99))
+    assert outcome.decision.verdict is Verdict.ANOMALY
+    assert outcome.decision.action is DecisionAction.OBSERVE
+    assert outcome.rule == "anomaly_below_notify"
 
 
 def test_confident_severe_anomaly_pages_a_human() -> None:

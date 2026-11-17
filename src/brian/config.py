@@ -219,6 +219,13 @@ class GateThresholds:
     #: P(anomaly) at or above this is recorded as an alert-worthy anomaly even when the
     #: class/severity confidence is low.
     notify_probability: float = 0.5583
+    #: The bar for an answer that is a *rank* inside the recent history rather than a probability
+    #: (`digest.scoring` resolves to the deviation reader and `digest.rolling_window` is non-zero). The
+    #: two scales cannot share one number: 0.90 on a probability means "almost certainly", on a rank it
+    #: means "louder than nine tenths of the recent past", and round 14 measured the cost of confusing
+    #: them — exporting the rank's 0.90 into `anomaly_probability` dropped the service suite's recall from
+    #: 0.875 to 0.625. A rank carries no probability, so this bar also stands in for the notify bar.
+    rank_probability: float = 0.90
     #: Confidence needed to act on the *category and severity* without System 2.
     confidence_auto: float = 0.75
     #: Below this the judgement is too weak to route at all -> deep analysis.
@@ -347,9 +354,24 @@ class DigestSettings:
 
     scoring: str = "model"
 
+    #: Report the reader's answer as a rank inside the last this-many windows instead of a level.
+    #:
+    #: Measured before it was added: the reader's level drifts inside a single SMD recording — machine
+    #: 1-6 moves its median score 0.846 -> 0.434 -> 0.768 across the four quarters of one file while
+    #: the fault/normal separation in the mean is about 0.03 — so a fixed cut on the level is a bet on
+    #: the drift. "Top 10% of the last 100" reached 0.261 recall at 0.016 false positives on that host
+    #: against 0.128 at 0.095 for the in-sample cut, and it is causal, so those numbers are out of
+    #: sample by construction (`docs/RSI_LOOP.zh.md` 3.20). Zero keeps the level (the shipped form).
+    #:
+    #: Nothing else in the pipeline changes: the gate still compares one number with
+    #: ``anomaly_probability``, except that ``0.90`` now means "louder than 90% of the recent past".
+    rolling_window: int = 0
+
     def to_dict(self) -> Dict[str, object]:
         return {"profile": self.profile, "host_features": self.host_features,
-                "scoring": self.scoring}
+                "scoring": self.scoring, "host_precision": self.host_precision,
+                "host_ratio_floor": self.host_ratio_floor,
+                "rolling_window": self.rolling_window}
 
 
 @dataclass
@@ -484,6 +506,7 @@ def load_settings() -> Settings:
         gate=GateThresholds(
             anomaly_probability=_float("BRIAN_GATE_ANOMALY_P", gate_defaults.anomaly_probability),
             notify_probability=_float("BRIAN_GATE_NOTIFY_P", gate_defaults.notify_probability),
+        rank_probability=_float("BRIAN_GATE_RANK_P", gate_defaults.rank_probability),
             confidence_auto=_float("BRIAN_GATE_CONF_AUTO", gate_defaults.confidence_auto),
             confidence_floor=_float("BRIAN_GATE_CONF_FLOOR", gate_defaults.confidence_floor),
             page_severity_rank=_int("BRIAN_GATE_PAGE_RANK", gate_defaults.page_severity_rank),
@@ -511,6 +534,7 @@ def load_settings() -> Settings:
             host_precision=_int("BRIAN_DIGEST_HOST_PRECISION", 2),
             host_ratio_floor=_float("BRIAN_DIGEST_HOST_RATIO_FLOOR", 0.0),
             scoring=_env("BRIAN_DIGEST_SCORING", "model") or "model",
+            rolling_window=_int("BRIAN_DIGEST_ROLLING_WINDOW", 0),
         ),
         calibration=CalibrationSettings(
             path=_env("BRIAN_CALIBRATION_PATH", DEFAULT_CALIBRATION_PATH) or DEFAULT_CALIBRATION_PATH,
@@ -534,6 +558,7 @@ ENV_VARS: Dict[Tuple[str, str], str] = {
     ("gate", "reuse_report_within_s"): "BRIAN_GATE_REUSE_REPORT_S",
     ("gate", "anomaly_probability"): "BRIAN_GATE_ANOMALY_P",
     ("gate", "notify_probability"): "BRIAN_GATE_NOTIFY_P",
+    ("gate", "rank_probability"): "BRIAN_GATE_RANK_P",
     ("gate", "confidence_auto"): "BRIAN_GATE_CONF_AUTO",
     ("gate", "confidence_floor"): "BRIAN_GATE_CONF_FLOOR",
     ("gate", "page_severity_rank"): "BRIAN_GATE_PAGE_RANK",
@@ -549,4 +574,5 @@ ENV_VARS: Dict[Tuple[str, str], str] = {
     ("digest", "host_precision"): "BRIAN_DIGEST_HOST_PRECISION",
     ("digest", "host_ratio_floor"): "BRIAN_DIGEST_HOST_RATIO_FLOOR",
     ("digest", "scoring"): "BRIAN_DIGEST_SCORING",
+    ("digest", "rolling_window"): "BRIAN_DIGEST_ROLLING_WINDOW",
 }

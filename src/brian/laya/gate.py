@@ -180,8 +180,18 @@ def apply_gate(digest: Digest, result: LayaResult, thresholds: GateThresholds,
     blast_radius = blast_answer.get("choice")
 
     # -- 1. is there an incident at all? --------------------------------------
+    # A rank and a probability are two scales, and one number cannot be both. When the reader reports
+    # "louder than nine tenths of the recent past", 0.5583 (the probability bar) would page on more than
+    # half of all windows; when the model reports a probability, 0.90 would page on almost nothing. The
+    # semantics travel with the answer (`raw["reported_as"]`), so the bar is chosen from it rather than
+    # from configuration order.
+    reported_as = (result.raw or {}).get("reported_as")
+    existence_bar = (
+        thresholds.rank_probability if reported_as == "rank" else thresholds.anomaly_probability
+    )
+    notify_bar = thresholds.rank_probability if reported_as == "rank" else thresholds.notify_probability
     is_anomaly = (
-        anomaly_probability is not None and anomaly_probability >= thresholds.anomaly_probability
+        anomaly_probability is not None and anomaly_probability >= existence_bar
     )
 
     # Confidence in the parts a *routing* decision rests on: the class and the severity. The
@@ -193,7 +203,7 @@ def apply_gate(digest: Digest, result: LayaResult, thresholds: GateThresholds,
     verdict = Verdict.ANOMALY if is_anomaly else Verdict.NORMAL
 
     if is_anomaly:
-        if anomaly_probability is not None and anomaly_probability < thresholds.notify_probability:
+        if anomaly_probability is not None and anomaly_probability < notify_bar:
             # Above the existence threshold but below the notify bar: a real but weak signal.
             # Recorded (so the threshold itself can be evaluated offline) and not surfaced.
             action = DecisionAction.OBSERVE
@@ -201,7 +211,7 @@ def apply_gate(digest: Digest, result: LayaResult, thresholds: GateThresholds,
             reasons.append(
                 "P(anomaly)=%.3f is at or above %.2f but below the notify bar of %.2f; "
                 "recorded for scoring, not raised"
-                % (anomaly_probability, thresholds.anomaly_probability, thresholds.notify_probability)
+                % (anomaly_probability, existence_bar, notify_bar)
             )
         else:
             severe_enough_to_page = (
@@ -274,7 +284,7 @@ def apply_gate(digest: Digest, result: LayaResult, thresholds: GateThresholds,
                 "rather than declared healthy"
                 % (
                     anomaly_probability if anomaly_probability is not None else -1.0,
-                    thresholds.anomaly_probability,
+                    existence_bar,
                     "unknown" if anomaly_confidence is None else "%.3f" % anomaly_confidence,
                 )
             )
@@ -368,6 +378,7 @@ def explain_thresholds(thresholds: GateThresholds) -> Dict[str, Any]:
         "exists": {
             "anomaly_probability": thresholds.anomaly_probability,
             "notify_probability": thresholds.notify_probability,
+            "rank_probability": thresholds.rank_probability,
         },
         "acts": {
             "confidence_auto": thresholds.confidence_auto,
