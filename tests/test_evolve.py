@@ -48,7 +48,7 @@ PERFECT = {"log_retention": 1.0, "signature_retention": 1.0,
 
 
 def measure(name: str = "candidate", *, recall: float = 0.875, fpr: float = 0.0,
-            tokens: float | None = 100.0, coverage=None) -> Measurement:
+            tokens: float | None = 100.0, coverage=None, auc_by_recording=None) -> Measurement:
     return Measurement(
         candidate=name,
         recall=recall,
@@ -61,6 +61,7 @@ def measure(name: str = "candidate", *, recall: float = 0.875, fpr: float = 0.0,
         coverage=dict(coverage if coverage is not None else PERFECT),
         trial_s=0.1,
         reasoner="offline",
+        auc_by_recording=dict(auc_by_recording or {}),
     )
 
 
@@ -840,6 +841,38 @@ def test_the_text_reader_takes_the_loudest_ratio_it_can_see():
     text = "CPU 0.19 (baseline 0.17, 1.07x). | load 1m 0.10 (baseline 0.07, 1.32x)."
 
     assert text_deviation(text) == pytest.approx(0.32)
+
+
+def test_the_engine_column_is_what_the_model_did_with_the_same_text(tmp_path):
+    """The ceiling is only useful next to the number it accuses.
+
+    Round 10 established the two readers agree on SMD (0.827/0.827), so the shortfall belongs to the
+    model; printing the model's own AUC on the same line is what makes that read off the table instead
+    of out of a document.
+    """
+    result = _round(tmp_path, accepted=True)
+    result.baseline.auc_by_recording = {"machine-1-6": 0.5166, "machine-2-2": 0.2986}
+    result.ceiling = {
+        "by_stream": {"machine-1-6": 0.8269, "machine-2-2": 0.5972},
+        "text_by_stream": {"machine-1-6": 0.8269, "machine-2-2": 0.5981},
+        "windows": 948,
+    }
+
+    table = format_round(result)
+
+    assert "engine" in table
+    assert "0.517" in table and "0.299" in table
+    assert "is the renderer's; a gap with the third is the model's" in table
+
+
+def test_a_measurement_carries_the_engine_auc_per_recording():
+    """A rate without its sample size is a rumour; an AUC per recording is the same rule."""
+    measurement = measure(auc_by_recording={"machine-1-6": 0.5166})
+
+    payload = measurement.to_dict()
+
+    assert payload["auc_by_recording"] == {"machine-1-6": 0.5166}
+    assert Measurement.from_dict(json.loads(json.dumps(payload))).auc_by_recording ==         {"machine-1-6": 0.5166}
 
 
 def test_the_table_shows_the_ceiling_beside_the_candidates(tmp_path):

@@ -304,6 +304,8 @@ class Measurement:
     """The cut each recording chose at the budget; empty when one cut served all of them."""
     at_budget_pooled: bool = False
     """True when a recording could not be swept and the pooled sweep was used instead."""
+    auc_by_recording: Dict[str, Optional[float]] = field(default_factory=dict)
+    """What the model itself scored on each recording, so the round table can show the gap it has to close."""
 
     @property
     def coverage_floor(self) -> float:
@@ -331,6 +333,7 @@ class Measurement:
             "threshold_at_budget": _round(self.threshold_at_budget, 6),
             "thresholds_at_budget": {k: _round(v, 6) for k, v in self.thresholds_at_budget.items()},
             "at_budget_pooled": self.at_budget_pooled,
+            "auc_by_recording": {k: _round(v, 6) for k, v in self.auc_by_recording.items()},
         }
 
     @classmethod
@@ -360,6 +363,7 @@ class Measurement:
             budget=float(payload.get("budget") or 0.0),
             thresholds_at_budget=dict(payload.get("thresholds_at_budget") or {}),
             at_budget_pooled=bool(payload.get("at_budget_pooled")),
+            auc_by_recording=dict(payload.get("auc_by_recording") or {}),
         )
 
 
@@ -693,12 +697,20 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
     counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
     latencies: List[float] = []
     score_groups: List[Tuple[str, List[Any]]] = []
+    auc_by_recording: Dict[str, Optional[float]] = {}
     for stream in streams:
         report = Evaluator(applied, laya=LayaClient(applied.laya)).run(stream.windows)
         for key, value in _tally(report).items():
             counts[key] += value
         latencies.extend(score.latency_ms for score in report.scores if score.latency_ms)
         score_groups.append((stream.name, list(report.scores)))
+        usable = [score for score in report.scores if score.predicted_probability is not None
+                  and score.predicted_anomaly is not None]
+        auc_by_recording[stream.name] = (
+            auc([score.predicted_probability for score in usable],
+                [bool(score.expected_anomaly) for score in usable])
+            if usable else None
+        )
 
     ledger, _traces, reasoner = cost_run(applied, streams)
     cap = applied.llm.max_context_events
@@ -734,6 +746,7 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
         budget=budget,
         thresholds_at_budget=operating.get("thresholds") or {},
         at_budget_pooled=bool(operating.get("pooled")),
+        auc_by_recording=auc_by_recording,
     )
 
 
@@ -1347,12 +1360,15 @@ def format_round(result: RoundResult) -> str:
         for name in sorted(by_stream):
             fields = by_stream[name]
             text = text_by_stream.get(name)
-            lines.append("  %-22s fields %-5s  text %-5s"
+            engine = (result.baseline.auc_by_recording or {}).get(name)
+            lines.append("  %-22s fields %-5s  text %-5s  engine %-5s"
                          % (name,
                             "n/a" if fields is None else "%.3f" % fields,
-                            "n/a" if text is None else "%.3f" % text))
+                            "n/a" if text is None else "%.3f" % text,
+                            "n/a" if engine is None else "%.3f" % engine))
         lines.append("  'fields' reads the MetricValue tree, 'text' reads only the characters the engine")
-        lines.append("  is given. A gap between them is the renderer's, and no cost change can move either.")
+        lines.append("  is given, 'engine' is what the model did with them. A gap between the first two")
+        lines.append("  is the renderer's; a gap with the third is the model's, and no cost change moves it.")
     lines.append("")
     lines.append("Interpretation: 'accept' means one measured configuration was better than another on this")
     lines.append("stream and lost nothing this evaluator can see. It is not a claim that the change is right")
