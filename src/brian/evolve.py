@@ -378,6 +378,16 @@ class Measurement:
     auc_by_recording: Dict[str, Optional[float]] = field(default_factory=dict)
     """What the model itself scored on each recording, so the round table can show the gap it has to close."""
 
+    recall_by_recording: Dict[str, Optional[float]] = field(default_factory=dict)
+    """At-budget recall on each recording separately (round 39).
+
+    The pooled number is one division: a change that lifts one host and lowers another can leave it
+    unchanged, and nothing in the record says which happened. This is filled from the sweep that already
+    runs per recording, so it costs no extra measurement.
+    """
+    fpr_by_recording: Dict[str, Optional[float]] = field(default_factory=dict)
+    """The false-positive rate of those same per-recording cuts."""
+
     promise: Optional[float] = None
     """The recall a reshaped candidate was meant to restore, carried so `decide()` can judge it (round 30).
 
@@ -462,6 +472,8 @@ class Measurement:
             "scored_at_free_cut": self.scored_at_free_cut,
             "free_cut_alert_rate": _round(self.free_cut_alert_rate, 4),
             "auc_by_recording": {k: _round(v, 6) for k, v in self.auc_by_recording.items()},
+            "recall_by_recording": {k: _round(v) for k, v in self.recall_by_recording.items()},
+            "fpr_by_recording": {k: _round(v) for k, v in self.fpr_by_recording.items()},
         }
 
     @classmethod
@@ -498,6 +510,8 @@ class Measurement:
             alerts_at_free_cut=payload.get("alerts_at_free_cut"),
             scored_at_free_cut=payload.get("scored_at_free_cut"),
             auc_by_recording=dict(payload.get("auc_by_recording") or {}),
+            recall_by_recording=dict(payload.get("recall_by_recording") or {}),
+            fpr_by_recording=dict(payload.get("fpr_by_recording") or {}),
             promise=payload.get("promise"),
             window=None if payload.get("window") is None else int(payload["window"]),
         )
@@ -570,6 +584,10 @@ def operating_point_by_recording(groups: Sequence[Tuple[str, Sequence[Any]]],
         result["thresholds"] = {name: result["threshold"]} if result["threshold"] is not None else {}
         result["recordings"] = 1
         result["pooled"] = True
+        result["by_recording"] = (
+            {name: {"recall": result["recall"], "fpr": result["fpr"],
+                    "positives": _positives(flat)}} if result["recall"] is not None else {}
+        )
         return result
 
     sweeps: List[Tuple[str, Dict[str, Optional[float]]]] = []
@@ -585,6 +603,7 @@ def operating_point_by_recording(groups: Sequence[Tuple[str, Sequence[Any]]],
 
     totals = {"tp": 0.0, "fp": 0.0, "positives": 0.0, "negatives": 0.0}
     thresholds: Dict[str, Optional[float]] = {}
+    by_recording: Dict[str, Dict[str, Optional[float]]] = {}
     for (name, sweep), (_n, scores) in zip(sweeps, readable):
         usable = [
             (float(score.predicted_probability), bool(score.expected_anomaly))
@@ -594,11 +613,20 @@ def operating_point_by_recording(groups: Sequence[Tuple[str, Sequence[Any]]],
         positives = sum(1 for _p, y in usable if y)
         negatives = len(usable) - positives
         cut = float(sweep["threshold"])  # type: ignore[arg-type]
-        totals["tp"] += sum(1 for p, y in usable if y and p >= cut)
-        totals["fp"] += sum(1 for p, y in usable if not y and p >= cut)
+        tp = sum(1 for p, y in usable if y and p >= cut)
+        fp = sum(1 for p, y in usable if not y and p >= cut)
+        totals["tp"] += tp
+        totals["fp"] += fp
         totals["positives"] += positives
         totals["negatives"] += negatives
         thresholds[name] = sweep["threshold"]
+        # Round 39: the same sweep, kept per recording. A pooled number cannot say whether a change helped
+        # both hosts or moved one while the other lost: the pooled rate is one division.
+        by_recording[name] = {
+            "recall": (tp / positives) if positives else None,
+            "fpr": (fp / negatives) if negatives else None,
+            "positives": positives,
+        }
     return {
         "budget": budget,
         "threshold": None,
@@ -608,7 +636,16 @@ def operating_point_by_recording(groups: Sequence[Tuple[str, Sequence[Any]]],
         "thresholds": thresholds,
         "recordings": len(readable),
         "pooled": False,
+        "by_recording": by_recording,
     }
+
+
+def _positives(scores: Sequence[Any]) -> int:
+    """Fault windows in one recording's scores — the denominator of its recall."""
+    return sum(1 for score in scores
+               if getattr(score, "predicted_probability", None) is not None
+               and getattr(score, "error", None) is None
+               and bool(score.expected_anomaly))
 
 
 def _round(value: Optional[float], digits: int = 4) -> Optional[float]:
@@ -949,6 +986,14 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
         alerts_at_free_cut=free.get("alerts"),
         scored_at_free_cut=free.get("scored"),
         auc_by_recording=auc_by_recording,
+        recall_by_recording={
+            name: (stats or {}).get("recall")
+            for name, stats in (operating.get("by_recording") or {}).items()
+        },
+        fpr_by_recording={
+            name: (stats or {}).get("fpr")
+            for name, stats in (operating.get("by_recording") or {}).items()
+        },
     )
 
 
@@ -1167,6 +1212,35 @@ def deployable(measurement: "Measurement", rules: "EvolveRules") -> bool:
     return beats_own_cut(measurement)
 
 
+def _replication_loss(baseline: Measurement, trial: Measurement,
+                      threshold: float) -> Optional[str]:
+    """The recording whose recall the candidate loses, when the pooled gain hides it (round 39).
+
+    A pooled at-budget recall is one division over both recordings' incidents. On SMD the two hosts are
+    not comparable — machine-2-2 sits below chance on the model's own score — so a change can lift the
+    recording with more incidents and lower the other while the pooled number rises. Reading that as a
+    detection gain reports a change nobody can deploy on both hosts.
+
+    `threshold` is the same significance bar a quality gain must clear, so a small jitter is not treated as
+    a loss and the rule cannot fire on a difference too small to have been an acceptance argument.
+    """
+    before = baseline.recall_by_recording or {}
+    after = trial.recall_by_recording or {}
+    shared = sorted(set(before) & set(after))
+    if len(shared) < 2:
+        return None
+    for name in shared:
+        old, new = before.get(name), after.get(name)
+        if old is None or new is None:
+            continue
+        if new < old - max(threshold, 1e-9):
+            return ("recall at the %.0f%% budget rises %.3f -> %.3f pooled, but %s falls %.3f -> %.3f: "
+                    "the gain belongs to the recordings that rose, so this is not a replicated one"
+                    % (100 * baseline.budget, baseline.recall_at_budget or 0.0,
+                       trial.recall_at_budget or 0.0, name, old, new))
+    return None
+
+
 def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
            veto: Optional[str] = None) -> Verdict:
     """Accept only a Pareto improvement: better on one axis, not worse on the other.
@@ -1181,6 +1255,11 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
     a threshold-only candidate — such a candidate leaves the at-budget curve identical because the
     loop sweeps its own cut, so before this branch the catalogue could propose thresholds forever and
     the labels would answer "no difference" every time.
+
+    A quality gain is checked for replication first (round 39, rule `replicate`): the pooled recall@b is
+    one division over every recording, so a candidate that lifts one recording and lowers another can
+    still raise it. `_replication_loss` names the recording that fell and the gain is refused as one
+    recording's improvement — the deployment runs on all of them.
 
     The label check reads the *at-budget* pair when both sides have one. A fixed absolute threshold on
     an uncalibrated answer is not a shared yardstick: on SMD every answer lands between 0.30 and 0.47,
@@ -1348,6 +1427,14 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
         and after_recall is not None
         and after_recall >= before_recall * (1.0 + rules.min_quality_gain)
     )
+    if quality_gain:
+        # A pooled gain is one division over every recording's incidents, so it can be one host's
+        # improvement (round 39: `host-features-3` lifts SMD's machine-2-2 from 0.037 to 0.220 and lowers
+        # machine-1-6 from 0.491 to 0.382 for a +5% pooled reading). The deployment runs on both, so the
+        # gain has to replicate before it is allowed to name itself one.
+        spread = _replication_loss(baseline, trial, rules.min_quality_gain)
+        if spread is not None:
+            return Verdict(trial.candidate, False, "replicate", spread)
     if before is None or after is None:
         # No report on one side means no alert on that side, so there is no bill to compare. That is
         # the normal case on a domain where the shipped threshold silences the detector: the whole cost
@@ -2073,6 +2160,23 @@ def format_round(result: RoundResult) -> str:
     lines.append("recall@b: best recall at <=%.0f%% false positives, the cut chosen per configuration, because"
                  % (100 * result.rules.fpr_budget))
     lines.append("an absolute threshold was calibrated on another domain and is not comparable here.")
+    split_rows = []
+    baseline_split = result.baseline.recall_by_recording or {}
+    for label, measurement in ([("baseline", result.baseline)]
+                               + [(candidate.name, m) for candidate, m, _v in result.trials]):
+        after = measurement.recall_by_recording or {}
+        names = sorted(set(baseline_split) & set(after))
+        parts = ["%s %.3f -> %.3f" % (name, baseline_split[name], after[name])
+                 for name in names
+                 if baseline_split.get(name) is not None and after.get(name) is not None]
+        if len(parts) >= 2:
+            split_rows.append("  %-20s %s" % (label, "  ".join(parts)))
+    if split_rows:
+        # The pooled column is one division over every recording's incidents, so it cannot say which one
+        # moved. Printed next to the table rather than on request, because a +5% pooled reading that is
+        # one host's is exactly the case a reader has no way to notice (round 39, boundary 86).
+        lines.append("  recall@b by recording:")
+        lines.extend(split_rows)
     for candidate, measurement, _verdict in [(None, result.baseline, None)] + list(result.trials):
         label = "baseline" if candidate is None else candidate.name
         if measurement.recall is None or measurement.fpr is None:

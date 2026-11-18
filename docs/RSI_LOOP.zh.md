@@ -2105,6 +2105,64 @@ SMD                    27    157     68 20        recall 0.507 at the 10% budget
 **边界 84：一次性的打印不是账；节省必须累加到读者会看的那张表上，否则它与"从未发生"不可区分。**
 
 
+## 3.46 池化数字是一次除法：一个 +5% 的增益可以只属于一台机器
+
+`recall_at_budget` 不是某一台机器的数字。它是把每条 recording 的 incident 合起来、命中数除一次，
+所以权重是各自的 incident 数。SMD 的 check 流上，在 force 的 v020 读作 **0.297**，拆开是
+**0.491**（machine-1-6）和 **0.037**（machine-2-2）——第二台的 incident 更多，pooled 的主角就是它。
+部署要同时跑在两台上，所以"pooled 涨了"这句话本身不构成检测增益。
+
+这一轮先证明它可以骗人，再把规则装上。探针（`var/probe_split39.py`）量了同一个流上的 baseline 与
+目录里的候选，分机器列 recall@b：
+
+```
+candidate              pooled   smd-machine-1-6   smd-machine-2-2
+baseline                0.297   0.491             0.037
+host-features-3         0.312   0.382             0.220
+```
+
+`host-features-3` 是目录里真实的一条：把 8 个特征砍到 3 个。它 pooled **+5.0%**，正是质量条要的幅度；
+代价是 machine-1-6 从 0.491 掉到 0.382，换来 machine-2-2 从 0.037 到 0.220。按 pool 判，它该被接受；
+按"两台都别变差"判，它是一台机器的改进加另一台机器的退步。
+
+规则装在两处。`Measurement` 现在记录 `recall_by_recording` / `fpr_by_recording`（`measure()` 从
+`operating_point_by_recording()` 的 `by_recording` 填入，`to_dict()/from_dict()` 往返），
+`decide()` 在 pooled 质量增益成立之后、两条质量接受出口之前调用 `_replication_loss()`：取
+`baseline` 与 `trial` 共有的 recording，少于两个不判，任何一台掉超过 `min_quality_gain` 就返回
+
+```
+recall at the 10% budget rises 0.297 -> 0.312 pooled, but smd-machine-1-6 falls 0.491 -> 0.382:
+the gain belongs to the recordings that rose, so this is not a replicated one
+```
+
+判成第四条规则 `replicate`。阈值刻意取与质量增益同一个 `min_quality_gain`：比这更小的抖动本来也不
+足以让候选被接受，规则不能在拒绝时用更严的尺子。
+
+实测一轮（`--catalogue`，`data/smd/stream-check.json`，记录
+`var/evolve/round-20261118T022739Z.json`）：`host-features-3` 量到 0.312，**reject**，理由是上面那句；
+同轮 `events-8`、`events-4`、`host-scoring-deviation`、`deviation-bar-free` 四条照样接受，分机器数字
+完全没动（0.491 / 0.037）。表后现在固定打印分机器行：
+
+```
+  recall@b by recording:
+  baseline             smd-machine-1-6 0.491 -> 0.491  smd-machine-2-2 0.037 -> 0.037
+  host-features-3      smd-machine-1-6 0.491 -> 0.382  smd-machine-2-2 0.037 -> 0.220
+```
+
+三点读法。**第一**，pooled 是一次除法，不是一次测量：读者看表时看到的是加权平均，权重藏在 incident
+数里，所以"哪一台动了"必须单独打印，否则一条 +5% 的接受可以是一台机器的故事。**第二**，复现要求是
+"不能更糟"，不是"必须更好"：规则只在某台掉过阈值时拒绝，一台涨一台不动仍然可以接受——否则异构域上
+任何改动都会被拒，而阈值本来就只在其中一台上校准过。**第三**，历史记录追不回来：`--audit` 对旧记录
+仍是 7 moved / 18 relabelled，没有因为新规则多翻一条，因为那些记录没有分机器字段，`_replication_loss`
+在它们身上无处下手。这不是漏洞而是教训的复述——数字没写进 artefact，就没有第二次机会被查（边界 86）。
+
+**边界 85：池化增益必须在每条 recording 上复现，否则它就是一条 recording 的改进，而部署跑在所有
+recording 上。** "整体变好"是一个除法结果，不是一条可以被部署的陈述。
+
+**边界 86：循环对 recording 取平均的任何数字，都必须按 recording 打印。** 否则读者看得见平均、看不见
+权重，也就无法判断是哪一台在移动。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2271,3 +2329,9 @@ missing for the next level
 26. 让替换列表进入提案的**下一轮**：现在它只被打印，没有被用来做什么。可以把它当作"这一轮实际问到了
     多少新问题"的分母——如果一整轮的 8 条全是替换，说明提案空间的边界正在被拒绝填满，机制该换空间了，
     而不是继续在同一圈里换名字。
+
+27. **让复现阈值按域记录，而不是全局一个数。** 当前 `_replication_loss` 用 `min_quality_gain`
+    （5%）当"掉多少算掉"。异构域里一台机器的 5% 也许是可接受的权衡（它本来就低于 chance，见
+    机器-2-2 的 0.037），机械地拒绝会让循环在一半的机器上永远不动。做法：把容忍度写进版本文件与
+    round 记录，拒绝时同时写下"哪一台掉了多少、容忍度是多少"，让 `--audit` 能复核当年那条拒绝是否
+    仍然成立。
