@@ -498,6 +498,22 @@ def _ceiling_entry(entry: Any, flag: str) -> Tuple[str, Optional[float], bool]:
     return name.strip(), value, False
 
 
+def _drift_cap(args: Any, drift: Mapping[str, Any]) -> Optional[float]:
+    """The ceiling-drift cap this check should use, arming itself only when the ledger can satisfy it.
+
+    Round 69: asking for a number is explicit and always honoured. The *default* only switches on once every
+    live round records the ceilings it was judged under -- until then a default of zero would fail on
+    history nobody can back-fill, and a gate that is red for a reason no command can clear is the gate
+    nobody runs (round 33). So the default is 0 exactly when `unrecorded` is 0.
+    """
+    asked = getattr(args, "max_limit_drift", None)
+    if asked is not None:
+        return float(asked)
+    if int(drift.get("rounds") or 0) and not int(drift.get("unrecorded") or 0):
+        return 0.0
+    return None
+
+
 def _limits_text(limits: Optional[Mapping[str, Any]]) -> Optional[str]:
     """One sentence naming the ceilings a page was judged against, or None when there are none (round 66).
 
@@ -1280,11 +1296,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     flag_drain_ceilings: Dict[str, float] = dict(drain_ceilings)
     drain_ceilings = {**state_drain_ceilings, **drain_ceilings}
 
-    if getattr(args, "max_limit_drift", None) is not None and not args.audit:
+    if getattr(args, "max_limit_drift", None) is not None and not (args.audit or args.campaign):
         # Round 68: a flag that only one mode reads must say so, otherwise it is inert in every other mode and
-        # the reader believes a check ran (round 40's lesson, in a new place).
-        _print("--max-limit-drift reads the ceilings recorded in each round, which only --audit compares; "
-               "pass --audit too, or drop the flag")
+        # the reader believes a check ran (round 40's lesson, in a new place). Round 69 taught the campaign
+        # the same comparison, so both modes may carry it.
+        _print("--max-limit-drift reads the ceilings recorded in each round, which --audit and --campaign "
+               "compare; pass one of them, or drop the flag")
         return 2
 
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
@@ -1660,22 +1677,25 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         rules = _rules_from_args(args)
         horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
         trend = debt_history(root, days=float(getattr(args, "trend_days", 7.0) or 7.0))
+        # Round 69: the ceilings are built before the report, because the report now compares each row's
+        # recorded ceilings against them. One view feeds the page, the JSON and the gate.
+        limits_view = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
+                                   drain_ceiling, drain_ceilings, flag_drain_ceilings)
         try:
             result = campaign_result(root, rules, expiry_days=args.expiry_days,
-                                     refusal_expiry_days=horizon)
+                                     refusal_expiry_days=horizon, limits=limits_view)
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
+        try:
+            drift = limit_drift(history(root, include_retired=False), limits_view)
+        except OSError:
+            drift = {"rounds": 0, "differ": [], "unrecorded": 0}
         budget_limit = _rerun_limit(args, int(_rerun_progress(root).get("ready") or 0))
         # Round 62: one budget, computed once. The page, the JSON payload and the minutes cap must describe the
         # same invocation; computing `_queue_budget` three times would be three chances for the price to differ
         # from the sentence that quotes it.
         budget = _queue_budget(root, limit=budget_limit)
-        # Round 66: one view of the ceilings, built once and used by both the page and the JSON, so the sentence
-        # a reader reads and the object a script reads cannot disagree about what was capped or where it came
-        # from. Round 65 only wrote the JSON half.
-        limits_view = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
-                                   drain_ceiling, drain_ceilings, flag_drain_ceilings)
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
@@ -1691,6 +1711,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # in force while this page was printed appears here with where it came from, because a number whose
             # origin is unknown cannot be reviewed -- and the state and the command line can disagree.
             payload["limits"] = limits_view
+            # Round 69: the drift the gate charged is a derived fact, so it travels with the page.
+            payload["ceiling_drift"] = drift
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
@@ -1716,7 +1738,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                            else float(budget["drain_minutes"])),
                             drain_by_domain=budget.get("drain_by_domain") or {},
                             max_drain=drain_ceiling,
-                            drain_ceilings=drain_ceilings)
+                            drain_ceilings=drain_ceilings,
+                            limit_drift=len(drift.get("differ") or []),
+                            max_limit_drift=_drift_cap(args, drift))
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -1839,7 +1863,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             max_drain=drain_ceiling,
                             drain_ceilings=drain_ceilings,
                             limit_drift=len(drift.get("differ") or []),
-                            max_limit_drift=getattr(args, "max_limit_drift", None))
+                            max_limit_drift=_drift_cap(args, drift))
 
     if args.grade:
         try:

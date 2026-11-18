@@ -16,9 +16,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from .evolve import (REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, rejection_provenance,
-                     withheld_due, withheld_evidence_age, withheld_records, withheld_staleness)
-from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state,
+from .evolve import (REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
+                     rejection_provenance, withheld_due, withheld_evidence_age, withheld_records,
+                     withheld_staleness)
+from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state, domain_slug,
                       load_promotions, shape_note)
 
 __all__ = ["Campaign", "CampaignRow", "budget_text", "campaign", "format_campaign", "span_text"]
@@ -79,6 +80,12 @@ class CampaignRow:
     # two recordings sampled differently here, so a row that added both up would answer two questions with
     # one total and never say so.
     files: Dict[str, int] = field(default_factory=dict)
+    # Round 69: how many of this domain's rounds were judged under ceilings that are no longer in force,
+    # and how many predate the field that records them. `rules_hash` proves which rules decided a verdict
+    # and nothing about the wait it was allowed to spend, so tightening a ceiling rewrites the meaning of
+    # every stored verdict without moving a single rule.
+    drift: int = 0
+    drift_unrecorded: int = 0
 
     @property
     def accepted(self) -> int:
@@ -114,6 +121,8 @@ class CampaignRow:
             "withheld_due_for_check": self.withheld_due,
             "withheld_oldest_evidence_days": self.withheld_oldest_days,
             "stream_files": dict(sorted(self.files.items())),
+            "ceilings_differ": self.drift,
+            "ceilings_unrecorded": self.drift_unrecorded,
         }
 
 
@@ -175,6 +184,11 @@ class Campaign:
     # nobody can back-fill (an invented measurement), while a record this build wrote and left without a file
     # is a defect here -- `--strict` charges the second kind and only warns about the first (boundary 73).
     unattributable_legacy: int = 0
+    # Round 69: rounds whose recorded wait ceilings no longer match the ones in force, and rounds that
+    # predate the field. The audit column recomputes a verdict under today's rules; this one says whether
+    # the verdict was also reached under today's ceilings, which `rules_hash` cannot show.
+    drift: int = 0
+    drift_unrecorded: int = 0
     unattributable_missing: int = 0
 
     @property
@@ -213,6 +227,8 @@ class Campaign:
             "rounds_without_recorded_file": self.unattributable,
             "rounds_without_file_legacy": self.unattributable_legacy,
             "rounds_without_file_this_build": self.unattributable_missing,
+            "ceilings_differ": self.drift,
+            "ceilings_unrecorded": self.drift_unrecorded,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -223,14 +239,43 @@ def _source(record: Dict[str, Any]) -> Optional[str]:
     return None if source in (None, "") else str(source)
 
 
+def _row_limits(limits: Mapping[str, Any], domain: str) -> Dict[str, Any]:
+    """The ceilings that apply to one domain, in the shape `evolve.limit_drift` compares.
+
+    A campaign row is one stream, so the comparison it prints must use the ceilings in force for that
+    stream: a global ceiling applies everywhere, a per-domain one only to the domain it names. The origin
+    is already excluded by `_limit_terms`, so it does not travel here either.
+    """
+    def scoped(key: str) -> Dict[str, Any]:
+        values = limits.get(key) or {}
+        for name, value in values.items():
+            # The view is keyed by the slug the deployment state uses (`smd`) while a row is named by the
+            # dataset the round recorded (`SMD`); comparing the raw strings silently pairs nothing.
+            if domain_slug(str(name)) == domain_slug(domain):
+                return {str(name): value}
+        return {}
+
+    return {
+        "max_minutes": limits.get("max_minutes"),
+        "max_minutes_by_domain": scoped("max_minutes_by_domain"),
+        "max_drain_minutes": limits.get("max_drain_minutes"),
+        "max_drain_by_domain": scoped("max_drain_by_domain"),
+    }
+
+
 def campaign(root: Path, rules: Optional[EvolveRules] = None,
              expiry_days: float = CLAIM_EXPIRY_DAYS, now: Optional[datetime] = None,
-             refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS) -> Campaign:
+             refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS,
+             limits: Optional[Mapping[str, Any]] = None) -> Campaign:
     """Summarise every recorded round, grouped by the stream each one measured.
 
     A round that does not say which stream it measured cannot be attributed to a domain, and is counted
     separately rather than guessed at: the stream field was added in round 3, so early rounds are
     legitimately unknown.
+
+    Round 69: when the ceilings in force are passed in, each row also compares the ceilings its own rounds
+    recorded against today's. The audit recomputes verdicts; this compares the conditions a verdict was
+    reached under, which `rules_hash` cannot see.
     """
     rounds = history(root)
     everything = history(root, include_retired=True)
@@ -238,6 +283,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     # checks to answer for, and hiding it would make "42 rounds" and "40 audited" look like a defect.
     result = Campaign(rounds=len(rounds), retired=max(0, len(everything) - len(rounds)))
     rows: Dict[str, CampaignRow] = {}
+    by_row: Dict[str, List[Mapping[str, Any]]] = {}
 
     for record in rounds:
         source = _source(record)
@@ -247,6 +293,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
             # numbers silently would make the campaign total disagree with the ledger it claims to
             # summarise. They are grouped under a name no domain can collide with instead.
             source = "(unattributed)"
+        by_row.setdefault(source, []).append(record)
         row = rows.setdefault(source, CampaignRow(domain=source))
         row.rounds += 1
         # Round 48: which file this round measured, as recorded. A round written before round 47 says
@@ -369,6 +416,17 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
                 result.never_checked += 1
 
     result.rows = sorted(rows.values(), key=lambda item: (-item.rounds, item.domain))
+    if limits is not None:
+        # Round 69: the same comparison `--audit` runs, scoped to the rows the page prints. A row is one
+        # stream, so it is judged against that stream's ceilings; the global total is summed afterwards so
+        # the gate and the page cannot disagree about how many rounds moved.
+        for row in result.rows:
+            scoped = _row_limits(limits, row.domain)
+            drift = limit_drift(by_row.get(row.domain, []), scoped)
+            row.drift = len(drift.get("differ") or [])
+            row.drift_unrecorded = int(drift.get("unrecorded") or 0)
+            result.drift += row.drift
+            result.drift_unrecorded += row.drift_unrecorded
     # A row that pooled two files answers two questions with one total. Counted here rather than per line so
     # the header can say how many rows a reader has to look at twice (round 48).
     result.pooled = sum(1 for row in result.rows
@@ -677,6 +735,12 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # reader actually reads printed none, so "nothing was capped" and "three things were capped" looked the
         # same. The sentence names only ceilings in force, each with where it came from.
         lines.append("limits            %s" % limits)
+    if result.drift:
+        # Round 69: the ceilings a verdict was judged under are recorded now, so the page can say how many
+        # rounds would be decided under different conditions today. It is not an audit of the verdicts --
+        # those are re-decided in the rows below -- it is a count of rounds whose *premises* moved.
+        lines.append("ceilings          %d round(s) were judged under ceilings that differ from today's: the "
+                     "rules did not change, the limits did" % result.drift)
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")
@@ -723,6 +787,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             if row.audit_unreconstructable:
                 bits.append("%d not reconstructable" % row.audit_unreconstructable)
             lines.append("  audit             %s" % ", ".join(bits))
+        if row.drift or row.drift_unrecorded:
+            # Per domain, for the same reason the audit column is (round 34): the header's count is the
+            # ledger's, and a reader of this row is deciding about this stream.
+            bits = []
+            if row.drift:
+                bits.append("%d of %d round(s) were judged under ceilings that differ from today's"
+                            % (row.drift, row.rounds))
+            if row.drift_unrecorded:
+                bits.append("%d round(s) do not say which ceilings they were judged under"
+                            % row.drift_unrecorded)
+            lines.append("  ceilings          %s" % "; ".join(bits))
         if row.retired:
             # Per domain, because the header's count is the ledger's: an SMD reader should not have to
             # guess whether the retired rounds concerned SMD (round 35).

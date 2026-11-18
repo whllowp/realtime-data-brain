@@ -3861,6 +3861,60 @@ with the ceilings in force now, or the cap is raised.
 **边界 147：比较"记录"与"今天"时，"没说"必须单独计数，不能并入一致或不一致——
 把沉默算成任何一边，都是在替历史回答它没回答的问题。**
 
+### 3.76 页面也要报同一列：默认只在记录够新时才亮
+
+3.75 让 `--audit` 比较"这一轮按什么上限判的"，并把上限写进记录。可是**页面**（`--campaign`，
+读者真正会看的那一页）只念一句 `limits`，不报有多少轮的上限已经变了；而 `--max-limit-drift`
+只在 `--audit` 里生效，等于把唯一会看这条的读者挡在门外。
+
+这一轮把同一列搬到每一行：
+
+```
+$ brian evolve --campaign
+rounds            2  (0 candidate measurements, 0 accepted, 0 rejected)
+limits            one run 4.0 minute(s) on smd (state)
+ceilings          1 round(s) were judged under ceilings that differ from today's: the rules did not change, the limits did
+
+SMD                     2      0      0 -         no claim recorded
+  ceilings          1 of 2 round(s) were judged under ceilings that differ from today's; 1 round(s) do not say which ceilings they were judged under
+```
+
+真实账本（56 轮，几乎全部写在上限字段之前）只印出后半句——这是对的：
+
+```
+  ceilings          38 round(s) do not say which ceilings they were judged under
+```
+
+"没说"不冒充"一致"，也不冒充"不一致"（边界 147 在页面上的同一条规矩）。
+
+**默认只在记录够新时才亮。** `--max-limit-drift` 现在两个模式都认；而它的**默认值**不是 0，是
+"当所有存活记录都写了上限时才是 0"：
+
+```
+$ brian evolve --campaign --strict          # 还有一轮没写上限
+$ brian evolve --campaign --strict          # 那一轮被退役后
+1 recorded round(s) were judged under ceilings that differ from today's, above the 0 asked for:
+their verdicts were reached under other limits, so --strict exits 1 until they are re-decided
+with the ceilings in force now, or the cap is raised.
+```
+
+这条规则的理由是第 33 轮那条：**一条清不掉的检查等于没有检查**。默认失败在旧记录还在的时候会让门禁
+永久为红，而唯一能清掉它的动作（重跑或退役那一轮）跟"上限变了"无关。
+
+**运行时发现的缺陷**：页面按**数据集名**（`SMD`）分行，上限视图按**部署状态的 slug**（`smd`）存键，
+第一版直接比字符串，于是每一行都"没有可比的轮"，漂移恒为 0——一个只在合成数据上才会暴露的空比较。
+修法与 3.52 节那次同源：比较身份（`domain_slug`），不比拼写。
+
+三个读数：
+
+1. **同一列要在两个页面上都出现。** 读者不会为了看"上限有没有变"去另一个模式再跑一次。
+2. **默认值是一条策略。** "默认 0"听起来严格，实际会让旧账把门禁按红；只有清得掉的时候，严格才是要求。
+3. **身份不是拼写。** 行名和键名来自两个不同的命名空间，等号在这里永远为假。
+
+**边界 148：同一份事实在两个地方各有名字时，要按它们的共同身份比较，不能按任一边的拼写。**
+
+**边界 149：默认闸门只在它能被清掉的时候才亮；在历史让任何命令都清不掉的时候，同一条发现只能是警告。**
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4133,8 +4187,10 @@ missing for the next level
 54. **（3.74 已完成）门禁念出它读到的上限，撤销跟着它自己的命令走。** 剩下的：`--rerun-unrecorded`
     自己开头也要念同一句（现在它只念 `budget`），并让 `--audit --json-out` 的 `limits_text` 进入 CI 比较。
 
-55. **（3.75 已完成）整队命令开头念同一句上限，门禁比较"这一轮按什么上限判的"。** 剩下的：
-    `--max-limit-drift` 目前只认 `--audit`，让 `--campaign` 也报同一列（现在它只念 `limits` 句子）。
+55. **（3.75 已完成）整队命令开头念同一句上限；`--audit` 比较"这一轮按什么上限判的"。**
+    剩下的：`--campaign` 也要报同一列，并在记录足够新时把比较放进 `--strict` 的默认集合（下一项）。
+56. **（3.76 已完成）页面每行报"按什么上限判的"，默认闸门只在记录够新时才亮。** 剩下的：
+    `--history` 每行也报一次；`--max-limit-drift` 从"整本账"改成"只比还活着的那部分"。
 
-56. 让 `--campaign` 也报同一列"按什么上限判的"（现在它只念 `limits` 句子），并把
-`--max-limit-drift` 放进 `--strict` 的默认集合——只有当记录足够新时，默认才是可清的。
+57. 让 `--history` 每行也报"这一轮按什么上限判的"，并把 `--max-limit-drift` 从"整本账"改成
+"只比这份记录活着的那部分"——退役与重跑之后的默认值应当自己回到 0，而不是等人手改。
