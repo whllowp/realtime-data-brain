@@ -1637,6 +1637,15 @@ class RoundResult:
     def accepted(self) -> List[str]:
         return [verdict.candidate for _c, _m, verdict in self.trials if verdict.accepted]
 
+    queue: Dict[str, Any] = field(default_factory=dict)
+    """What this round paid, when it was run as one entry of the re-run queue (round 58).
+
+    The queue drains several rounds in one command, and each of them is a separate measurement. The record
+    of the queue's own work — which domain this round paid down and which domain was the largest payable
+    debt when it started — belongs in the round it paid, because that is the file a later reader opens; a
+    printed summary lives only in the terminal that happened to run it.
+    """
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "started_at": self.started_at,
@@ -1668,6 +1677,7 @@ class RoundResult:
             # proposed by whatever the code did at the time", which is exactly what a reader should
             # conclude about them.
             "proposal": self.proposal or None,
+            "queue": dict(self.queue) or None,
         }
 
 

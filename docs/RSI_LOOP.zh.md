@@ -3198,6 +3198,84 @@ projection        if the rest are re-run the unrecorded share falls 100% -> 50% 
 `sort()` 的稳定默认。
 
 
+### 3.65 按域的比例也要能进闸门：但只收能付的账
+
+3.64 让页面说出"哪一流欠得最多"，这个数字仍然没有进闸门。欠账 100% 的一行，只要那几轮已经测出的
+判决今天还站得住，`--strict` 就照样绿：**页面上印着一个读者必须自己判断的数字，而机器不判断它。**
+
+修法看起来只是把 `--max-debt-share` 传给 `_strict_exit`，但真做起来要回答一个区别：
+
+- **哪一行最难看**：`_debt_by_domain` 按 share 排序，第一行就是读者要面对的那一行；
+- **哪一行的账有人能付**：`_largest_debt` 只返回 `ready > 0` 的域——`ready` 的意思是"这一轮的文件能由几何定出来，
+  而且它今天仍然决定点什么"。
+
+于是规则是：**印所有域的份额，只为能付的域扣分。**
+
+```
+$ brian evolve --audit --strict --max-debt-share 0.5          (真实账本)
+6 verdict(s) would be decided differently today; 13 more kept their verdict but changed rule.
+(unattributed) has 100% of its rounds unrecorded (1 of 1), above the 50% asked for:
+no recorded round on it can be re-run (its candidates or its file are not in the record),
+so --strict does not charge it: a gate that can never be cleared is a gate nobody runs.
+exit=1        # 来自那 6 条翻案的判决，不来自欠账
+
+$ brian evolve --audit --strict --max-debt-share 0.5          (var/debt57，能付的那种)
+SMD has 100% of its rounds unrecorded (1 of 1), above the 50% asked for:
+a row whose rounds are mostly unattributable cannot be read as a measurement, so --strict exits 1.
+1 of those round(s) can be paid by re-running them on the file they measured.
+exit=1
+```
+
+第一条是这一轮最重要的输出：**闸门诚实地报告了自己没有扣分，以及为什么。** 如果换成"SMD 55% 而且还能付"，
+第一条就不会是 warning；真实账本上 SMD 的 55% 在 3.54 的排空之后已经付清，所以可付集合是空的，
+最难看的那一行变成了 `(unattributed)`——它连候选定义都没留下，任何命令都付不了。
+
+**第二半：队把自己付了什么写进记录。**
+
+3.58 的排空只在终端里说"这次退休了 N 轮、份额从 X 降到 Y"。读者第二天打开账本，看见一堆
+`round-2026…json`，无法分辨"瞄准了欠账的那一轮"和"顺手测的一轮"。于是 `RoundResult.queue` 把
+这次付款写进它付掉的那一轮记录：
+
+```json
+"queue": {
+  "paid": "SMD",
+  "paid_round": "round-smd-unrecorded.json",
+  "largest_at_start": {"domain": "SMD", "round": 1, "without": 1, "share": 1.0, "ready": 1},
+  "share_after": 0.0
+}
+```
+
+`largest_at_start` 是关键字段：它让"当时该瞄准哪一流"成为记录里的一个事实，而不是读者对时间线的推断。
+现场（`var/queue58/`，一轮未记录、候选是 `events-4`、文件由几何定出）：
+
+```
+debt              SMD              1 of 1 round(s) unrecorded (100%), 1 re-runnable
+limit             draining all 1 round(s); the queue stops at the first round that cannot be re-run
+---- re-running round-smd-unrecorded.json on data/smd/stream-one.json
+  1 of its 1 trial(s) appear in the successor: events-4
+drained           1 round(s) retired in this invocation; 0 still in the queue; the unrecorded share 100% -> 0%
+paid              SMD x1
+balance           no payable debt remains: every remaining unrecorded round keeps no candidate definitions
+                  or no unique file
+```
+
+对应的记录里 `"stream_path": "data/smd/stream-one.json"`，`"queue": {…}` 如上。**"paid SMD x1" 与记录里的
+`queue.paid` 是同一个事实的两个出口**，一个给盯着终端的人，一个给明天打开账本的人。
+
+三处只有跑起来才会暴露的细节：
+
+1. **`to_dict()["queue"] = … or None`**：一条手跑出来的轮次不属于任何队列，写 `{}` 会被读成"这是一次
+   付了零的队列条目"。空就是 `null`。
+2. **`largest_at_start` 必须在循环之外取**：它在第一次测量之前算一次。若在每一轮之后重算，付掉第一域之后
+   它就变成"当前最大"，记录里写的就不再是"这次命令瞄准谁"，而是"它自己刚刚造成的状态"。
+3. **没有可付欠账时也要说话**：`balance no payable debt remains…` 明确把"付完了"和"付不了"分开——
+   这两件事在数字上都是 0 轮可跑。
+
+**边界 126：按域的比例是读者面对的那一行，所以它必须能被要求——但为一条没有任何命令能降下去的份额扣分，
+就是那道永远红的闸门；印它，不扣它。**
+
+**边界 127：会动手的队列必须把它付了什么、还剩什么写进它改过的那条记录，而不是只写进跑了它的那个终端。**
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3433,3 +3511,8 @@ missing for the next level
 
 45. 让"最大可付欠账"这一行也能进闸门：`--audit --max-debt-share` 在一整个域的未归属比例超过阈值时失败，
     并且让 `--rerun-unrecorded` 在按域排完序之后，把"本轮付了哪个域、还剩哪个域最大"写进记录本身。
+
+
+46. **（3.65 已完成）按域的比例进闸门，队列把付款写进记录。** 剩下的一半：让 page 的 `debt` 行同时
+    点名第二大欠账户，这样 `--rerun-limit 1` 连跑两次就是可见的两步；并让 `--campaign` 直接列出
+    "下一步该测哪一流"的名字，而不是让读者从一张按份额排序的表里自己数。

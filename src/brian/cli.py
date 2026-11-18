@@ -254,7 +254,10 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  legacy_unrecorded: int = 0, unrecorded_share: float = 0.0,
                  max_unrecorded: Optional[float] = None, trend_rise: float = 0.0,
                  trend_days: Optional[float] = None, trend_paid: int = 0, trend_arrived: int = 0,
-                 trend_tolerance: float = 0.5, max_rise: Optional[float] = None) -> int:
+                 trend_tolerance: float = 0.5, max_rise: Optional[float] = None,
+                 worst: Optional[Mapping[str, Any]] = None,
+                 payable: Optional[Mapping[str, Any]] = None,
+                 max_debt: Optional[float] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -343,11 +346,31 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         else:
             _print("a share that grows while nothing is paid is a debt nobody is working on; pass "
                    "--max-share-rise to make it fail the check.")
+    # Round 58: the per-domain share is the number a reader of one row actually faces, and until now only the
+    # ledger-wide share could be required. The paragraph prints the worst domain either way; the exit code
+    # only moves when that domain's rounds can be re-run, so the gate cannot be red for a debt no command pays.
+    debt_capped = False
+    if max_debt is not None and worst is not None and float(worst.get("share") or 0.0) > max_debt:
+        debt_capped = (payable is not None
+                       and float(payable.get("share") or 0.0) > max_debt
+                       and str(payable.get("domain") or "") == str(worst.get("domain") or ""))
+        _print("")
+        _print("%s has %.0f%% of its rounds unrecorded (%d of %d), above the %.0f%% asked for:"
+               % (worst.get("domain"), 100.0 * float(worst.get("share") or 0.0),
+                  int(worst.get("without") or 0), int(worst.get("rounds") or 0), 100.0 * max_debt))
+        if debt_capped:
+            _print("a row whose rounds are mostly unattributable cannot be read as a measurement, so "
+                   "--strict exits 1.")
+            _print("%d of those round(s) can be paid by re-running them on the file they measured."
+                   % int(payable.get("ready") or 0))
+        else:
+            _print("no recorded round on it can be re-run (its candidates or its file are not in the record), "
+                   "so --strict does not charge it: a gate that can never be cleared is a gate nobody runs.")
     # A check must not fail for something it does not print: the rise is only chargeable when it is large
     # enough to be printed at all, or the reader would get exit 1 with no paragraph explaining it.
     rose = max_rise is not None and trend_rise > max_rise and trend_rise > trend_tolerance
     capped = max_unrecorded is not None and unrecorded_share > max_unrecorded
-    return 1 if (moved or due or capped or rose) else 0
+    return 1 if (moved or due or capped or rose or debt_capped) else 0
 
 
 def _withheld_debt(root: Path, horizon: float) -> Tuple[int, Optional[float]]:
@@ -598,6 +621,24 @@ def _debt_by_domain(root: Path) -> List[Tuple[str, int, int, float, int]]:
         rows.append((domain, rounds, without, share, ready.get(domain, 0)))
     rows.sort(key=lambda row: (-row[3], -row[4], row[0]))
     return rows
+
+
+def _row_dict(row: Optional[Tuple[str, int, int, float, int]]) -> Optional[Dict[str, Any]]:
+    """A debt row as a mapping, for the callers that pass it around (round 58)."""
+    if row is None:
+        return None
+    return {"domain": row[0], "rounds": row[1], "without": row[2], "share": row[3], "ready": row[4]}
+
+
+def _debt_view(root: Path) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """(worst share, largest payable debt) — two different domains and two different questions (round 58).
+
+    `--max-debt-share` asks "is any domain's table mostly unreadable?" — that is the worst share, whether or
+    not a re-run can lower it. The charge is only raised when the same domain is also payable, because a
+    gate that fails on a debt no command can pay is red forever (round 33's rule, applied to a new number).
+    """
+    rows = _debt_by_domain(root)
+    return _row_dict(rows[0] if rows else None), _largest_debt(root)
 
 
 def _largest_debt(root: Path) -> Optional[Dict[str, Any]]:
@@ -953,6 +994,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         stopped = False
         paid_now = 0
         share_before = float(progress["share_now"])
+        # Round 58: which domain owed the most when this command started. Written into each round it pays, so
+        # the record says what the payment was aimed at rather than leaving it to the reader's arithmetic.
+        largest_start = _largest_debt(root)
+        paid_domains: Dict[str, int] = {}
         rules = _rules_from_args(args)
         for domain, name, _why, files in ready[:limit]:
             target_file = files[0]
@@ -977,6 +1022,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             result = run_round(run_settings, streams, selected=recorded, rules=rules, source=source,
                                claim=record.get("claim") or {})
             result.stream_path = target_file
+            # Round 58: the record of what this entry of the queue paid belongs in the round it paid, not in
+            # the terminal that ran it. `largest_at_start` is the domain a reader would have expected this
+            # command to aim at, so a later reader can tell an aimed payment from an incidental one.
+            result.queue = {"paid": domain, "paid_round": name,
+                            "largest_at_start": largest_start or {},
+                            "share_after": float(progress["share_after"])}
             _print("")
             _print(format_round(result))
             written = persist(root, result, write_versions=False)
@@ -1001,6 +1052,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("recorded round %s" % written.get("round"))
             _print("retired %s (re-measured as %s)" % (name, successor))
             paid_now += 1
+            paid_domains[domain] = paid_domains.get(domain, 0) + 1
             overlap = (mark or {}).get("overlap") or {}
             matches = overlap.get("matches") or []
             rest = overlap.get("not_repeated") or []
@@ -1044,6 +1096,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        "unrecorded share %.0f%% -> %.0f%%"
                        % (paid_now, after["remaining"], 100.0 * share_before,
                           100.0 * float(after["share_now"])))
+                # Round 58: which domains this command actually paid, and which one is still the largest
+                # payable debt afterwards -- the two facts a reader needs to decide whether to run it again.
+                _print("paid              %s"
+                       % ", ".join("%s x%d" % (name, count)
+                                   for name, count in sorted(paid_domains.items())))
+                left = _largest_debt(root)
+                if left is None:
+                    _print("balance           no payable debt remains: every remaining unrecorded round keeps "
+                           "no candidate definitions or no unique file")
+                else:
+                    _print("balance           the largest payable debt is now %s: %d of %d round(s) unrecorded "
+                           "(%.0f%%), %d re-runnable"
+                           % (left["domain"], left["without"], left["rounds"],
+                              100.0 * float(left["share"]), left["ready"]))
             _print("The re-run measures the candidates the record names, on the file it names: the totals move")
             _print("from one sampling to a named one without changing the question. Nothing is deployed by it.")
         return 2 if failures else 0
@@ -1164,6 +1230,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root)))
+        worst, payable = _debt_view(root)
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")
@@ -1178,7 +1245,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             trend_rise=max(0.0, -float(trend["points"])),
                             trend_days=float(trend["days"]),
                             trend_paid=int(trend["paid"]), trend_arrived=int(trend["arrived"]),
-                            max_rise=getattr(args, "max_share_rise", None))
+                            max_rise=getattr(args, "max_share_rise", None),
+                            worst=worst, payable=payable,
+                            max_debt=getattr(args, "max_debt_share", None))
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -1241,6 +1310,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             trend = debt_history(root, days=float(getattr(args, "trend_days", 7.0) or 7.0))
         except OSError:
             trend = {"points": 0.0, "days": 0.0, "paid": 0, "arrived": 0}
+        worst, payable = _debt_view(root)
         return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
                             due=due, oldest_days=oldest, horizon=horizon,
                             unrecorded=missing, legacy_unrecorded=legacy, unrecorded_share=share,
@@ -1248,7 +1318,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             trend_rise=max(0.0, -float(trend["points"])),
                             trend_days=float(trend["days"]),
                             trend_paid=int(trend["paid"]), trend_arrived=int(trend["arrived"]),
-                            max_rise=getattr(args, "max_share_rise", None))
+                            max_rise=getattr(args, "max_share_rise", None),
+                            worst=worst, payable=payable,
+                            max_debt=getattr(args, "max_debt_share", None))
 
     if args.grade:
         try:
@@ -2759,6 +2831,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --strict: fail when the unrecorded share rose by more than this many "
                              "percentage points over the trend window (a rise is a warning otherwise: a "
                              "round measured on the generated stream names no file by design)")
+    evolve.add_argument("--max-debt-share", type=float, default=None, metavar="SHARE",
+                        help="with --strict: fail when the worst domain's unrecorded share is above this "
+                             "fraction (0.5 = half its rounds cannot be placed), provided a re-run can lower "
+                             "it; a share no command can pay is printed but never charged")
     evolve.add_argument("--rerun-unrecorded", action="store_true",
                         help="re-run the rounds whose stream file can be named by geometry, then retire them "
                              "naming the new record; skips a round whose file cannot be chosen")
