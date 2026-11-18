@@ -3101,6 +3101,47 @@ drained           1 round(s) retired in this invocation; 0 still in the queue; t
 那行必须同时印出它用到的两个计数：付清了几轮、新到了几条记录。
 
 
+### 3.63 趋势也要能进闸门：欠账变大是缺陷，但不能把演示流判红
+
+第 55 轮让战役页说出"无法归属的份额"是升是降：从账本的到达事件和退役事件重算，不另开一个进度文件。第 56 轮的问题是**一个数字印在页面上、却没有任何退出码读它，就是装饰**（边界 98），而"欠账在变多"恰恰是整条补跑队列存在的理由——份额上升意味着新记录在增加、旧的却没人补。于是趋势进了闸门。
+
+```
+$ brian evolve --campaign --trend-days 0.5
+file unknown      2 of 3 round(s) do not say which file they measured, so 67% of the totals above
+                  cannot be placed on a sampling, 2 of them written by this build
+trend             the unrecorded share rose 67 point(s) in the last 12.0 hour(s) (0% -> 67%):
+                  0 round(s) were retired after a named re-measurement and 2 record(s) arrived in that window
+
+$ brian evolve --audit --strict --trend-days 0.5 --max-share-rise 0
+every recorded verdict survives today's rules.
+66.7 point(s) of the unrecorded share came back in the last 12.0 hour(s): 0 round(s) were re-measured
+and 2 record(s) arrived.
+the share rose by more than the 0.0 point(s) asked for, so --strict exits 1.
+re-run the queue, or write the rounds with --stream-file so they name a sampling.
+[exit 1]
+```
+
+（这两条命令跑在一个三轮的合成账本上：一轮有名字、在 60 天前，两轮没名字、在刚过去的 20 分钟里。真实账本的份额正在下降，所以"上升"必须在一个能被观察的地方演示一次。）
+
+**默认只警告，按需才失败。** 这个构建在测量生成的演示流时**故意**写没有文件名的轮次（第 50 轮）。如果"上升一律失败"，演示域就会永远红——一个永远清不掉的退出码，是没人会跑的检查（第 33 轮）。所以警告默认只说"这是一笔没人在还的账，想要它失败就传 `--max-share-rise`"，传了才收。
+
+三个只有跑起来才会发现的缺陷：
+
+1. **窗口印成 0.0 小时。** `--trend-days 0.0005` 时页面写 `in the last 0.0 hour(s)`——一个渲染成零的跨度读起来就是"没有时间"，而关于"没有时间"的收费，读者无从反驳。改成按长度选单位（天 / 小时 / 分钟 / 秒），`span_text()` 同时供页面和闸门使用，避免两处各写一份。
+2. **设了上限、却没超，也印"超过上限"。** 第一版只看 `max_rise is not None` 就印"rose by more than … so --strict exits 1"，而退出码是 0：一句话和自己下面三行的退出码互相矛盾。现在只有真的超了才印那句，没超时印"rose by less than the 0.0 point(s) asked for, so --strict does not charge it"。
+3. **低于容差也能收费。** 上升 0.3 个点（页面按整点打印，看不出变化）配 `--max-share-rise 0` 会让 `--strict` 退出 1，而关于它的段落被容差挡掉了——**为一件没说出口的事失败**，正好是边界 98 的反面。现在收费条件与打印条件绑在一起：`trend_rise > trend_tolerance and trend_rise > max_rise`。
+
+三条读法：
+
+- 页面按整点打印（67），闸门按一位小数（66.7）：前者给读者"份额"，后者要能收 0.5 这样的上限。同一条事实，两种精度，都写明了来源。
+- 趋势是**算出来的**，不是记下来的：`debt_history()` 从账本的 `started_at` 与 `retired.at` 重建每一刻的份额，因此它不可能和账本不一致（第 53 轮的规则延伸到时间轴）。
+- "上升"这件事在真实账本上从未发生过：一个从未在真实数据上出现过的守卫，仍然必须在能被观察的地方演示一次，否则它只是代码里的一段分支（边界 79）。
+
+**边界 122：欠账变大是缺陷，不是页面上的一句描述。** 无人在还的债在增长，是闸门必须**能够**收费的失败，不能只由页面打印；一个只能被观察、不能被要求的数字，读久了就会被忽略（边界 109）。
+
+**边界 123：只有当账本能归属这次上升时，它才可收费。** 这个构建在生成的演示流上按设计写没有文件名的轮次（第 50 轮），所以默认只警告，`--max-share-rise` 才是收费开关；收费的段落必须同时说出窗口里**还了多少**（退役后重测）和**来了多少**（新记录），否则"上升"无法区分"债务在增加"与"工程在推进"。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3331,3 +3372,6 @@ missing for the next level
 
 43. 让趋势进入闸门：`--trend-days` 选择窗口，`--strict` 在比例**上升**时失败（欠账变大是缺陷，不是一个数字），
 并且让 `--campaign` 在速率第一次可测时把当时的斜率写进记录。
+
+44. 趋势要能作为一轮的输入：`--campaign` 已经说出份额在升，下一步应让 `--propose` 先补齐欠账最大的那个域，直到它的份额开始下降；并把窗口内新增记录的文件来源逐条列出，让"上升"归因到具体的域，而不是账本整体。
+

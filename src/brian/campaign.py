@@ -21,7 +21,7 @@ from .evolve import (REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, rejection
 from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state,
                       load_promotions, shape_note)
 
-__all__ = ["Campaign", "CampaignRow", "campaign", "format_campaign"]
+__all__ = ["Campaign", "CampaignRow", "campaign", "format_campaign", "span_text"]
 
 
 @dataclass
@@ -442,6 +442,23 @@ def _verdict_line(row: CampaignRow) -> str:
     return note
 
 
+def span_text(days: float) -> str:
+    """How long a trend window was, in a unit a reader can hold.
+
+    Round 56: the gate charged a rise and printed "in the last 0.0 hour(s)" for a window a few seconds long.
+    A span rendered as zero reads as no span at all, and a charge about "no time" is not something a reader
+    can argue with -- the same reason a verdict that could not be reached must say so (boundary 53).
+    """
+    seconds = max(0.0, float(days or 0.0)) * 86400.0
+    if seconds >= 86400.0:
+        return "%.0f day(s)" % (seconds / 86400.0)
+    if seconds >= 3600.0:
+        return "%.1f hour(s)" % (seconds / 3600.0)
+    if seconds >= 60.0:
+        return "%.0f minute(s)" % (seconds / 60.0)
+    return "%.0f second(s)" % seconds
+
+
 def _trend_line(trend: Mapping[str, Any]) -> str:
     """One line saying whether the unrecorded share is falling, and how fast when it can be known.
 
@@ -457,7 +474,7 @@ def _trend_line(trend: Mapping[str, Any]) -> str:
     share = 100.0 * float(trend.get("share") or 0.0)
     before = 100.0 * float(trend.get("before_share") or 0.0)
     days = float(trend.get("days") or 0.0)
-    span = ("%.0f day(s)" % days) if days >= 1.0 else ("%.1f hour(s)" % (days * 24.0))
+    span = span_text(days)
     window = ("since the first recorded round %s ago" % span if trend.get("truncated")
               else "in the last %s" % span)
     if points > 0.005:

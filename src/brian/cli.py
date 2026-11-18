@@ -69,7 +69,7 @@ from .evolve import (
     withheld_streams,
 )
 from .laya.client import LayaClient, LayaError, LayaUnavailable
-from .campaign import campaign as campaign_result, format_campaign
+from .campaign import campaign as campaign_result, format_campaign, span_text
 from .laya.gate import explain_thresholds
 from .laya.qcatalog import CATALOG_VERSION, catalog_hash, describe as describe_catalog, validate_questions
 from .llm.rca import RcaEngine
@@ -252,7 +252,9 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  due: int = 0, oldest_days: Optional[float] = None,
                  horizon: float = REFUSAL_EXPIRY_DAYS, unrecorded: int = 0,
                  legacy_unrecorded: int = 0, unrecorded_share: float = 0.0,
-                 max_unrecorded: Optional[float] = None) -> int:
+                 max_unrecorded: Optional[float] = None, trend_rise: float = 0.0,
+                 trend_days: Optional[float] = None, trend_paid: int = 0, trend_arrived: int = 0,
+                 trend_tolerance: float = 0.5, max_rise: Optional[float] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -320,8 +322,32 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("%.0f%% of the recorded rounds cannot be placed on a sampling, above the %.0f%% asked for:"
                % (100.0 * unrecorded_share, 100.0 * max_unrecorded))
         _print("re-run the rounds whose totals still decide something, on the file each one measured.")
+    if trend_rise > trend_tolerance:
+        # Round 56: a debt that grows while the loop is not paying it is the failure the whole queue exists
+        # for, and until now the page only printed it. It is a warning rather than a failure by default
+        # because this build writes nameless rounds on purpose when it measures the generated demo stream
+        # (round 50), so a blanket "a rise fails" would keep the demo domain red forever -- the exit code a
+        # check can never clear is the check nobody runs (round 33). The opt-in cap makes it chargeable.
+        window = span_text(trend_days)
+        rose = max_rise is not None and trend_rise > max_rise
+        _print("")
+        _print("%.1f point(s) of the unrecorded share came back in the last %s: %d round(s) were re-measured "
+               "and %d record(s) arrived." % (trend_rise, window, trend_paid, trend_arrived))
+        if rose:
+            _print("the share rose by more than the %.1f point(s) asked for, so --strict exits 1."
+                   % max_rise)
+            _print("re-run the queue, or write the rounds with --stream-file so they name a sampling.")
+        elif max_rise is not None:
+            _print("the share rose by less than the %.1f point(s) asked for, so --strict does not charge it."
+                   % max_rise)
+        else:
+            _print("a share that grows while nothing is paid is a debt nobody is working on; pass "
+                   "--max-share-rise to make it fail the check.")
+    # A check must not fail for something it does not print: the rise is only chargeable when it is large
+    # enough to be printed at all, or the reader would get exit 1 with no paragraph explaining it.
+    rose = max_rise is not None and trend_rise > max_rise and trend_rise > trend_tolerance
     capped = max_unrecorded is not None and unrecorded_share > max_unrecorded
-    return 1 if (moved or due or capped) else 0
+    return 1 if (moved or due or capped or rose) else 0
 
 
 def _withheld_debt(root: Path, horizon: float) -> Tuple[int, Optional[float]]:
@@ -1032,6 +1058,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     if args.campaign:
         rules = _rules_from_args(args)
         horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
+        trend = debt_history(root, days=float(getattr(args, "trend_days", 7.0) or 7.0))
         try:
             result = campaign_result(root, rules, expiry_days=args.expiry_days,
                                      refusal_expiry_days=horizon)
@@ -1040,7 +1067,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             return 2
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
-                               trend=debt_history(root)))
+                               trend=trend))
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")
@@ -1051,7 +1078,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unrecorded=result.unattributable_missing,
                             legacy_unrecorded=result.unattributable_legacy,
                             unrecorded_share=result.unattributable_share,
-                            max_unrecorded=args.max_unrecorded)
+                            max_unrecorded=args.max_unrecorded,
+                            trend_rise=max(0.0, -float(trend["points"])),
+                            trend_days=float(trend["days"]),
+                            trend_paid=int(trend["paid"]), trend_arrived=int(trend["arrived"]),
+                            max_rise=getattr(args, "max_share_rise", None))
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -1110,10 +1141,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # The exit code is the part that makes this a check rather than a report: a rule change that
         # rewrites history should fail the build, or it will be noticed months later by whoever reads the
         # table last.
+        try:
+            trend = debt_history(root, days=float(getattr(args, "trend_days", 7.0) or 7.0))
+        except OSError:
+            trend = {"points": 0.0, "days": 0.0, "paid": 0, "arrived": 0}
         return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
                             due=due, oldest_days=oldest, horizon=horizon,
                             unrecorded=missing, legacy_unrecorded=legacy, unrecorded_share=share,
-                            max_unrecorded=args.max_unrecorded)
+                            max_unrecorded=args.max_unrecorded,
+                            trend_rise=max(0.0, -float(trend["points"])),
+                            trend_days=float(trend["days"]),
+                            trend_paid=int(trend["paid"]), trend_arrived=int(trend["arrived"]),
+                            max_rise=getattr(args, "max_share_rise", None))
 
     if args.grade:
         try:
@@ -2611,6 +2650,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --strict: fail when more than this share of the recorded rounds cannot "
                              "be placed on a sampling (0.25 means 25%%); a round written before the field "
                              "existed is still only a warning")
+    evolve.add_argument("--trend-days", type=float, default=7.0, metavar="DAYS",
+                        help="how far back the campaign and the audit recompute the unrecorded share; a "
+                             "window older than the first record takes that record as its baseline")
+    evolve.add_argument("--max-share-rise", type=float, default=None, metavar="POINTS",
+                        help="with --strict: fail when the unrecorded share rose by more than this many "
+                             "percentage points over the trend window (a rise is a warning otherwise: a "
+                             "round measured on the generated stream names no file by design)")
     evolve.add_argument("--rerun-unrecorded", action="store_true",
                         help="re-run the rounds whose stream file can be named by geometry, then retire them "
                              "naming the new record; skips a round whose file cannot be chosen")
