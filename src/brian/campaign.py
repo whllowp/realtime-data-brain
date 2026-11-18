@@ -74,6 +74,11 @@ class CampaignRow:
     # last week from one that has stood since the day it was written.
     withheld_due: int = 0
     withheld_oldest_days: Optional[float] = None
+    # Round 48: which stream files this domain's rounds were measured on, as rounds per file. The row is
+    # grouped by dataset because the deployment state is per dataset, but a dataset is not a file: `SMD` is
+    # two recordings sampled differently here, so a row that added both up would answer two questions with
+    # one total and never say so.
+    files: Dict[str, int] = field(default_factory=dict)
 
     @property
     def accepted(self) -> int:
@@ -108,6 +113,7 @@ class CampaignRow:
             "withheld_no_longer_holding": self.withheld_stale,
             "withheld_due_for_check": self.withheld_due,
             "withheld_oldest_evidence_days": self.withheld_oldest_days,
+            "stream_files": dict(sorted(self.files.items())),
         }
 
 
@@ -158,6 +164,9 @@ class Campaign:
     # page. A refusal nobody re-measured is a conclusion the loop stopped testing without saying so.
     withheld_due: int = 0
     withheld_oldest_days: Optional[float] = None
+    # How many domains add up rounds measured on more than one stream file (round 48): the rows stay per
+    # dataset, so this is the page saying which rows are pooling two samplings into one total.
+    pooled: int = 0
 
     @property
     def domains(self) -> List[str]:
@@ -187,6 +196,7 @@ class Campaign:
             "withheld_no_longer_holding": self.withheld_stale,
             "withheld_due_for_check": self.withheld_due,
             "withheld_oldest_evidence_days": self.withheld_oldest_days,
+            "domains_pooling_files": self.pooled,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -223,6 +233,11 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
             source = "(unattributed)"
         row = rows.setdefault(source, CampaignRow(domain=source))
         row.rounds += 1
+        # Round 48: which file this round measured, as recorded. A round written before round 47 says
+        # nothing, and "(not recorded)" is the honest name for that -- inventing a path from the dataset
+        # name is what rounds 46 and 47 each refused to do.
+        path = str(record.get("stream_path") or "")
+        row.files[path or "(not recorded)"] = row.files.get(path or "(not recorded)", 0) + 1
         finished = record.get("finished_at") or record.get("started_at") or ""
         if not row.first or finished < row.first:
             row.first = finished
@@ -320,6 +335,10 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
                 result.never_checked += 1
 
     result.rows = sorted(rows.values(), key=lambda item: (-item.rounds, item.domain))
+    # A row that pooled two files answers two questions with one total. Counted here rather than per line so
+    # the header can say how many rows a reader has to look at twice (round 48).
+    result.pooled = sum(1 for row in result.rows
+                        if len({path for path in row.files if path != "(not recorded)"}) > 1)
     result.trials = sum(row.trials for row in result.rows)
     result.accepted = sum(row.accepted for row in result.rows)
     result.rejected = sum(sum(row.rejections.values()) for row in result.rows)
@@ -453,6 +472,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         lines.append(line)
     if result.unsourced:
         lines.append("unattributed      %d round(s) predate the stream field" % result.unsourced)
+    if result.pooled:
+        # Round 48: the rows stay per dataset, so the page has to say when a row adds up two samplings. A
+        # reader comparing domains otherwise cannot tell that SMD's total answers two questions.
+        lines.append("stream files      %d domain(s) add up rounds measured on more than one file: their totals "
+                     "answer more than one question" % result.pooled)
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")
@@ -469,6 +493,24 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                         row.in_force or "-", _claim_line(row.claim), mark))
         if accepts:
             lines.append("  accepted by       %s" % accepts)
+        # Round 48: the file each round measured, as recorded. Printed always -- a row that names one file is
+        # also saying the other file's rounds are not in its totals.
+        known = {path: count for path, count in row.files.items() if path != "(not recorded)"}
+        unknown = int(row.files.get("(not recorded)") or 0)
+        if known:
+            named = ", ".join("%s (%d round(s))" % (path, count)
+                              for path, count in sorted(known.items(), key=lambda item: (-item[1], item[0])))
+            if unknown:
+                named += ", %d round(s) without a recorded file" % unknown
+            lines.append("  measured on       %s" % named)
+            if len(known) > 1:
+                # The totals above add these files up, so the page says so instead of leaving the reader to
+                # discover it in `--history` (round 48).
+                lines.append("  ! %d files here were sampled differently: this row's totals add up more than "
+                             "one question" % len(known))
+        elif unknown:
+            lines.append("  measured on       %d round(s), none of which say which file they measured"
+                         % unknown)
         rejects = ", ".join("%s x%d" % (rule, count) for rule, count in sorted(row.rejections.items()))
         if rejects:
             # "As recorded" is not decoration (round 36): this column counts the verdicts the rounds wrote,

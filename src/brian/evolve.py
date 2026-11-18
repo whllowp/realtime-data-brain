@@ -3093,10 +3093,14 @@ class SensitivityRow:
     refused: int = 0
     recorded: int = 0
     flips: Dict[str, int] = field(default_factory=dict)
+    # Round 48: the files the refusals in this row were measured on. Same reason as the campaign's column:
+    # a row per dataset can add up two samplings, and a table that silently does that answers two questions
+    # with one number.
+    files: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {"domain": self.domain, "refused": self.refused, "recorded": self.recorded,
-                "flips": dict(self.flips)}
+                "flips": dict(self.flips), "stream_files": dict(sorted(self.files.items()))}
 
 
 @dataclass
@@ -3165,6 +3169,12 @@ def refusal_sensitivity(root: Path, rules: Optional[EvolveRules] = None,
     rows: Dict[str, SensitivityRow] = {}
     unreadable = 0
     rounds = 0
+    # Round 48: a refusal written as a `w###` record names its file (round 46), and that record is the more
+    # authoritative place to read it from than the round that produced the verdict -- the round predates the
+    # field in most cases here. Falling back to it keeps this table from contradicting `--withheld`, which
+    # shows the same refusal with its file.
+    recorded_paths = {record.name: record.stream_path for record in withheld_records(root)
+                      if record.stream_path}
     for record in history(root):
         payload = dict(record)
         rounds += 1
@@ -3182,6 +3192,10 @@ def refusal_sensitivity(root: Path, rules: Optional[EvolveRules] = None,
                 continue
             row = rows.setdefault(domain, SensitivityRow(domain=domain))
             row.refused += 1
+            # Round 48: which file this refusal's round measured. Rounds before round 47 say nothing, and
+            # that is printed as "(not recorded)" rather than deduced from the dataset name.
+            path = str(payload.get("stream_path") or recorded_paths.get(candidate.name) or "")
+            row.files[path or "(not recorded)"] = row.files.get(path or "(not recorded)", 0) + 1
             if (trial.get("verdict") or {}).get("detail"):
                 row.recorded += 1
             for candidate_bar in ladder:
@@ -3227,6 +3241,21 @@ def format_sensitivity(result: Sensitivity) -> str:
         for value in result.bars:
             line += " %8d" % row.flips.get("%.3f" % value, 0)
         lines.append(line)
+        known = {path: count for path, count in row.files.items() if path != "(not recorded)"}
+        unknown = int(row.files.get("(not recorded)") or 0)
+        if known:
+            # Round 48: the row's counts pool the files it names. A reader comparing domains has to be able
+            # to see that without going back to `--history`.
+            named = ", ".join("%s (%d)" % (path, count)
+                              for path, count in sorted(known.items(), key=lambda item: (-item[1], item[0])))
+            if unknown:
+                named += ", %d without a recorded file" % unknown
+            lines.append("  measured on       %s" % named)
+            if len(known) > 1:
+                lines.append("  ! %d files here were sampled differently: this row's counts add up more than "
+                             "one question" % len(known))
+        elif unknown:
+            lines.append("  measured on       none of them say which file they were measured on")
     lines.append("")
     lines.append("A column is how many of the refused candidates would be *accepted* at that bar. The first")
     lines.append("column is the bar in force, so it is zero by construction: a bar cannot accept what it")
