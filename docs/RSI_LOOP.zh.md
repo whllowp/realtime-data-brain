@@ -2163,6 +2163,78 @@ recording 上。** "整体变好"是一个除法结果，不是一条可以被�
 权重，也就无法判断是哪一台在移动。
 
 
+## 3.47 容忍度是个假设：把拒绝的数字写进记录
+
+3.46 的拒绝是一句话，而判它用的 5% 硬编码在 `decide()` 里。记录里只有"池化涨了、machine-1-6 掉了"，
+没有"掉了多少、对哪个容忍度"。这有两个后果：后来的人不同意这条拒绝时，只能重测一遍；`--audit` 也
+无法说出"这条拒绝有多依赖那个假设"。
+
+这一轮把它拆开。`EvolveRules` 多一个字段：
+
+```python
+replication_tolerance: Optional[float] = None    # None -> replication_bar 回落到 min_quality_gain
+```
+
+默认回落到质量门槛，不是随手写的：拒绝不能比接受更严——如果一条 +5% 的池化增益值得量，那么量它的
+容忍度就该是同一个数。它进 `to_dict()`，也就进 `rules_fingerprint`，所以改这个数会让"当时按什么规则
+判的"在账本上可见（下面 `--audit` 的两行就是这样来的）。
+
+`replication_loss()` 现在返回数字而不是句子：
+
+```
+{"recording": "smd-machine-1-6", "before": 0.4911, "after": 0.3822, "drop": 0.1089,
+ "tolerance": 0.05, "pooled_before": 0.2971, "pooled_after": 0.312, "budget": 0.1}
+```
+
+句子由 `_replication_sentence()` 从它生成，`Verdict` 多一个 `detail` 字段把这份数字写进 round 记录，
+`rejudge()` 读回来——否则就是 3.38 的教训重演一次：字段写了没人读，记录看起来完整，实际上不可复核。
+
+`--replication-tolerance` 同时作用于 `--rejudge`、`--audit`、`--campaign`、`--propose` 和整轮。为此顺带
+修了一个循环里的复制粘贴：`rules = EvolveRules(min_gain=args.min_gain)` 原先有**六处**，加一个字段就要
+改六次，漏一处就会出现"某个模式下这个 flag 静默无效"。现在只有 `_rules_from_args(args)` 一处。
+
+实测三条。默认规则重放 3.46 那一轮，逐位复现：
+
+```
+host-features-3        reject replicate       reject replicate       -
+no verdict changed: today's rules agree with the recorded round.
+```
+
+放宽容忍度到 0.20，同一条测量、同一份记录，判决改变：
+
+```
+host-features-3        reject replicate       accept cost            -> accept
+
+host-features-3        was rejected: recall at the 10% budget rises 0.297 -> 0.312 pooled, but
+                                smd-machine-1-6 falls 0.491 -> 0.382: the gain belongs to
+                                the recordings that rose, so this is not a replicated one
+                       now  accepted: 3356 -> 2908 tokens/report (-13.4%)
+                       the refusal used tolerance 0.050 against 0.200 in today's rules
+
+1 verdict(s) changed. The stored measurements were not re-run; only the rules moved.
+```
+
+最后一行是新的：只写"判决变了"会让读者以为测量变了，实际变的只是一个假设，所以把两边用的容忍度并排
+写出来。（这句只在记录带 `detail` 时出现；3.46 之前的记录没有这个字段，无从比较，也就不写——这正是
+"一句话不能被重新裁决"的证据。）
+
+第三条是账本层面的：`--audit` 在默认规则下 `7 verdict(s) would be decided differently today`、`2
+recorded round(s) carry a different ruleset fingerprint`；把容忍度放到 0.20 后变成 **9** 与 **4**。多出来的
+两条拒绝依赖的正是那个默认值，而指纹那列说明它们当时是按另一套规则记的。
+
+两点读法。**第一**，一条拒绝记录的是判断，不是事实：把它拆成"数字 + 假设"，后来的人可以不同意判断而
+不必重测，而"不同意"必须表现为规则改动、在指纹和 `--audit` 里说话，不能表现为一条新的测量。**第二**，
+默认值也是有方向的：容忍度取"等于质量门槛"意味着拒绝与接受用同一把尺子；把它调松是"我接受这台机器
+掉这么多"，调紧则是"任何一台都不许掉"，两者都是运维判断，不是数据能回答的问题。
+
+**边界 87：拒绝必须记下产生它的数字——哪条 recording、掉多少、对哪个容忍度。** 只写句子的拒绝，
+在记录里看起来像事实，实际上不可复核。
+
+**边界 88：容忍度是假设；把它与拒绝一起存下来，后来者不需要重测就能不同意，而这种不同意是规则改动，
+不是测量。** 反过来也成立：改了容忍度就必须让指纹和 `--audit` 说出来，否则账本会把两次不同的判断
+读成同一个。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2335,3 +2407,7 @@ missing for the next level
     机器-2-2 的 0.037），机械地拒绝会让循环在一半的机器上永远不动。做法：把容忍度写进版本文件与
     round 记录，拒绝时同时写下"哪一台掉了多少、容忍度是多少"，让 `--audit` 能复核当年那条拒绝是否
     仍然成立。
+
+28. **让 `--campaign` 按域统计"有多少拒绝依赖默认容忍度"。** 现在要知道一条拒绝有多依赖那个假设，
+    只能手工重跑 `--audit --replication-tolerance`。做法：报表里给出"在允许一台掉 ≤X% 的条件下，
+    这个域会有多少条拒绝翻成接受"，把"每台机器的容忍度"从全局假设变成可被看见的域参数。

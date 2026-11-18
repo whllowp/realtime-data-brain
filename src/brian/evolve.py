@@ -1087,6 +1087,19 @@ class EvolveRules:
     #: rejection over 3.6% of the free cut's recall. A cut chosen from a finite sample is not exactly
     #: optimal, so a candidate is allowed to land that far short, and 10% is a judgement.
     operational_tolerance: float = 0.10
+    #: How far one recording's at-budget recall may fall while the *pooled* number rises before the gain
+    #: stops counting as replicated. `None` means the same bar a quality gain must clear, so a refusal can
+    #: never use a stricter measure than the acceptance did. It is a judgement and it is per domain: a
+    #: recording that sits below chance (SMD's machine-2-2 reads 0.037) loses a relative 5% for a
+    #: rounding difference, while on a strong recording that is a real loss. Round 39 shipped the pooled
+    #: check; round 40 makes the bar a number in the ruleset, so a re-deciding reader can disagree with it
+    #: without re-measuring.
+    replication_tolerance: Optional[float] = None
+
+    @property
+    def replication_bar(self) -> float:
+        """The drop that counts as a loss of replication (absolute recall at the budget)."""
+        return self.min_quality_gain if self.replication_tolerance is None else self.replication_tolerance
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1100,6 +1113,7 @@ class EvolveRules:
             "deploy_fpr_ceiling": self.deploy_fpr_ceiling,
             "deploy_fpr_tolerance": self.deploy_fpr_tolerance,
             "operational_tolerance": self.operational_tolerance,
+            "replication_tolerance": self.replication_tolerance,
         }
 
 
@@ -1109,6 +1123,10 @@ class Verdict:
     accepted: bool
     rule: str
     reason: str
+    #: The numbers a re-deciding reader needs, per rule. `replicate` stores which recording fell and by how
+    #: much against which tolerance; prose in `reason` cannot be re-decided, and a refusal nobody can
+    #: re-check reads as a finding when it is an assumption (round 40).
+    detail: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1116,6 +1134,7 @@ class Verdict:
             "accepted": self.accepted,
             "rule": self.rule,
             "reason": self.reason,
+            "detail": dict(self.detail),
         }
 
 
@@ -1212,17 +1231,17 @@ def deployable(measurement: "Measurement", rules: "EvolveRules") -> bool:
     return beats_own_cut(measurement)
 
 
-def _replication_loss(baseline: Measurement, trial: Measurement,
-                      threshold: float) -> Optional[str]:
-    """The recording whose recall the candidate loses, when the pooled gain hides it (round 39).
+def replication_loss(baseline: Measurement, trial: Measurement,
+                     tolerance: float) -> Optional[Dict[str, Any]]:
+    """The recording the candidate loses, as numbers, when the pooled gain hides it (round 39/40).
 
     A pooled at-budget recall is one division over both recordings' incidents. On SMD the two hosts are
     not comparable — machine-2-2 sits below chance on the model's own score — so a change can lift the
     recording with more incidents and lower the other while the pooled number rises. Reading that as a
     detection gain reports a change nobody can deploy on both hosts.
 
-    `threshold` is the same significance bar a quality gain must clear, so a small jitter is not treated as
-    a loss and the rule cannot fire on a difference too small to have been an acceptance argument.
+    Returns the first recording (in name order) whose recall falls by more than `tolerance`, with the
+    pooled numbers next to it, so the refusal can be stored as a measurement rather than as a sentence.
     """
     before = baseline.recall_by_recording or {}
     after = trial.recall_by_recording or {}
@@ -1233,12 +1252,34 @@ def _replication_loss(baseline: Measurement, trial: Measurement,
         old, new = before.get(name), after.get(name)
         if old is None or new is None:
             continue
-        if new < old - max(threshold, 1e-9):
-            return ("recall at the %.0f%% budget rises %.3f -> %.3f pooled, but %s falls %.3f -> %.3f: "
-                    "the gain belongs to the recordings that rose, so this is not a replicated one"
-                    % (100 * baseline.budget, baseline.recall_at_budget or 0.0,
-                       trial.recall_at_budget or 0.0, name, old, new))
+        if new < old - max(tolerance, 1e-9):
+            return {
+                "recording": name,
+                "before": _round(old),
+                "after": _round(new),
+                "drop": _round(old - new),
+                "tolerance": _round(tolerance),
+                "pooled_before": _round(baseline.recall_at_budget),
+                "pooled_after": _round(trial.recall_at_budget),
+                "budget": _round(baseline.budget),
+            }
     return None
+
+
+def _replication_sentence(detail: Dict[str, Any]) -> str:
+    """The refusal sentence for a `replication_loss` detail."""
+    return ("recall at the %.0f%% budget rises %.3f -> %.3f pooled, but %s falls %.3f -> %.3f: "
+            "the gain belongs to the recordings that rose, so this is not a replicated one"
+            % (100 * (detail["budget"] or 0.0), detail["pooled_before"] or 0.0,
+               detail["pooled_after"] or 0.0, detail["recording"],
+               detail["before"] or 0.0, detail["after"] or 0.0))
+
+
+def _replication_loss(baseline: Measurement, trial: Measurement,
+                      threshold: float) -> Optional[str]:
+    """The refusal sentence for `replication_loss`, or None when the gain replicates."""
+    detail = replication_loss(baseline, trial, threshold)
+    return None if detail is None else _replication_sentence(detail)
 
 
 def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
@@ -1431,10 +1472,12 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
         # A pooled gain is one division over every recording's incidents, so it can be one host's
         # improvement (round 39: `host-features-3` lifts SMD's machine-2-2 from 0.037 to 0.220 and lowers
         # machine-1-6 from 0.491 to 0.382 for a +5% pooled reading). The deployment runs on both, so the
-        # gain has to replicate before it is allowed to name itself one.
-        spread = _replication_loss(baseline, trial, rules.min_quality_gain)
+        # gain has to replicate before it is allowed to name itself one. The bar is `replication_bar`,
+        # which defaults to the same significance the acceptance needed and can be set per domain.
+        spread = replication_loss(baseline, trial, rules.replication_bar)
         if spread is not None:
-            return Verdict(trial.candidate, False, "replicate", spread)
+            return Verdict(trial.candidate, False, "replicate",
+                           _replication_sentence(spread), detail=spread)
     if before is None or after is None:
         # No report on one side means no alert on that side, so there is no bill to compare. That is
         # the normal case on a domain where the shipped threshold silences the detector: the whole cost
@@ -2301,6 +2344,9 @@ def rejudge(path: Path, rules: EvolveRules) -> Rejudge:
             accepted=bool(stored.get("accepted")),
             rule=stored.get("rule") or "?",
             reason=stored.get("reason") or "",
+            # The detail is the part that can be re-decided: dropping it here would make the stored refusal
+            # a sentence again, and round 40's whole point is that the numbers survive the round trip.
+            detail=dict(stored.get("detail") or {}),
         )
         reference = recorded_reference(payload, measurement, baseline)
         if reference is None:
@@ -2351,6 +2397,13 @@ def format_rejudge(result: Rejudge) -> str:
                                                    _hang("", old.reason, 60, 32)))
                 lines.append("%-22s now  %s: %s" % ("", "accepted" if new.accepted else "rejected",
                                                    _hang("", new.reason, 60, 32)))
+                stored_tolerance = (old.detail or {}).get("tolerance")
+                if (stored_tolerance is not None
+                        and abs(float(stored_tolerance) - result.rules.replication_bar) > 1e-9):
+                    # The disagreement is about a bar, not about a measurement, so say which bar the round
+                    # used: otherwise the reader cannot tell a re-decided judgement from a re-measured fact.
+                    lines.append("%-22s the refusal used tolerance %.3f against %.3f in today's rules"
+                                 % ("", float(stored_tolerance), result.rules.replication_bar))
         lines.append("")
         lines.append("%d verdict(s) changed. The stored measurements were not re-run; only the rules moved."
                      % len(changed))

@@ -268,6 +268,17 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     return 1 if moved else 0
 
 
+def _rules_from_args(args: Any) -> EvolveRules:
+    """The objective this run decides under, from the flags that name it.
+
+    One construction point instead of one per branch: `--rejudge`, `--audit`, `--campaign`, `--propose` and
+    the round all have to read the same rules, or a flag that moves a verdict in one mode silently does
+    nothing in another (round 40 added `--replication-tolerance` and found six copies of the constructor).
+    """
+    tolerance = getattr(args, "replication_tolerance", None)
+    return EvolveRules(min_gain=args.min_gain, replication_tolerance=tolerance)
+
+
 def _retire_names(values: List[str]) -> List[str]:
     """Flatten `--retire` into one name per round, in the order the operator wrote them.
 
@@ -411,7 +422,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if not path.exists():
             _print("no such round file: %s" % path)
             return 2
-        rules = EvolveRules(min_gain=args.min_gain)
+        rules = _rules_from_args(args)
         try:
             result = rejudge(path, rules)
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as error:
@@ -421,7 +432,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     if args.campaign:
-        rules = EvolveRules(min_gain=args.min_gain)
+        rules = _rules_from_args(args)
         try:
             result = campaign_result(root, rules, expiry_days=args.expiry_days)
         except OSError as error:
@@ -436,7 +447,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             result.inconsistent)
 
     if args.audit:
-        rules = EvolveRules(min_gain=args.min_gain)
+        rules = _rules_from_args(args)
         try:
             result = audit(root, rules)
         except OSError as error:
@@ -519,13 +530,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 shape = summarise(load_stream_file(Path(args.stream_file)).streams)
             except (OSError, ValueError):
                 shape = None
-        plan = refusal_plan(rejection_provenance(root, EvolveRules(min_gain=args.min_gain)),
+        plan = refusal_plan(rejection_provenance(root, _rules_from_args(args)),
                             source=source, shape=shape)
         # Round 37: the plan is consulted *before* proposing, so the mechanism does not spend a slot on a
         # candidate the ledger already answered — and the dry run shows the proposal the round would really
         # make rather than one it would then filter.
         proposal = propose(rounds, mode=mode, source=source, deployed=deployed,
-                           rules=EvolveRules(min_gain=args.min_gain), refused=plan["skip"])
+                           rules=_rules_from_args(args), refused=plan["skip"])
         if args.catalogue:
             proposal = Proposal(
                 "catalogue",
@@ -601,7 +612,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("no unverified promotions for %s: every version recorded on it has been re-checked."
                    % domain_slug(domain))
             return 0
-        rules = EvolveRules(min_gain=args.min_gain)
+        rules = _rules_from_args(args)
         pool = build_pool(settings, streams)
         checked_stream = summarise(streams)
         _print("verifying %d promotion(s) from %s on %s"
@@ -708,7 +719,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("  ! %s" % note)
             _print("")
 
-    rules = EvolveRules(min_gain=args.min_gain)
+    rules = _rules_from_args(args)
 
     # Round 30: when the deployment's own claim was made on a stream whose windows cover a different
     # amount of traffic, the round proposes the same settings at the window count that restores the span.
@@ -1813,6 +1824,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="force a bounded search around magnitudes that have already moved a column")
     evolve.add_argument("--min-gain", type=float, default=0.05,
                         help="fraction of tokens/report a change must save to be accepted")
+    evolve.add_argument("--replication-tolerance", type=float, default=None,
+                        help="how far one recording's at-budget recall may fall while the pooled number "
+                             "rises before a quality gain stops counting as replicated (default: the "
+                             "quality bar); stored with the refusal so --rejudge can disagree with it")
     evolve.add_argument("--apply", action="store_true",
                         help="also write a version file per accepted change "
                              "(the round itself is always recorded)")
