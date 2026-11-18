@@ -361,12 +361,82 @@ def _unrecorded_debt(root: Path) -> Tuple[int, int, int, float]:
     return missing, legacy, len(rounds), share
 
 
-def _unrecorded_matters(root: Path) -> List[Tuple[str, str, str]]:
-    """(domain, round, why) for rounds nobody can attribute but whose numbers still decide something.
+def _stream_library(root: Path) -> List[Tuple[str, Dict[str, Any]]]:
+    """Every stream file under `data/`, summarised, so a round can be matched to a file by geometry.
+
+    Round 51: `--unrecorded` used to say "pass --stream-file", which asks the operator to remember the one
+    fact the record lost. Geometry answers it instead: the round recorded how many windows it saw and how
+    many were scored, and a file whose summary says the same is a candidate. It is a suggestion — nothing is
+    written back, and a file that does not match is never proposed (boundary 102).
+    """
+    library: List[Tuple[str, Dict[str, Any]]] = []
+    for path in sorted((root / "data").rglob("stream*.json")):
+        try:
+            stream_set = load_stream_file(path)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        library.append((str(path.relative_to(root)).replace("\\", "/"), summarise(stream_set.streams)))
+    return library
+
+
+def _matching_streams(record: Mapping[str, Any],
+                      library: Sequence[Tuple[str, Dict[str, Any]]]) -> List[str]:
+    """Files whose summary matches the geometry this round recorded (round 51).
+
+    Counts are compared exactly; the cadence, the event count and the recording names only when both sides
+    recorded them, because rounds written before round 27 have no cadence and the earliest ones no names. The
+    names are what separates two files with identical geometry — the two RCAEval files hold the same number of
+    windows of the same length and differ only in which cases they contain, so a matcher that stopped at the
+    counts had to list both. An empty list means "no file here has that geometry", which is a fact worth
+    printing: it says the round measured something this checkout cannot name at all.
+    """
+    summary = record.get("stream") or {}
+    windows = summary.get("windows")
+    scored = summary.get("scored")
+    if windows is None or not library:
+        return []
+    out: List[str] = []
+    for name, shape in library:
+        if shape.get("windows") != windows:
+            continue
+        if scored is not None and shape.get("scored") != scored:
+            continue
+        cadence = summary.get("cadence_s")
+        theirs = shape.get("cadence_s")
+        if cadence is not None and theirs is not None and abs(float(cadence) - float(theirs)) > 1e-6:
+            continue
+        events = summary.get("events")
+        if events is not None and shape.get("events") is not None and shape["events"] != events:
+            continue
+        names = summary.get("names")
+        if names and shape.get("names") and list(shape["names"]) != list(names):
+            continue
+        out.append(name)
+    return out
+
+
+def _candidate_label(files: Sequence[str]) -> str:
+    """How a geometry match reads in the table (round 51).
+
+    Zero is printed as `unknown` rather than left blank: "no file in this checkout has that geometry" is a
+    fact about the round, and a blank cell reads as "nobody looked".
+    """
+    if not files:
+        return "unknown"
+    if len(files) == 1:
+        return files[0]
+    return "%d candidates: %s" % (len(files), ", ".join(files))
+
+
+def _unrecorded_matters(root: Path,
+                        library: Optional[Sequence[Tuple[str, Dict[str, Any]]]] = None
+                        ) -> List[Tuple[str, str, str, List[str]]]:
+    """(domain, round, why, candidate files) for rounds nobody can attribute but whose numbers still decide.
 
     Round 50's second half: the share can only fall by re-running rounds, and re-running all 53 is not worth
     it. A round matters when it wrote a version that is still on the page, or when a candidate it refused is
-    still being held. Those are the ones whose totals a reader acts on today.
+    still being held. Round 51 adds the candidate files, matched by geometry, so the re-run is a choice rather
+    than a recollection.
     """
     provenance = rejection_provenance(root)
     carried: Dict[str, List[str]] = {}
@@ -374,21 +444,26 @@ def _unrecorded_matters(root: Path) -> List[Tuple[str, str, str]]:
         if verdict.get("accepted"):
             continue
         carried.setdefault(str(verdict.get("round") or ""), []).append(str(name))
-    out: List[Tuple[str, str, str]] = []
+    known = list(library) if library is not None else _stream_library(root)
+    out: List[Tuple[str, str, str, List[str]]] = []
     for record in history(root):
         if str(record.get("stream_path") or ""):
             continue
         name = str(record.get("round") or "")
         why: List[str] = []
-        if record.get("applied"):
-            why.append("wrote %d version(s) still on the page" % len(record.get("accepted") or []))
+        applied = record.get("applied")
+        if applied:
+            # The ledger writes the versions that were applied as a list; older lines wrote a count. Count the
+            # list where there is one, because the number of versions is what a reader can still act on.
+            written = len(applied) if isinstance(applied, (list, tuple)) else int(applied or 0)
+            why.append("wrote %d version(s) still on the page" % written)
         held = carried.get(name) or []
         if held:
             why.append("%d refusal(s) still carried" % len(held))
         if not why:
             continue
         domain = str((record.get("stream") or {}).get("source") or "(unattributed)")
-        out.append((domain, name, "; ".join(why)))
+        out.append((domain, name, "; ".join(why), _matching_streams(record, known)))
     return out
 
 
@@ -717,17 +792,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("Every round that still decides something says which file it measured.")
             return 0
         _print("")
-        _print("%-18s %-34s %s" % ("domain", "round", "why it still matters"))
-        _print("-" * 96)
-        for domain, name, why in matters:
-            _print("%-18s %-34s %s" % (domain, name, why))
+        _print("%-16s %-32s %-34s %s" % ("domain", "round", "likely file", "why it still matters"))
+        _print("-" * 130)
+        for domain, name, why, files in matters:
+            _print("%-16s %-32s %-34s %s" % (domain, name, _candidate_label(files), why))
         _print("")
-        _print("Re-run one with `brian evolve --stream-file <the file it measured>`: the new record names the")
-        _print("file, and this list shrinks. Nothing is re-run here, and no path is guessed (boundary 102).")
+        _print("Re-run one with `brian evolve --stream-file <file>`: the new record names the file, and this")
+        _print("list shrinks. The likely-file column is matched by geometry, not written anywhere: a file whose")
+        _print("summary disagrees with the round's is never proposed, and a round that matches none is shown")
+        _print("as such rather than given the nearest name (boundary 102).")
         if args.json_out:
             Path(args.json_out).write_text(
                 _json({"rounds": len(rounds), "unattributed": unknown,
-                       "matters": [{"domain": d, "round": n, "why": w} for d, n, w in matters]}),
+                       "matters": [{"domain": d, "round": n, "why": w, "files": f}
+                                   for d, n, w, f in matters]}),
                 encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)

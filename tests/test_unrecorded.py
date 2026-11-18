@@ -116,13 +116,13 @@ def test_the_list_names_the_rounds_that_still_decide_something(tmp_path):
 
     listed = cli._unrecorded_matters(tmp_path)
 
-    why = {name: reason for _domain, name, reason in listed}
+    why = {name: reason for _domain, name, reason, _files in listed}
     # A round whose numbers still decide something: it wrote a version, or a candidate it refused is still
     # held. The rest of the legacy ledger is a question nobody asks again.
     assert set(why) == {"round-wrote-versions.json", "round-refused-something.json"}
     assert "wrote 1 version(s) still on the page" in why["round-wrote-versions.json"]
     assert "1 refusal(s) still carried" in why["round-refused-something.json"]
-    assert all(domain == "SMD" for domain, _name, _why in listed)
+    assert all(domain == "SMD" for domain, _name, _why, _files in listed)
 
 
 def test_an_attributable_round_is_not_listed(tmp_path):

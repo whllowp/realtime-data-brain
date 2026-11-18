@@ -2822,6 +2822,58 @@ SMD                round-20261118T022144Z.json        1 refusal(s) still carried
 （生成流没有文件）不能合并计数，否则闸门要么永远红，要么永远绿 —— 两种都等于没在检查。
 
 
+### 3.58 缺的那条信息就在记录里：把"回想"变成"选择题"
+
+第 50 轮把"98% 不可归属"变成一条可以被要求、也可以变小的债。变小的方法在文档里写得很轻：重跑那些仍
+然在决定什么的轮次。做的时候才发现，那句话漏了一步 —— 重跑需要 `--stream-file`，而"它测的是哪个文件"
+恰恰是记录丢掉的那条信息。于是命令把最难的一步留给读者，还叫做"可以变小"。
+
+这一轮不要求任何人回想。每一轮的记录里已经写了它看到的几何：多少个窗口、多少个被评分、事件数、录音名
+—— `summarise()` 从第 2 轮起就写这些。文件那边同样有一份摘要。两边对得上，文件就是候选。对不上，就
+什么都不提。
+
+```
+$ brian evolve --unrecorded
+rounds            53 of 54 cannot be attributed; 17 of them still decide something
+
+domain           round                            likely file                        why it still matters
+SMD              round-20261117T201046Z.json      data/smd/stream.json               wrote 1 version(s) still on the page
+SMD              round-20261117T203743Z.json      data/smd/stream.json               wrote 4 version(s) still on the page
+SMD              round-20261117T230958Z.json      data/smd/stream.json               wrote 4 version(s) still on the page; 1 refusal(s) still carried
+RCAEval RE1-OB   round-20261117T232141Z.json      data/rcaeval/stream.json           wrote 3 version(s) still on the page
+SMD              round-20261118T011544Z.json      data/smd/stream-check.json         6 refusal(s) still carried
+SMD              round-20261118T022144Z.json      data/smd/stream-check.json         1 refusal(s) still carried
+…（17 行，每行恰好一个候选文件）
+```
+
+**17 行里有 17 行能放到一个文件上。** 10 行落在 `data/smd/stream.json`（第 22 轮之前的采样），7 行落在
+`data/smd/stream-check.json`（之后换的采样），2 行 RCAEval 落在 `data/rcaeval/stream.json`。也就是说，
+98% 的不可归属**不是数据里缺的，是页面上缺的**：账本一直知道自己测的是哪一份流，只是从来没地方写下来。
+
+三件事值得记下来。
+
+**一、几何能匹配到窗口，名字才能匹配到案例。** 最初的版本只比窗口数和评分数，两个 RCAEval 文件因此永远
+并列 —— 它们都是 543 个窗口、456 个被评分、60 秒一拍，区别只在于装的是哪几个案例（`adservice_cpu_1..3`
+还是 `_4..5`）。第一版把这两行印成 `2 candidates: …`，看起来诚实，其实是把第 47 轮"几何认不出文件"的
+结论又抄了一遍。加上录音名（记录里本来就有）之后，两行都唯一了。规则是：**两侧都记了才比**，没记的字段
+跳过而不是判为不等 —— 否则第 27 轮之前的记录（没有 `cadence_s`）会被一个它们不可能有的字段淘汰。
+
+**二、候选不是写入。** 匹配到的文件印在表里，不写进任何记录，也不自动重跑。这条界线沿用第 46/47 轮：
+把猜测写成事实，比不猜更糟。重跑一次，新记录自己带上 `stream_path`，这一行就从列表里消失 —— 变小是
+重新测量换来的，不是打印换来的。
+
+**三、一个候选和零个候选都要说话。** 零个候选印 `unknown` 而不是留空：空白读起来像"没人看过"，而
+`unknown` 说的是"这一轮测的东西，本检出里没有文件对得上"，那是关于这一轮的事实。这条对应第 50 轮
+边界 109 的另一半：能要求、能变小，还要能读懂哪里仍然不知道。
+
+**边界 111：记录里已有的信息，必须在页面上出现，否则"缺数据"只是缺一列。** 三轮（第 49、50、51）都在
+同一件事上打转：不可归属的比例印出来了、能被要求了、能被减少了，而真正让它减下去的，是那三列一直都在
+记录里、只是没被打印出来的字段。
+
+**边界 112：匹配要按记录实际拥有的字段做，缺字段不等于不相等。** 拿一个新字段去筛旧记录，会把它们全部
+判为"不匹配"，然后"没有候选"看起来像结论，其实是字段年龄。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3038,3 +3090,5 @@ missing for the next level
     file it measured>`），而"它测的是哪个文件"恰恰是缺的那条信息。下一步：用几何匹配（第 47 轮的
     `var/backfill_version_path.py` 做过一次）为每一轮列出**候选文件**，让操作员只做选择题而不是回想题。
 
+39. `--unrecorded` 现在给出候选文件，但重跑仍要人一条条敲。让它在 `--stream-file` 与候选唯一时接受
+`--rerun-unrecorded`，按候选逐个重跑、逐个记账；候选不唯一的轮次仍然跳过并说明原因（边界 104）。
