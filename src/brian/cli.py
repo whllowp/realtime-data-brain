@@ -51,6 +51,7 @@ from .evolve import (
     previously_rejected,
     reader_scores,
     rejudge,
+    retire,
     run_round,
 )
 from .laya.client import LayaClient, LayaError, LayaUnavailable
@@ -272,7 +273,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     directory = Path(EVOLVE_DIR)
 
     if args.history:
-        rounds = history(root)
+        rounds = history(root, include_retired=True)
         if not rounds:
             _print("no rounds recorded yet in %s" % directory)
             return 0
@@ -299,9 +300,46 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             recall_after = "%.3f" % max(recalls) if recalls else "-"
             applied = record.get("applied")
             mark = "" if applied is None or applied else "  [recorded, not applied]"
+            retired = record.get("retired")
+            if retired:
+                # The row stays in the list because a reader asking "what has this loop measured" is
+                # asking a different question from "what does it still owe an answer for".
+                successor = retired.get("re_measured_as") if isinstance(retired, dict) else None
+                mark += "  [retired%s]" % ("" if not successor else ", re-measured as %s" % successor)
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
+        return 0
+
+    if args.retire:
+        try:
+            mark = retire(root, args.retire, re_measured_as=args.re_measured_as or None)
+        except (OSError, ValueError) as error:
+            _print("cannot retire %s: %s" % (args.retire, error))
+            return 2
+        successor = mark.get("re_measured_as") if isinstance(mark, dict) else None
+        _print("retired           %s  (%s)"
+               % (args.retire, "re-measured as %s" % successor if successor
+                  else "no successor named: the record stays, the checks skip it"))
+        overlap = (mark or {}).get("overlap") or {}
+        if successor:
+            matches = overlap.get("matches") or []
+            rest = overlap.get("not_repeated") or []
+            if not overlap.get("successor_readable"):
+                _print("                  the successor record is not readable, so how much of this "
+                       "round it repeats is unknown")
+            elif matches:
+                _print("                  %d of its %d trial(s) appear in the successor: %s"
+                       % (len(matches), len(matches) + len(rest), ", ".join(matches)))
+                if rest:
+                    # A single shared candidate must not launder the rest of the record: those
+                    # comparisons were not re-measured, they are questions nobody is asking again.
+                    _print("                  the other %d are not repeated there, so this retirement "
+                           "does not claim they were answered" % len(rest))
+            else:
+                _print("                  none of its %d trial(s) appear in the successor: this round is "
+                       "retired as a question, not answered" % len(rest))
+        _print("The record is unchanged; --audit no longer re-decides it, and --history still lists it.")
         return 0
 
     if args.rejudge:
@@ -1675,6 +1713,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-decide a recorded round file under today's rules and exit")
     evolve.add_argument("--audit", action="store_true",
                         help="re-decide every recorded round under today's rules and exit")
+    evolve.add_argument("--retire", default="",
+                        help="mark a recorded round superseded by a re-measurement and exit; its record "
+                             "stays as written, the checks stop asking the mechanism to answer for it")
+    evolve.add_argument("--re-measured-as", default="",
+                        help="with --retire: the round that replaced it, so the retirement names a successor")
     evolve.add_argument("--campaign", action="store_true",
                         help="summarise every recorded round per stream, then exit (no Laya)")
     evolve.add_argument("--expiry-days", type=float, default=CLAIM_EXPIRY_DAYS,

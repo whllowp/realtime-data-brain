@@ -44,6 +44,11 @@ class CampaignRow:
     checks: int = 0
     # A verdict older than the expiry is still the record but no longer the evidence (round 29).
     overdue: bool = False
+    # This domain's share of the audit (round 34). The header line is the whole ledger's number; a row
+    # that shows rounds and trials but no audit says "this stream is clean" without having looked.
+    audit_moved: int = 0
+    audit_relabelled: int = 0
+    audit_unreconstructable: int = 0
 
     @property
     def accepted(self) -> int:
@@ -66,6 +71,9 @@ class CampaignRow:
             "verdict": self.verdict,
             "checks": self.checks,
             "overdue": self.overdue,
+            "audit_moved": self.audit_moved,
+            "audit_relabelled": self.audit_relabelled,
+            "audit_unreconstructable": self.audit_unreconstructable,
         }
 
 
@@ -95,6 +103,8 @@ class Campaign:
     # Of those, the ones in records that carry the geometry and still lack the reference: a defect in this
     # build rather than a record written before the field existed (round 33).
     inconsistent: int = 0
+    # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
+    retired: int = 0
 
     @property
     def domains(self) -> List[str]:
@@ -117,6 +127,7 @@ class Campaign:
             "versions_overdue": self.overdue,
             "comparisons_unreconstructable": self.unreconstructable,
             "comparisons_inconsistent": self.inconsistent,
+            "rounds_retired": self.retired,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -136,7 +147,10 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     legitimately unknown.
     """
     rounds = history(root)
-    result = Campaign(rounds=len(rounds))
+    # Counted from the same file: a retired round is one the campaign still holds but no longer asks the
+    # checks to answer for, and hiding it would make "42 rounds" and "40 audited" look like a defect.
+    result = Campaign(rounds=len(rounds),
+                      retired=max(0, len(history(root, include_retired=True)) - len(rounds)))
     rows: Dict[str, CampaignRow] = {}
 
     for record in rounds:
@@ -206,6 +220,16 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.relabelled = report.relabelled
     result.unreconstructable = report.cross
     result.inconsistent = report.inconsistent
+    # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
+    # campaign whose every other number is per domain had one that was not: a reader comparing two
+    # streams could see "7 verdicts would change today" and not know which one owes them.
+    for entry in report.entries:
+        row = rows.get(str(entry.get("stream") or "?"))
+        if row is None:
+            continue
+        row.audit_moved += len(entry.get("changed") or [])
+        row.audit_relabelled += len(entry.get("relabelled") or [])
+        row.audit_unreconstructable += len(entry.get("cross") or [])
     return result
 
 
@@ -265,6 +289,9 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
         # is the difference between "we checked" and "we checked once".
         lines.append("expired           %d of them are older than %.0f day(s): the record stands, the "
                      "evidence does not" % (result.overdue, expiry_days))
+    if result.retired:
+        lines.append("retired           %d round(s) were re-measured; their records stay, the checks skip them"
+                     % result.retired)
     if result.unsourced:
         lines.append("unattributed      %d round(s) predate the stream field" % result.unsourced)
     lines.append("")
@@ -286,6 +313,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
         rejects = ", ".join("%s x%d" % (rule, count) for rule, count in sorted(row.rejections.items()))
         if rejects:
             lines.append("  rejected by       %s" % rejects)
+        if row.audit_moved or row.audit_relabelled or row.audit_unreconstructable:
+            bits = ["%d moved" % row.audit_moved, "%d relabelled" % row.audit_relabelled]
+            if row.audit_unreconstructable:
+                bits.append("%d not reconstructable" % row.audit_unreconstructable)
+            lines.append("  audit             %s" % ", ".join(bits))
         if row.in_force:
             lines.append("  in force          %s  (%s)"
                          % (" ".join("%s=%s" % item for item in sorted(row.env.items()))

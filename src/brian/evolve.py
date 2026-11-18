@@ -1720,12 +1720,16 @@ def _env_value(value: Any) -> str:
     return str(value)
 
 
-def history(root: Path) -> List[Dict[str, Any]]:
+def history(root: Path, include_retired: bool = False) -> List[Dict[str, Any]]:
     """Every round recorded so far, oldest first, as the full round merged with its ledger line.
 
     The jsonl file is the index — it records order and survives a half-written round file — and the
     `round-*.json` file holds the measurements. Returning the merge means a caller that wants "what did
     the last round decide" does not have to know there are two files.
+
+    Round 34: a retired round is skipped by default. Retiring is how a superseded record stops being
+    evidence without being edited — the measurement stays exactly as it was measured, and what changes
+    is whether the mechanism still has to answer for it.
     """
     directory = root / EVOLVE_DIR
     path = directory / "ledger.jsonl"
@@ -1750,8 +1754,101 @@ def history(root: Path) -> List[Dict[str, Any]]:
                 merged = {}
         merged.update({key: value for key, value in index.items() if key != "round"})
         merged["round"] = name
+        if not include_retired and merged.get("retired"):
+            continue
         rows.append(merged)
     return rows
+
+
+def retire(root: Path, name: str, re_measured_as: Optional[str] = None,
+           at: Optional[str] = None) -> Dict[str, Any]:
+    """Mark a recorded round superseded, without touching what it measured.
+
+    The reachable alternative was worse in both directions. Back-filling the missing reference would
+    hand that experiment a comparison it never made, and deleting the record would remove a measurement
+    the campaign counts. Retiring keeps the record readable and takes it out of the checks: the debt a
+    `--strict` run reports is a debt of the *current* ledger, and a round nobody will re-run is not one.
+
+    The mark names the record that replaced it, because "superseded" without a successor is just a
+    deletion with extra steps. Retiring twice is a no-op rather than an error: a re-run script must be
+    safe to execute again.
+
+    The successor is then checked against the record it replaces, because "re-measured as X" is a claim
+    about candidates, not about files. A re-run that happens to measure one of the eight trials does not
+    answer the other seven: they are questions the loop no longer asks, and the mark says which is which
+    instead of letting a single shared candidate launder the whole record.
+    """
+    directory = root / EVOLVE_DIR
+    path = directory / "ledger.jsonl"
+    if not path.exists():
+        raise ValueError("no ledger at %s" % path)
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    target = name if name.endswith(".json") else "%s.json" % name
+    moment = at or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    rewritten: List[str] = []
+    mark: Optional[Dict[str, Any]] = None
+    found = False
+    for line in lines:
+        try:
+            index = json.loads(line)
+        except json.JSONDecodeError:
+            rewritten.append(line)
+            continue
+        recorded = str(index.get("round") or "")
+        if recorded == target or recorded.startswith(target):
+            found = True
+            if index.get("retired"):
+                mark = dict(index["retired"])
+            else:
+                # The overlap is computed before the mark is written, so the record states at the moment
+                # of retirement how much of itself the successor actually re-measured.
+                index["retired"] = {"at": moment,
+                                    "re_measured_as": re_measured_as,
+                                    "overlap": retirement_overlap(root, target, re_measured_as)}
+                mark = dict(index["retired"])
+            line = json.dumps(index)
+        rewritten.append(line)
+    if not found:
+        raise ValueError("no recorded round matches %s" % name)
+    if mark is not None:
+        temporary = path.with_suffix(".jsonl.tmp")
+        temporary.write_text("\n".join(rewritten) + "\n", encoding="utf-8", newline="\n")
+        temporary.replace(path)
+    return mark or {}
+
+
+def retirement_overlap(root: Path, retired: str, successor: Optional[str]) -> Dict[str, Any]:
+    """Which of the retired round's trials the successor round measured again.
+
+    Both sides are read, never inferred. A missing successor is reported as unreadable rather than as an
+    empty overlap: "nobody measured these again" and "nobody looked" are different statements, and only
+    the first one is the mechanism's own decision.
+    """
+    directory = root / EVOLVE_DIR
+    old = _trial_names(directory / _round_name(retired))
+    if successor is None:
+        return {"matches": [], "not_repeated": old, "successor_readable": False}
+    new = _trial_names(directory / _round_name(successor))
+    if not (directory / _round_name(successor)).exists():
+        return {"matches": [], "not_repeated": old, "successor_readable": False}
+    return {"matches": [name for name in old if name in new],
+            "not_repeated": [name for name in old if name not in new],
+            "successor_readable": True}
+
+
+def _round_name(name: str) -> str:
+    return name if name.endswith(".json") else "%s.json" % name
+
+
+def _trial_names(path: Path) -> List[str]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [str((trial.get("candidate") or {}).get("name") or "?")
+            for trial in payload.get("trials") or []]
 
 
 def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict[str, str]:
@@ -1773,7 +1870,12 @@ def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict
     `re-judged`, so a reader can tell which verdicts came from stored runs and which from today's rules.
     """
     latest: Dict[str, Dict[str, Any]] = {}
-    for row in history(root):
+    # Retired records are read here even though the audit skips them (round 34): retirement is a
+    # statement about what the *check* still has to answer for, not about what the loop learned. A
+    # refusal measured on a stream is still a refusal on that stream, and dropping it at retirement
+    # would reintroduce the amnesia this function exists to prevent — with the extra irony that this
+    # round's own fix would have caused it.
+    for row in history(root, include_retired=True):
         source = (row.get("stream") or {}).get("source") or (row.get("stream") or {}).get("service") or "?"
         baseline = Measurement.from_dict(row.get("baseline") or {}) if rules is not None else None
         for trial in row.get("trials") or []:
@@ -2088,6 +2190,8 @@ class Audit:
     rounds: int
     trials: int
     entries: List[Dict[str, Any]] = field(default_factory=list)
+    # Rounds the ledger still holds but no longer asks the mechanism to answer for (round 34).
+    retired: int = 0
 
     @property
     def moved(self) -> int:
@@ -2139,8 +2243,12 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
     entries: List[Dict[str, Any]] = []
     rounds = 0
     trials = 0
-    for record in history(root):
+    retired = 0
+    for record in history(root, include_retired=True):
         name = str(record.get("round") or "?")
+        if record.get("retired"):
+            retired += 1
+            continue
         payload = dict(record)
         baseline = Measurement.from_dict(payload.get("baseline") or {})
         changed: List[Dict[str, Any]] = []
@@ -2181,7 +2289,8 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
                 "relabelled": relabelled,
                 "cross": cross,
             })
-    return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials, entries=entries)
+    return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials,
+                 entries=entries, retired=retired)
 
 
 def format_audit(result: Audit) -> str:
@@ -2198,6 +2307,9 @@ def format_audit(result: Audit) -> str:
     else:
         lines.append("recorded rounds   %d  (%d candidate measurements re-decided, no re-run)"
                      % (result.rounds, re_decided))
+    if result.retired:
+        lines.append("retired           %d round(s) were re-measured and are not re-decided; their records "
+                     "stay as written" % result.retired)
     lines.append("")
     if not result.entries:
         lines.append("every recorded verdict survives today's rules.")

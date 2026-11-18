@@ -1758,6 +1758,106 @@ exit 1
 **边界 74：退出码 0 只能表示检查跑在全部记录上并且通过；跑在它读得懂的记录上，不算通过。**
 
 
+## 3.41 不再回答的问题要说出来：退役一份记录，而不是改写它
+
+上一轮结束时，campaign 上还有一行：
+
+```
+audit             7 verdict(s) would be decided differently today, 18 relabelled, 23 not reconstructable
+                  (all from records written before the geometry was recorded)
+```
+
+那 23 条比较全部来自两份记录：`round-20261118T012841Z.json`（8 条）和 `round-20261118T013236Z.json`
+（15 条）。它们都写在 round 31（有 `references`）和 round 32（有 `window`）之间，因此存了参照，却没说
+每条试验用的是哪一个。三条路里只有一条是对的：
+
+- **回填**：给旧记录补一个 `references["286"]`。这条路被边界 71 直接否掉——复核必须用它当时用的那个
+  参照，补一个等于替那场试验发明一次它没做过的比较。
+- **删除**：`--campaign` 的每一个数字都来自这些记录，删掉就是删掉"这个循环测量过什么"。
+- **退役**：记录一个字节都不改，只把"机制是否还要为它负责"这件事本身写下来。
+
+所以 `brian evolve --retire <round> --re-measured-as <round>` 做的事是：在 `ledger.jsonl` 的对应行上加
+`retired: {at, re_measured_as, overlap}`。`history()` 默认跳过退役记录（`--audit`、种子、campaign 的
+轮次与试验计数都跟着跳过），`--history` 仍然列出它们，并标注 `[retired, re-measured as …]`。
+
+退役之前先重跑一次同一条流，得到一份可读的记录：
+
+```
+$ python -m brian.cli evolve --stream-file data\smd\stream-check.json
+stream            {"anomalous": 192, "cadence_s": 2100.0, "events": 6775, "scored": 1235, …}
+in force          v020 promised recall 0.507 at the 10% budget
+on this stream    recall 0.297  unmeasurable
+baseline                0.297   0.092     3356     11861     100% -
+baseline@286            0.427   0.080     3356      8170     100% reference
+host-rolling-rank-0-85-200@hint286    0.427   0.080     3356      8170     100% reject
+events-10               0.297   0.092     2596      9174     100% accept
+events-1                0.297   0.092     1911      6753     100% accept
+events-3                0.297   0.092     2063      7291     100% accept
+events-2                0.297   0.092     1987      7022     100% accept
+events-6                0.297   0.092     2292      8098     100% accept
+recorded round var\evolve\round-20261118T015111Z.json
+```
+
+然后退役那两份旧记录。**退役不是回答**，所以退役时会把继任者读一遍，数一数它重复了旧记录里的几条试验：
+
+```
+$ python -m brian.cli evolve --retire round-20261118T012841Z.json --re-measured-as round-20261118T015111Z.json
+retired           round-20261118T012841Z.json  (re-measured as round-20261118T015111Z.json)
+                  1 of its 8 trial(s) appear in the successor: host-rolling-rank-0-85-200@hint286
+                  the other 7 are not repeated there, so this retirement does not claim they were answered
+
+$ python -m brian.cli evolve --retire round-20261118T013236Z.json --re-measured-as round-20261118T015111Z.json
+retired           round-20261118T013236Z.json  (re-measured as round-20261118T015111Z.json)
+                  1 of its 15 trial(s) appear in the successor: host-rolling-rank-0-85-200@hint286
+                  the other 14 are not repeated there, so this retirement does not claim they were answered
+```
+
+一句"重测过了"如果只看文件，是可以靠一条共同的候选把整份记录洗白的：两份旧记录和继任者恰好都测了
+`@hint286`，但 013236Z 的另外 14 条（`events-8`、`host-features-3`、`host-scoring-deviation`……）没有人
+再测过。它们是被放弃的问题，不是被回答的问题，`overlap` 就是把这句话写进记录里。
+
+退役之后：
+
+```
+$ python -m brian.cli evolve --audit --strict
+recorded rounds   41  (178 candidate measurements re-decided, no re-run)
+retired           2 round(s) were re-measured and are not re-decided; their records stay as written
+…
+7 verdict(s) would be decided differently today; 18 more kept their verdict but changed rule.
+exit=1
+```
+
+退出码仍然是 1，但原因变了：上一轮它因为"7 条改判"退 1、同时又挂着一笔永远还不上的 23 条债；现在它
+只为那 7 条退 1，`not reconstructable` 从报告里消失，因为**这个问题已经不归这个检查回答**。
+
+同一轮把 audit 拆到每个域。此前它是全账本一个数，而页面上其他每一个数字都是按域的：
+
+```
+$ python -m brian.cli evolve --campaign
+rounds            41  (178 candidate measurements, 68 accepted, 110 rejected)
+audit             7 verdict(s) would be decided differently today, 18 relabelled
+retired           2 round(s) were re-measured; their records stay, the checks skip them
+SMD                    24    128     48 20   …
+  audit             6 moved, 17 relabelled
+RCAEval RE1-OB          7     25      6 19   …
+  audit             1 moved, 1 relabelled
+demo                    9     23     13 -    …
+```
+
+7 条里 6 条属于 SMD，RCAEval 只欠 1 条。一个账本级的"7"会让两个域的读者都以为债是自己的。
+
+还有一处是同一个坑的另一半：`previously_rejected()` 原本也走 `history()`，于是**退役会让循环忘掉 23 条
+拒绝**——正好是这个函数存在的理由（科学失忆）。修法是让它读退役记录：退役是关于"检查是否还要回答"的
+说法，不是关于"循环学到了什么"的说法。新测试
+`test_retiring_a_refusal_does_not_unlearn_it` 把这一点钉住。
+
+**边界 75：退役必须指明继任者，并说明继任者重复了旧记录里的哪几条试验。"重测过了"是关于候选的说法，不是
+关于文件的说法——一条共同的候选不足以代替其余七条。**
+
+**边界 76：一个检查可以停止提问，但报告必须说明那个问题是被放下了，而不是被回答了。`not reconstructable`
+消失的唯一理由是它不再属于这个闸门，而不是因为它被修好了。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -1909,3 +2009,7 @@ missing for the next level
 22. 那 23 条 legacy 比较可以在下一次重测时自然消掉（重跑 round 31/32 的两轮，新记录带几何），
     而不是回填——回填等于替当时的试验补一个它没用过的参照；同时让 campaign 的 audit 列按域拆分，
     现在它是全账本一个数，而其他每一行都是按域的。
+
+23. 让 `--retire` 能一次退役多条并把继任者写进 `--campaign`（现在每次一条，继任者要手工抄），
+    以及让 campaign 显示"退役记录里的拒绝是否仍在参与 `previously_rejected`"——现在它们参与，但页面上
+    看不到这一点。
