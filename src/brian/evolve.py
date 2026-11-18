@@ -386,6 +386,15 @@ class Measurement:
     reshape under `quality`. The stored round record is what exposed it.
     """
 
+    window: Optional[int] = None
+    """The rolling window this measurement was taken with, or `None` when it does not roll.
+
+    Round 32: without it a record cannot say what it compared. `run_round` measures every candidate
+    against a reference at the candidate's *own* window (round 31), but a replay could only see
+    `baseline`, so re-deciding a window change compared 286 against 200 and reported the geometry as a
+    rule change. The geometry is part of the measurement, so it travels with it.
+    """
+
     @property
     def free_cut_alert_rate(self) -> Optional[float]:
         """The share of windows the label-free bar actually paged on."""
@@ -424,6 +433,7 @@ class Measurement:
         return {
             "candidate": self.candidate,
             "promise": _round(self.promise),
+            "window": self.window,
             "recall": _round(self.recall),
             "fpr": _round(self.fpr),
             "precision": _round(self.precision),
@@ -483,8 +493,13 @@ class Measurement:
             at_budget_pooled=bool(payload.get("at_budget_pooled")),
             recall_at_free_cut=payload.get("recall_at_free_cut"),
             fpr_at_free_cut=payload.get("fpr_at_free_cut"),
+            alert_budget=float(payload.get("alert_budget") or 0.0),
+            prevalence=payload.get("prevalence"),
+            alerts_at_free_cut=payload.get("alerts_at_free_cut"),
+            scored_at_free_cut=payload.get("scored_at_free_cut"),
             auc_by_recording=dict(payload.get("auc_by_recording") or {}),
             promise=payload.get("promise"),
+            window=None if payload.get("window") is None else int(payload["window"]),
         )
 
 
@@ -908,6 +923,7 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
     return Measurement(
         candidate=candidate.name if candidate is not None else "baseline",
         promise=candidate.promise if candidate is not None else None,
+        window=configuration_window(settings, candidate),
         recall=_rate(counts, "tp", "fn"),
         fpr=_rate(counts, "fp", "tn"),
         precision=_rate(counts, "tp", "fp"),
@@ -1522,6 +1538,36 @@ def _reference_candidate(window: int) -> Candidate:
     )
 
 
+def recorded_reference(payload: Mapping[str, Any], measurement: Measurement,
+                       baseline: Measurement) -> Optional[Measurement]:
+    """The baseline a stored trial was compared with, or `None` when the record cannot say.
+
+    Round 32. `run_round` compares a candidate against a reference measured at the candidate's own
+    window (round 31) and stores those references in the round file. A replay that reads only
+    `baseline` compares the trial against a measurement taken at *another* window, and the geometry
+    shows up as a rule change: the round-31 record was rejudged this way and reported "3 verdict(s)
+    changed" while not one rule had moved.
+
+    Rounds before the geometry was recorded carry no `window`. If such a record also carries no
+    references it was decided against `baseline`, and replaying it that way is honest. But a round
+    written between round 31 and round 32 stored *references* without recording which trial used
+    which: the reference is there, the link is not. Filling that gap with `baseline` is a guess that
+    puts the geometry back into the comparison — rejudging the round-31 record under today's rules
+    still reports three verdicts "changed" with identical rules. So an unlabelled trial in a record
+    that has references is withheld instead of guessed.
+    """
+    references = payload.get("references") or {}
+    window = measurement.window
+    if window is None:
+        return None if references else baseline
+    stored = references.get(str(window))
+    if stored is not None:
+        return Measurement.from_dict(stored)
+    if baseline.window is None or baseline.window == window:
+        return baseline
+    return None
+
+
 def run_round(settings: Settings, streams: Sequence[Stream],
               selected: Optional[Sequence[Candidate]] = None,
               rules: Optional[EvolveRules] = None,
@@ -1902,6 +1948,9 @@ class Rejudge:
     old_rules: Dict[str, Any]
     rules: EvolveRules
     rows: List[Tuple[Candidate, Measurement, Verdict, Verdict]] = field(default_factory=list)
+    withheld: List[str] = field(default_factory=list)
+    """Trials the record cannot reconstruct: their window differs from the baseline's and no reference
+    was stored. Reporting a verdict for them would report the replay's own comparison, not the round's."""
 
     @property
     def changed(self) -> List[str]:
@@ -1934,6 +1983,7 @@ def rejudge(path: Path, rules: EvolveRules) -> Rejudge:
     payload = json.loads(path.read_text(encoding="utf-8"))
     baseline = Measurement.from_dict(payload.get("baseline") or {})
     rows: List[Tuple[Candidate, Measurement, Verdict, Verdict]] = []
+    withheld: List[str] = []
     for trial in payload.get("trials") or []:
         candidate = Candidate.from_dict(trial.get("candidate") or {})
         measurement = Measurement.from_dict(trial.get("measurement") or {})
@@ -1944,7 +1994,11 @@ def rejudge(path: Path, rules: EvolveRules) -> Rejudge:
             rule=stored.get("rule") or "?",
             reason=stored.get("reason") or "",
         )
-        new = decide(baseline, measurement, rules, veto=candidate.veto)
+        reference = recorded_reference(payload, measurement, baseline)
+        if reference is None:
+            withheld.append(candidate.name)
+            continue
+        new = decide(reference, measurement, rules, veto=candidate.veto)
         rows.append((candidate, measurement, old, new))
     return Rejudge(
         path=str(path),
@@ -1952,6 +2006,7 @@ def rejudge(path: Path, rules: EvolveRules) -> Rejudge:
         old_rules=payload.get("rules") or {},
         rules=rules,
         rows=rows,
+        withheld=withheld,
     )
 
 
@@ -1992,7 +2047,21 @@ def format_rejudge(result: Rejudge) -> str:
         lines.append("%d verdict(s) changed. The stored measurements were not re-run; only the rules moved."
                      % len(changed))
     else:
-        lines.append("no verdict changed: today's rules agree with the recorded round.")
+        if result.withheld:
+            # "Today's rules agree with the recorded round" would be a claim about trials this replay never
+            # looked at, which is the class of sentence this round exists to remove.
+            lines.append("no re-decided verdict changed: %d trial(s) could not be replayed at all."
+                         % len(result.withheld))
+        else:
+            lines.append("no verdict changed: today's rules agree with the recorded round.")
+    if result.withheld:
+        lines.append("")
+        lines.append("%d trial(s) were not re-decided: the record does not say which reference the round"
+                     % len(result.withheld))
+        lines.append("compared them with, so replaying them against the stored baseline would measure a")
+        lines.append("different geometry and report it as a rule change (boundary 71):")
+        for name in result.withheld:
+            lines.append("  %s" % name)
     if relabelled:
         lines.append("")
         by_name = {candidate.name: new for candidate, _m, _old, new in result.rows}
@@ -2033,6 +2102,16 @@ class Audit:
         """Rounds whose recorded ruleset differs from today's, by fingerprint."""
         return sum(1 for entry in self.entries if entry["recorded_hash"] not in (None, "", self.fingerprint))
 
+    @property
+    def cross(self) -> int:
+        """Trials whose comparison the record cannot reconstruct, so they carry no re-decided verdict.
+
+        Round 32: a window change is compared against a reference measured at its own window. A record
+        that stores the trial's window, a baseline at another window and no reference for the difference
+        cannot be replayed honestly — the only comparison available is one the round never made.
+        """
+        return sum(len(entry["cross"]) for entry in self.entries)
+
 
 def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
     """Re-decide every stored round under `rules` and report what moves.
@@ -2053,6 +2132,7 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
         baseline = Measurement.from_dict(payload.get("baseline") or {})
         changed: List[Dict[str, Any]] = []
         relabelled: List[Dict[str, Any]] = []
+        cross: List[str] = []
         rounds += 1
         for trial in payload.get("trials") or []:
             trials += 1
@@ -2065,20 +2145,25 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
                 rule=stored.get("rule") or "?",
                 reason=stored.get("reason") or "",
             )
-            new = decide(baseline, measurement, active, veto=candidate.veto)
+            reference = recorded_reference(payload, measurement, baseline)
+            if reference is None:
+                cross.append(candidate.name)
+                continue
+            new = decide(reference, measurement, active, veto=candidate.veto)
             if old.accepted != new.accepted:
                 changed.append({"candidate": candidate.name, "was": old.rule, "now": new.rule,
                                 "was_accepted": old.accepted, "now_accepted": new.accepted})
             elif old.rule != new.rule:
                 relabelled.append({"candidate": candidate.name, "was": old.rule, "now": new.rule,
                                    "accepted": old.accepted})
-        if changed or relabelled:
+        if changed or relabelled or cross:
             entries.append({
                 "round": name,
                 "stream": (payload.get("stream") or {}).get("source") or "?",
                 "recorded_hash": payload.get("rules_hash"),
                 "changed": changed,
                 "relabelled": relabelled,
+                "cross": cross,
             })
     return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials, entries=entries)
 
@@ -2090,8 +2175,13 @@ def format_audit(result: Audit) -> str:
     lines.append("=" * 96)
     lines.append("current rules     %s  (%s)" % (result.fingerprint,
                                                 json.dumps(result.rules.to_dict(), sort_keys=True)))
-    lines.append("recorded rounds   %d  (%d candidate measurements re-decided, no re-run)"
-                 % (result.rounds, result.trials))
+    re_decided = result.trials - result.cross
+    if result.cross:
+        lines.append("recorded rounds   %d  (%d candidate measurements re-decided, %d not reconstructable, "
+                     "no re-run)" % (result.rounds, re_decided, result.cross))
+    else:
+        lines.append("recorded rounds   %d  (%d candidate measurements re-decided, no re-run)"
+                     % (result.rounds, re_decided))
     lines.append("")
     if not result.entries:
         lines.append("every recorded verdict survives today's rules.")
@@ -2103,9 +2193,11 @@ def format_audit(result: Audit) -> str:
         if entry["changed"]:
             detail = ", ".join("%s %s -> %s" % (item["candidate"], item["was"], item["now"])
                                for item in entry["changed"])
-        else:
+        elif entry["relabelled"]:
             detail = ", ".join("%s %s -> %s (same verdict)" % (item["candidate"], item["was"], item["now"])
                                for item in entry["relabelled"])
+        else:
+            detail = "%d comparison(s) not reconstructable" % len(entry["cross"])
         lines.append("%-26s %-10s %-14s %s" % (entry["round"], entry["stream"], recorded, detail))
     lines.append("")
     if result.moved:
@@ -2118,6 +2210,13 @@ def format_audit(result: Audit) -> str:
     if result.stale:
         lines.append("%d recorded round(s) carry a different ruleset fingerprint, so their numbers were "
                      "measured under an objective that no longer exists." % result.stale)
+    if result.cross:
+        lines.append("")
+        lines.append("%d comparison(s) could not be reconstructed: the record does not say which reference"
+                     % result.cross)
+        lines.append("the round compared them with, so replaying them against the stored baseline would")
+        lines.append("measure a different geometry and report that as a rule change (boundary 71). No")
+        lines.append("verdict is reported for them.")
     return "\n".join(lines)
 
 

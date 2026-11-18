@@ -1624,6 +1624,75 @@ on this stream    recall 0.297  unmeasurable
 
 **边界 70：记录里没有本几何的参照基线，那次接受就不是测量点。** 一条旧接受是在"另一几何下的基线"上做出的；`--audit` 能说出"今天的规则会怎么判"，但重判需要那次没做过的测量。所以这类接受只能被排除在种子之外，不能被"重判为接受"——一个无法重建比较的记录，只能当历史，不能当证据。
 
+## 3.39 记录必须能被读回来：复核用错基线，会把几何算成规则改动
+
+上一轮把比较搬到了候选自己的窗口：`run_round` 现在为每个不同的窗口测一条 `baseline@<window>`，
+候选只跟同一几何的参照相减。但那条修复只搬了**跑一轮**的路径。`rejudge` 与 `--audit` 走的是
+另一条路，它们仍然只读 `payload["baseline"]`——于是同一个候选在复核时被拿 286 的测量去减 200
+的基线，几何差被报成了规则改动。
+
+证据是一次"规则没动、判决却动了"的复核：
+
+```
+$ python -m brian.cli evolve --rejudge var\evolve\round-20261118T012841Z.json
+recorded rules    {"alert_budget": 0.1, "cost_tolerance": 0.05, ... , "recall_tolerance": 0.0}
+current rules     {"alert_budget": 0.1, "cost_tolerance": 0.05, ... , "recall_tolerance": 0.0}
+
+candidate                              recorded               re-decided             change
+host-rolling-rank-0-85-200@hint286-0-8 reject gain            accept quality         -> accept
+host-rolling-rank-0-85-200@hint286-0-75 reject gain           accept quality         -> accept
+host-rolling-rank-0-85-200@hint286-0-8-572 accept operational reject recall          -> reject
+
+3 verdict(s) changed. The stored measurements were not re-run; only the rules moved.
+```
+
+两个规则集字节相同（指纹 `83abef5480cc`），"only the rules moved" 是一句假话：动的是参照。
+`@hint286-0-8` 的"新理由"甚至写着 `recall at 10% false positives 0.297 -> 0.427`——0.427 正是它
+自己窗口上的参照值，复核把"和参照打平"读成了"相对旧基线大涨 44%"。
+
+读代码时又发现第二个独立缺陷：`Measurement.from_dict` 从不回读 `alert_budget`、`prevalence`、
+`alerts_at_free_cut`、`scored_at_free_cut`。这四个字段写进记录很久了，从来没有读回来过——于是
+任何被重新判定的记录都会悄悄丢掉无标签上限。**写出来但读不回来的字段，比没有这个字段更糟：
+记录看上去是完整的。**
+
+修法三件：
+
+1. `Measurement.window`：一条测量记录自己带上它被测量时的窗口。`to_dict()`/`from_dict()` 成对，
+   `test_every_measurement_field_is_written_out` 用 `dataclasses.fields()` 兜住所有字段，将来再加
+   一个字段而忘了序列化，会直接红。
+2. `recorded_reference(payload, measurement, baseline)`：有 `window` 就取
+   `references[str(window)]`；没有 `window` 时分两种——整份记录里根本没有 `references`（round 31
+   之前写下的），按 `baseline` 复算，因为当时就是这么判的；有 `references` 却没有标明这一条用了
+   哪一个（round 31 与 round 32 之间写下的记录），**不猜**。
+3. 第三种结局：`Rejudge.withheld` 与 `Audit.cross`。判不出来的比较既不是"改判"，也不是"没变"，
+   它没有结论；表里单独一列，`--rejudge` 列出被扣下的候选名，并说明为什么扣。
+
+修复前后的账本对比说明了代价有多大：
+
+| 指标 | 修复前（round 31 收盘） | 修复后 |
+| --- | --- | --- |
+| 会被今天规则改判 | 10 | 7 |
+| 改属规则但判决不变 | 22 | 18 |
+| 无法重建（不报结论） | — | 23 |
+| 重新判定过的测量 | 193 | 170 |
+
+也就是说，那"10 个今天会改判"里有 3 个、22 个改属规则里有 4 个，是复核自己造出来的比较。
+修复后 `--rejudge` 新的记录（`round-20261118T013838Z.json`）打印 `0 changed, 0 withheld`——同一份
+记录能被读回来，复算得出同一批判决。
+
+三条读法：
+
+- **复核必须问记录"当时用的是哪个参照"**，而不是"现在默认的参照是什么"。参照是那一轮实验条件
+  的一部分，和几何、采样密度一样，不属于可选项。
+- **写了但从不读的字段比缺字段更危险**，因为缺字段会报错，而它只是安静地丢信息。
+- **"无法重建"是第三种结局**。把它并入"没变"会让一条读不回来的记录看起来被验证过——这正是
+  这一轮要消灭的那类句子。
+
+**边界 71：复核必须使用当轮使用的同一个参照，否则它报告的是自己的比较，并把几何说成规则改动。**
+
+**边界 72：一次测量必须带上它被测量时的几何；参照存在但没有标明用在哪一次测量上，等于没有参照。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -1767,3 +1836,7 @@ missing for the next level
 
 19. **（3.37 已完成）提示变成提案，并且按承诺而不是按基线判。** reshape 作为候选进入每一轮（`@hintN`，带 `promise` 与 `provenance`），`decide()` 用 `reshape` 规则回答"它还能不能兑现当初的承诺"：这一轮是 **reject**——0.427 对承诺 0.507，"恢复的是可比性，不是承诺"，在役配置不动；同一批邻居按 `quality` 被接受（0.297 → 0.427），两个理由都进账本。跑这一轮抓到五个缺陷：承诺只长在候选上而没随测量走、`from_dict` 丢掉承诺、种子来自旧规则的接受、跨密度的量级被当种子、以及换个名字的同一条改动绕过了承诺规则（边界 65/66/67）。剩下的路：**把到期做成一轮的输入**（§6 第 18 条的另一条路——到期版本自动进入候选，而不是等一次手动 `--verify`），以及**把接受范围绑到采样上**（现在一次接受属于哪条流靠 `source`，属于哪种密度靠 `_same_shape` 现场比，两者都不是记录里的一等字段）。
 20. **（3.38 已完成）同一几何才能相减。** `run_round` 现在按候选自己的窗口取基线（`baseline@<window>`，每个几何只测一次，写进 `references`），于是"把窗口从 200 换成 286"不再被记成 +44% 的检测收益：第 30 轮那三个"被接受的邻居"在 286 的基线下全部是平手，而 reshape 仍按承诺判为 reject（边界 68/69）。提议器同时学会不把"记录里没有本几何参照"的旧接受当种子（边界 70）。剩下的路：把几何写进 `RoundResult.baseline` 本身（`window`/`cadence_s` 与那个 `Measurement` 同层），让 `--audit` 能直接标出"这次的比较无法重建"，而不是靠推断。
+
+21. `--audit` 的 campaign 列分成 changed / relabelled / not-reconstructable 三列，并让
+    `--strict` 对"无法重建"给出语义（现在它只出现在表尾一句话里）；旧记录可以在下一次重测时
+    补上几何，而不是永远停在"读不回来"。
