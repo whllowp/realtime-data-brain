@@ -1329,6 +1329,57 @@ round-20261117T235604Z.json RCAEval RE1-OB   deviation-bar-free gain -> cost
 1. **同一个"接受"可能有两个名字**。先命中"质量涨、账单没涨"就叫 `quality`，先命中"事件单价下降"就叫 `cost`；名字描述的是理由，不是功劳大小。第 19 轮那条测试因此从断言 `rule == "quality"` 改成 `rule == "cost"`，并在注释里写清顺序。
 2. **事件单价没法替代在役那一列**。`recall_at_budget` 对门限类候选是不变量（3.14 节），所以"找到多少事件"必须再用实际翻页那一列兜一次底；这也是第 54 条边界。
 
+## 3.32 把 35 轮汇总成一张表：战役报告，以及它不能声称的东西
+
+到这一轮为止账本里有 35 条记录、130 个候选测量、46 次接受，但**没有任何一处能回答"这些轮次一共买到了什么"**。每一轮都能说清自己拒绝了谁，却没有一个视图把它们并排放；调研里把这种状态叫 scientific amnesia——行为在变，方法论不留痕。本节加的不是新机制，而是一张从已有记录里读出来的表。
+
+### 读什么，不读什么
+
+新模块 `src/brian/campaign.py` 只做汇总，不做测量：不调用 Laya、不重跑任何一轮（"它打印的每个数字都是某一轮测出来的，所以它没法用一次自己挑的新测量来给自己贴金"）。三个来源：
+
+- `var/evolve/round-*.json` + `ledger.jsonl`（`history()`）：每轮测了哪条流（`stream.source`）、候选的判决规则（`cost` / `quality` / `operational` / `gain` / …）、哪一轮写入了版本；
+- `var/evolve/versions/v*.json`（`load_promotions()`）：每份版本承诺了什么（`claim`）、是否被复核过（`verification`）、是否被自动回滚；
+- `var/evolve/domains/<slug>/current.json`（`current_state(domain)`）：每个域现在真正在役的变量与来源版本。
+
+命令是 `brian evolve --campaign`（`--json-out` 输出同一批数字）。**流字段在第 3 轮才出现**，所以那之前的一轮无法归属；它被放进 `(unattributed)` 一行并标注"no stream recorded"，而不是猜一个域——猜出来的归属会让总数和账本对不上。
+
+### 这一轮的真实输出
+
+```
+rounds            35  (130 candidate measurements, 46 accepted, 84 rejected)
+applied           10 round(s) wrote versions; 1 version(s) were reverted
+audit             7 verdict(s) would be decided differently today, 18 relabelled
+unattributed      1 round(s) predate the stream field
+
+domain             rounds trials accept in force  shipped claim
+------------------------------------------------------------------------------------------------
+SMD                    18     80     26 20        recall 0.507 at the 10% budget, 3358 tokens/report
+  accepted by       cost x9, operational x8, quality x9
+  rejected by       deploy x6, fpr x2, gain x16, no-reports x13, operational x7, recall x4, veto x6
+  in force          BRIAN_DIGEST_ROLLING_WINDOW=200 BRIAN_DIGEST_SCORING=auto BRIAN_GATE_RANK_P=0.85  (unverified)
+demo                    9     23     13 -         no claim recorded
+  accepted by       cost x10, operational x3
+  rejected by       gain x10
+RCAEval RE1-OB          7     25      6 19        recall 0.860 at the 10% budget, 1703 tokens/report
+  accepted by       cost x3, quality x3
+  rejected by       cost x1, gain x8, no-reports x6, operational x2, veto x2
+  in force          BRIAN_DIGEST_SCORING=deviation BRIAN_GATE_ANOMALY_P=0.87 BRIAN_GATE_NOTIFY_P=0.87  (unverified)
+(unattributed)          1      2      1 -         no claim recorded  (no stream recorded)
+  accepted by       cost x1
+  rejected by       evidence x1
+```
+
+### 四点读法
+
+1. **接受率不是交付率。** 46 次接受，只有 10 轮写出了版本，而真正在役的只有两份（SMD 的 `v020`、服务域的 `v019`）。中间的差额不是浪费，而是"同一轮里的多个接受是备选、不是叠加"（边界 40）——但把 46 读成"有 46 项改进"就是错的，这张表第一次把这个差放在同一页上。
+2. **拒绝才是多数，而且原因可数。** SMD 上 80 次测量里 `gain` 16、`no-reports` 13、`operational` 7、`veto` 6、`deploy` 6。最有信息量的是 `no-reports`：那一列不是"候选没用"，而是这条流在该配置下一份报告都不产生，成本列无从比较（第 2、3 轮就是被它掩盖的）。
+3. **两个域的"在役"都还是 `unverified`。** 复核只在第 16 轮跑过 `v002`/`v003`/`v011`/`v013`；`v019` 与 `v020` 是后来接受的，从来没拿新数据回测过。这张表把这句话显式印出来，而不是留给人去翻 `versions/`。
+4. **`demo` 有 13 次接受、零承诺。** 合成流是规则试验场：`cost` 规则在那里被反复验证过（x10），但它没有任何版本的承诺，也没有域状态。把它单列一行，是为了让"这不是生产结论"变成一个可见的事实，而不是一段注释。
+
+### 它不能声称什么
+
+这张表是**已记录主张的索引**，不是"战役改善了系统"的证据。每个数字都由写下它的那一轮测出，唯一今天被重算的是 audit 那一列（7 条会翻、18 条换理由）。想让它变成证据，缺的是同一份配置在固定留出集上跨轮的可比测量——而这正是边界 47（基线移动）与 33（承诺依赖数据集）在挡的东西。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -1423,6 +1474,8 @@ missing for the next level
 54. **事故单价可以靠少找事故变便宜**：`recall_at_budget` 对只动门限的候选是不变量，所以"每事件花费下降"必须同时要求在役召回不下降；否则一个把翻页量砍到五分之一的配置会被算成"更省"。第 24 轮的 `--audit` 抓到过一次。
 55. **判决的名字取决于规则顺序**：同一次接受到底叫 `cost` 还是 `quality`，取决于哪条分支先命中；名字解释理由，不解释功劳大小，跨轮比较时看数不看名。
 
+56. **战役报告是索引，不是证据。** 3.32 节那张表把 35 轮记录按流汇总，但它打印的每个数字都来自写下它的那一轮；今天真正重算的只有 audit 那一列。所以"完成 25 轮"不等于"系统变好了 x%"——要得到后者，需要同一份配置在固定留出集上跨轮重复测量，而边界 47（基线随部署移动）与边界 33（承诺依赖数据集）都不允许把历史数字直接连成趋势线。
+
 ---
 
 ## 6. 下一步（按验证强度排序）
@@ -1445,3 +1498,5 @@ missing for the next level
 12. **（3.29 已完成）状态按域分开，提议器不再测量自己的基线。** `var/evolve/domains/<slug>/current.json` + `domain_slug` + `promotions_for_domain` 让"在役"有了域限定词；`--propose` 与真正的轮次都会把"描述在役配置"的候选丢掉并计数。本轮在 SMD 上接受了 `host-rolling-rank-0-85-200`：预算内召回 0.224 → 0.507，每故障 token 17973 → 7419，无标签召回 0.209 → 0.284。剩下的路：**给每个域一份自己的候选目录**（现在目录只服务主机形态，服务域的那四个渲染候选全是"no change"），**把告警率预算与误报率预算分开建模**（边界 45），以及**让每故障 token 在成本路径上也能单独成为接受理由**——本轮的 1341 → 352 就是因为召回没动而被忽略。
 
 13. **（3.31 已完成）每次事件的花费是独立的成本出口。** `decide()` 在质量路径之前先看 `tokens_per_incident`：只要预算内在役两列召回都不降、每事件花费按成本门槛下降，就接受为 `cost`；第 19 轮那条 `reject cost` 经 `--rejudge` 当场翻成 `accept cost`（15516 → 1341 每事件）。泄漏（靠砍翻页量买便宜）由 `paging_holds` 堵住。
+
+14. **（3.32 已完成）35 轮汇总成一张表：战役报告，以及它不能声称的东西。** `brian evolve --campaign` 从账本、版本文件与按域状态里读出每一条流的轮次数、按规则的接受/拒绝分布、在役版本与它的承诺，audit 那一列用今天的规则重算。表第一次把三件事放在同一页：46 次接受只写出 10 份版本、真正在役只有两份、而且两份都是 `unverified`；`demo` 的 13 次接受零承诺也被显式列出。剩下的路：（a）给在役版本补一次留出复核，让 `unverified` 变成 `holds` 或 `failed`；（b）让"同一配置跨轮可比"成为可能——这需要固定留出集与固定基线，而它与边界 47 直接冲突，是一个需要产品口径的取舍，不是又一条规则。
