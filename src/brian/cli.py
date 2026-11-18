@@ -76,6 +76,8 @@ from .promote import (
     revert_promotion,
     version_label,
     rescale_hint,
+    rescaled_candidate,
+    shape_note,
     write_verification,
 )
 from .pipeline import Pipeline
@@ -465,11 +467,29 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # Not comparable: this stream is sampled differently from the one the claim was made
                 # on, so the check neither confirms nor retracts. The deployment state is left alone —
                 # applying on an unknown would be as wrong as reverting on one.
+                shape = rescaled_candidate(promotion, promotion.stream, checked_stream) \
+                    if getattr(args, "at_hint", False) else None
+                if shape is not None:
+                    # The same version at a comparable horizon. Recorded beside the refusal, never applied:
+                    # a different window count is a different version, so it cannot inherit this claim.
+                    measured = measure(settings, shape, streams, pool, budget=rules.fpr_budget)
+                    payload["shape"] = {
+                        "window": next((value for section, field, value in shape.changes()
+                                        if section == "digest" and field == "rolling_window"), 0),
+                        "recall_at_budget": measured.recall_at_budget,
+                        "fpr_at_budget": measured.fpr_at_budget,
+                        "reports": measured.reports,
+                        "claimed_recall": promotion.claim.recall_at_budget,
+                        "candidate": shape.describe(),
+                    }
                 write_verification(root, promotion, payload)
                 _print("  v%03d  %s  unmeasurable: %s" % (promotion.version, promotion.change, reason))
                 hint = rescale_hint(promotion, promotion.stream, checked_stream)
                 if hint:
                     _print("        hint  %s" % hint)
+                note = shape_note(payload)
+                if note:
+                    _print(note)
         _print("")
         _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain))
         return 0
@@ -1568,6 +1588,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-decide every recorded round under today's rules and exit")
     evolve.add_argument("--campaign", action="store_true",
                         help="summarise every recorded round per stream, then exit (no Laya)")
+    evolve.add_argument("--at-hint", action="store_true",
+                        help="with --verify: also measure the version at the window count that covers "
+                             "the same span, and record it as another shape of the same promise")
     evolve.add_argument("--verify", action="store_true",
                         help="re-measure every unverified promotion and revert the ones whose claim "
                              "no longer holds, then exit")

@@ -1455,6 +1455,47 @@ a window covers 2100 s of traffic here against 3000 s when the claim was made (0
 
 三点读法：（1）**密度是承诺的一部分**——一个"最近 N 个窗口"的承诺，N 在没有密度的情况下不可比；（2）**拒绝也必须可执行**，判不出来时给出"怎样才判得出来"，否则 `unmeasurable` 就是死胡同；（3）`v020` 自己的记录里没有 `cadence_s`（它是第 22 轮写的，那时还没有这个字段），所以它的复核仍然只能按窗口数判——这个修法是**向前生效**的，历史记录不补写。
 
+### 3.35 测试这个解释：0.297 里有多少是窗口几何
+
+3.34 节给出的仍然是一句**解释**："密度不同，所以排名只看了 70% 的时间跨度。" 解释是可以被证伪的，而且只需要一次测量：把同一个版本放到 hint 给出的窗口数上再跑一遍，看它回到多高。不做这一步，就等于把"我认为原因是几何"当成"原因是几何"——这正是本文档反复批评的那种自证。
+
+**实验**（`var/probe_hint_experiment.py`，两条真实流，同一个 `measure`）：
+
+```
+v020: digest.scoring = 'auto', digest.rolling_window = 200, gate.rank_probability = 0.85
+承诺的几何: scored 828  cadence 3000 s        复核的几何: scored 1235  cadence 2100 s
+hint: BRIAN_DIGEST_ROLLING_WINDOW=286 (200 x 3000 s = 600000 s)
+
+承诺那条流  window 200  recall@b 0.507  fpr@b 0.091  reports 172
+承诺那条流  window 286  recall@b 0.396  fpr@b 0.092  reports 141
+复核那条流  window 200  recall@b 0.297  fpr@b 0.092  reports 221
+复核那条流  window 286  recall@b 0.427  fpr@b 0.080  reports 219
+```
+
+**读法一：解释成立了一大半，但不是全部。** 换到等价窗口数后，`v020` 在复核流上从 0.297 恢复到 **0.427**，即 0.210 的缺口里 0.130（62%）是窗口几何。剩下的 0.080 回到那条承诺流的自身特性上：`200` 这个值当初是**在承诺流上被测得最好**才被接受的，所以承诺里本来就掺了"这条流的采样"这一项。**承诺是配置与被选流共同的性质**，不是配置单独的性质。
+
+**读法二：等价窗口数是可比性工具，不是最优值。** 在承诺流上，286 反而更差（0.507 → 0.396）。所以 hint 的作用是"让两次测量量同一个东西"，绝不能当成"应该把在役窗口改成 286"的建议——后者需要在这条流上重新做一轮，而不是从一次换算是推出来的。
+
+**测量装置**：`src/brian/promote.py` 的 `rescaled_candidate(promotion, recorded, checked)` 返回"只改窗口数、其余设置不变"的候选（名字带 `@hint286`），`shape_note()` 打印它与承诺的比值。`--verify --at-hint` 把这个候选送进同一个 `measure`，结果写进该版本 `verification` 的 `shape` 字段，而判决仍是 `unmeasurable`：
+
+```
+  v020  ...  unmeasurable: the re-check measured 1235 scored windows against the 828 ...
+        hint  a comparable re-check on this stream would use BRIAN_DIGEST_ROLLING_WINDOW=286
+              (200 windows of 948 is the same share of the recording as 286 of 1355)
+        shape  the same version at rolling_window=286 recalls 0.427 on this stream, 84% of the promised 0.507
+```
+
+`shape` 不应用、不回滚：窗口数不同就是另一个版本，不能让被复核的这一份继承它的结果。但**它必须能被看见**——只打印在终端里的拒绝仍然是死胡同。所以 `format_promotions()` 在版本行下面重打这一行，`--campaign` 的表格里也就能看到"这份在役承诺在可比形状上是什么样"。
+
+**hint 对早期记录仍要给出数字。** v020 写在 `cadence_s` 存在之前，第一版 `rescale_hint` 因此对它返回 `None`——恰恰是最需要的那个版本拿不到 hint。现在两边都有 `cadence_s` 时按密度算，否则按**窗口数之比**算（`recorded.windows / checked.windows`），因为拒绝判词本来就引用了同一个比值（"1235 对 828，1.49 倍"）。两种口径在这条数据上给出同一个 286，措辞分别说明用的是哪一种：
+
+```
+BRIAN_DIGEST_ROLLING_WINDOW=286 (200 windows x 3000 s is 600000 s of traffic, ...)
+BRIAN_DIGEST_ROLLING_WINDOW=286 (200 windows of 948 is the same share of the recording as 286 of 1355)
+```
+
+**顺带修掉一个记录卫生缺陷。** 调试拒绝时把同一条 `--verify` 跑了三遍，`checks` 于是攒出三个一模一样的 `unmeasurable`，表格读作 `(4 earlier checks)`。`write_verification()` 现在只在判决、理由或 `shape` 发生变化时才把上一条存进 `checks`：重复的复印件不是历史。
+
 ---
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
@@ -1561,6 +1602,10 @@ missing for the next level
 
 60. **拒绝必须给出下一步。** `unmeasurable` 只说"判不出来"就是死胡同：它让一份承诺永远停在未知状态，而且看起来像已经处理过了。判词里要带上"怎样才判得出来"（这里是等价的窗口数），并且明确这个数字是报告而不是应用。
 
+61. **承诺是配置与被选流共同的性质。** 3.35 节把"窗口几何"这个解释测了一遍：换到等价密度后，`v020` 从 0.297 回到 0.427，但没回到 0.507。剩下的部分是选择效应——这个窗口数当初是在那条流上测得最好才被接受的。因此**任何"这条配置能做到 X"的说法都隐含"在这条流上"**，而留出复核只能证实机制是否迁移，无法证实那个数是否会在另一条流上复现。
+
+62. **等价换算是可比性工具，不是最优值。** 在承诺自己的流上，hint 给出的 286 比 200 更差（0.507 → 0.396）。把 hint 读成"应该改成 286"就是把一次换算当成了实验结论；它唯一的作用是让两次测量量同一个东西。
+
 ---
 
 ## 6. 下一步（按验证强度排序）
@@ -1589,3 +1634,5 @@ missing for the next level
 15. **（3.33 已完成）在役版本补了留出复核，并给复核加了形状前置条件。** `v019` 在 15 个没见过的 RCAEval 案例上 `holds`（0.857 对承诺 0.860）；`v020` 先被一次不同采样的复核误回滚，加 `_geometry_mismatch` 后改判 `unmeasurable`，在自己那段数据上精确 `holds`（0.507/3358 对 0.507/3358）。`--verify` 有了第三种结局：未知既不应用也不回滚，只记录。剩下的路：**让承诺自己带上采样形状**（现在 `stream` 字段记录了窗口数与事件数，但 `200` 个窗口意味着多长时间仍要靠比对才能看出），以及**给 `unmeasurable` 一个到期提醒**——一份永远判不出来的承诺与一份没复核过的承诺，区别只在于我们知道自己不知道。
 
 16. **（3.34 已完成）把采样密度写进承诺，把"拒绝"变成数字。** `summarise()` 记录 `cadence_s`/`span_s`，`_geometry_mismatch` 多一道密度比较，`rescale_hint` 在判不出来时给出等价窗口数（200 → 286），`--campaign` 分开计数 holding / not comparable / never re-checked。实测两条 SMD 流总时长几乎相同（788.3 h 对 789.2 h）而密度差 1.49 倍，`v020` 的 0.297 因此有机械解释。剩下的路：**让 `--verify` 支持按 hint 重测**（用等价窗口数跑一次，把结果记成"同一承诺的另一形状"，而不是新版本），以及**给 `unmeasurable` 设到期**——一份永远判不出来的承诺，与一份没复核过的承诺，区别只在于我们知道自己不知道。
+
+17. **（3.35 已完成）解释被测了一遍：窗口几何解释了 62% 的缺口。** `--verify --at-hint` 用等价窗口数重新测量被拒绝的版本，把结果记成 `verification.shape`（判决仍是 `unmeasurable`，不应用也不回滚），`format_promotions` 与 `--campaign` 会重打这一行。`v020` 在复核流上 0.297 → 0.427（承诺 0.507）：剩下的 0.080 归因于"200 这个窗口数是在承诺流上选出来的"（边界 61）；而等价值在承诺流上反而更差（0.507 → 0.396），说明它是可比性工具而非最优值（边界 62）。顺带修掉记录卫生缺陷：同一份拒绝重复复核三遍时，`checks` 不再堆出三份复印件。剩下的路：**给 `unmeasurable` 设到期**（现在一份判不出来的承诺可以无限期悬着，与"从未复核"只在记录里差一个词），以及**让提议器学会"按另一条流的密度折算"这种提出方式**——hint 能算出 286，但循环还不会主动提出它。

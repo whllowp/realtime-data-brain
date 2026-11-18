@@ -222,8 +222,14 @@ def write_verification(root: Path, promotion: Promotion, payload: Mapping[str, A
     """
     document = json.loads(promotion.path.read_text(encoding="utf-8"))
     checks = list(document.get("checks") or [])
-    if document.get("verification"):
-        checks.append(document["verification"])
+    previous = document.get("verification") or {}
+    # An identical re-run adds no information, and a re-check repeated while debugging a refusal would
+    # otherwise outnumber the checks that actually moved the verdict (round 28 saw "4 earlier checks" for
+    # three copies of one refusal). A run that differs in verdict, reason or recorded shape is kept.
+    if previous and (previous.get("verdict") != payload.get("verdict")
+                     or previous.get("reason") != payload.get("reason")
+                     or previous.get("shape") != payload.get("shape")):
+        checks.append(previous)
     if checks:
         document["checks"] = checks
     document["verification"] = dict(payload)
@@ -516,20 +522,82 @@ def rescale_hint(promotion: "Promotion", recorded: Optional[Mapping[str, Any]],
     claimed = _claimed_window(promotion)
     before_cadence = recorded.get("cadence_s")
     after_cadence = checked.get("cadence_s")
-    if not claimed or not before_cadence or not after_cadence:
+    if not claimed:
         return None
-    # Only when the cadence difference is what refused the check: a 2% difference changes the equivalent
+    # Only when the shape difference is what refused the check: a 2% difference changes the equivalent
     # window count too, and printing a "comparable" number for a comparison that was never refused would
     # imply the deployment should change when nothing is wrong.
-    if abs(float(after_cadence) / float(before_cadence) - 1.0) <= GEOMETRY_TOLERANCE:
+    if _geometry_mismatch(recorded, checked) is None:
         return None
-    equivalent = max(1, int(round(claimed * float(before_cadence) / float(after_cadence))))
+    if before_cadence and after_cadence:
+        ratio = float(after_cadence) / float(before_cadence)
+        basis = "cadence"
+    elif recorded.get("windows") and checked.get("windows"):
+        # Rounds before `cadence_s` still recorded their window count, and the ratio of window counts is the
+        # same quantity the refusal quoted — fewer windows over the same span means less traffic per window.
+        ratio = float(recorded["windows"]) / float(checked["windows"])
+        basis = "window count"
+    else:
+        return None
+    if not ratio:
+        return None
+    equivalent = max(1, int(round(claimed / ratio)))
     if equivalent == claimed:
         return None
-    return ("a comparable re-check on this stream would use BRIAN_DIGEST_ROLLING_WINDOW=%d "
-            "(%d windows x %.0f s is %.0f s of traffic, the same span %d windows covered here)"
-            % (equivalent, claimed, float(before_cadence),
-               claimed * float(before_cadence), equivalent))
+    if basis == "cadence":
+        detail = ("%d windows x %.0f s is %.0f s of traffic, the same span %d windows covered here"
+                  % (claimed, float(before_cadence), claimed * float(before_cadence), equivalent))
+    else:
+        detail = ("%d windows of %d is the same share of the recording as %d of %d"
+                  % (claimed, recorded["windows"], equivalent, checked["windows"]))
+    return ("a comparable re-check on this stream would use BRIAN_DIGEST_ROLLING_WINDOW=%d (%s)"
+            % (equivalent, detail))
+
+
+def rescaled_candidate(promotion: "Promotion", recorded: Optional[Mapping[str, Any]],
+                       checked: Optional[Mapping[str, Any]]) -> Optional[Candidate]:
+    """The same version, with its window count changed to cover the same wall-clock on this stream.
+
+    `None` when there is nothing to rescale: no candidate, no window knob, or no comparable shape pair. The
+    returned candidate is a *measuring instrument*, not a proposal — it is what `--at-hint` puts through
+    `measure` so a refused check can still say what the promise does at a comparable horizon.
+    """
+    hint = rescale_hint(promotion, recorded, checked)
+    if hint is None or promotion.candidate is None:
+        return None
+    try:
+        value = int(hint.split("BRIAN_DIGEST_ROLLING_WINDOW=")[1].split()[0])
+    except (IndexError, ValueError):
+        return None
+    changes = []
+    for section, name, current in promotion.candidate.changes():
+        if section == "digest" and name == "rolling_window":
+            changes.append((section, name, value))
+        else:
+            changes.append((section, name, current))
+    if all(change[2] == current[2] for change, current in zip(changes, promotion.candidate.changes())):
+        return None
+    first = changes[0]
+    return Candidate(name="%s@hint%d" % (promotion.candidate.name, value),
+                     hypothesis=promotion.candidate.hypothesis,
+                     section=first[0], field=first[1], value=first[2], also=tuple(changes[1:]))
+
+
+def shape_note(payload: Optional[Mapping[str, Any]]) -> str:
+    """One line for the `shape` a verification recorded, or "" when it recorded none."""
+    shape = (payload or {}).get("shape")
+    if not shape:
+        return ""
+    recall = shape.get("recall_at_budget")
+    claimed = shape.get("claimed_recall")
+    if recall is None:
+        return ""
+    if claimed:
+        return ("        shape  the same version at rolling_window=%d recalls %.3f on this stream, "
+                "%.0f%% of the promised %.3f"
+                % (shape.get("window") or 0, recall, 100.0 * recall / claimed, claimed))
+    return ("        shape  the same version at rolling_window=%d recalls %.3f on this stream"
+            % (shape.get("window") or 0, recall))
 
 
 def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules,
@@ -613,6 +681,11 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
             note = "%s  (%d earlier check%s)" % (note, earlier, "" if earlier == 1 else "s")
         lines.append("%-8s %-26s %-12s %s%s" % ("v%03d" % promotion.version, promotion.change[:26],
                                                 promise, note, legacy_mark))
+        # A refusal that recorded the comparable shape keeps it here: the number is the point of the
+        # refusal, so a table that hides it makes the refusal look like a dead end (round 28).
+        shaped = shape_note(promotion.verification)
+        if shaped:
+            lines.append(shaped)
     if state is not None:
         lines.append("")
         env = dict(state.get("env") or {})
