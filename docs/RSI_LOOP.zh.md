@@ -2931,6 +2931,58 @@ file unknown      52 of 55 round(s) still cannot be placed — 16 left by the li
 而不是一个动词触发的整段预算。
 
 
+### 3.60 一次一轮的欠账要能看到余额：队列、投影，以及"什么才算还清"
+
+第 52 轮把"候选文件"变成了一次重跑，但每次只还一轮。一个一次一轮的命令如果不说还剩多少、也不说跑完会
+是什么样，读者得到的印象就是"什么都没发生"——它花了四分钟测量，页面上那个 95% 只动了 2 个百分点。
+
+这一轮给队列加了余额与投影：
+
+```
+$ brian evolve --unrecorded
+rounds            52 of 55 cannot be attributed; 16 of them still decide something
+queue             16 round(s) can be re-run here; 1 already re-measured; the share would fall 95% -> 65%
+```
+
+```
+$ brian evolve --rerun-unrecorded --rerun-limit 1
+candidates        16 of 16 round(s) have exactly one file; 0 cannot be placed
+progress          1 round(s) already re-measured into a named successor; 16 still to do
+projection        if the rest are re-run the unrecorded share falls 95% -> 65% of 55 round(s)
+limit             1 of the 16 will be re-run here; the rest keep their place until the command runs again
+
+---- re-running round-20261117T203743Z.json on data/smd/stream.json
+… （表格与判决，然后）
+recorded round var\evolve\round-20261118T043112Z.json
+retired round-20261117T203743Z.json (re-measured as round-20261118T043112Z.json)
+  9 of its 9 trial(s) appear in the successor: events-8, events-4, reuse-300, analyze-pages-only, …
+  progress         2 of 16 re-measured; 14 left, share 93% -> 67% if the rest run
+file unknown      51 of 55 round(s) still cannot be placed — 15 left by the limit above
+```
+
+这一轮的重叠是 **9 of 9**：九个候选全部被重测，问题原样被回答了一遍。旧记录离开表格，新记录带着
+`stream_path` 进场，那个 95% 掉了 2 个百分点——但页面上现在写清了它为什么只掉 2 点，以及继续跑会掉到哪。
+
+三个设计选择：
+
+**一、进度从账本推导，不另存一个进度文件。** 一份记录"已还清"的定义是：**它被退役进了一个会说出文件的继任者**。
+退役到一个仍然说不出文件的继任者不算（那正是第 52 轮第一版的缺陷），没写继任者也不算。第二个状态文件会长出
+自己的不一致："账本说做完了、测量说没做"，而这份代码的价值恰恰是让两句话必须同时为真。
+
+**二、投影只承诺队列能承诺的东西。** 每重跑一轮，退休一条无名记录、新增一条有名记录，总数不变、分子减一。
+所以"全部跑完"的终点是可以用这两个数算出来的：`(无名 − 可重跑) / 总数`。它不是一个预测（剩下的轮次可能被
+跳过，可能读不回来），只是"如果都跑完"的算术。
+
+**三、投影必须与"还清"的定义共用一套判定。** 同一个函数同时喂 `--unrecorded` 的 `queue` 行和
+`--rerun-unrecorded` 的 `progress`/`projection` 行；两处若各写一份，读者会在两页上看到两个余额。
+
+**边界 115：一个一次一轮的还款命令必须报余额与终点。** 只说"重跑了一轮"等于让读者自己算还剩多少——
+而人不会算，人只会觉得没进展。
+
+**边界 116：进度必须从账本推导，不能来自第二个记账文件。** 两处记账迟早会不一致，而"已还清"与"已回答"
+一旦分开，报表就会说出比测量更多的话。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3152,3 +3204,6 @@ missing for the next level
 
 40. `--rerun-unrecorded` 现在一次一轮。让它在候选文件唯一、且该轮所有候选都能从记录读回时，把 17 轮排成一张
 队列并记录进度（哪几轮已重跑、还剩几轮），这样"98% 会降到多少"可以预估，而不是每次只看到一个移动的数字。
+
+41. 让 `--rerun-unrecorded` 支持排队跑完（`--rerun-limit 0` 表示整队），并在 `--campaign` 表头给出
+进度（已重跑 / 可重跑 / 剩余），这样"95% 会降到多少"在战役报表上也能读，而不是只在这条命令的输出里。

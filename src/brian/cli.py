@@ -447,6 +447,52 @@ def _recorded_candidates(record: Mapping[str, Any]) -> List[Candidate]:
     return out
 
 
+def _rerun_progress(root: Path) -> Dict[str, Any]:
+    """How far the queue of nameable rounds has been paid down (round 53).
+
+    Round 52 turned "which file did this round measure?" into a re-run, one round per invocation. A one-round
+    command that never says how many are left cannot answer the only question a reader has about it — "will the
+    98 % ever come down?" — so the count is derived from the ledger rather than kept in a second state file: a
+    round is paid off when it is retired **into a successor that names a file**. A retirement without a named
+    successor (or into a record that still cannot say which file it measured) crossed the question out without
+    answering it, which is exactly the defect round 52's overlap check reports.
+    """
+    matters = _unrecorded_matters(root)
+    ready = [item for item in matters if len(item[3]) == 1]
+    blocked = [item for item in matters if len(item[3]) != 1]
+    rounds = history(root, include_retired=True)
+    by_name = {str(row.get("round")): row for row in rounds}
+    paid: List[str] = []
+    for row in rounds:
+        retired = row.get("retired")
+        if not isinstance(retired, Mapping):
+            continue
+        successor = by_name.get(str(retired.get("re_measured_as") or ""))
+        if successor is None:
+            continue
+        if str(successor.get("stream_path") or ""):
+            paid.append(str(row.get("round")))
+    live = [row for row in rounds if not row.get("retired")]
+    without_file = [row for row in live if not str(row.get("stream_path") or "")]
+    total = len(live)
+    share_now = (len(without_file) / total) if total else 0.0
+    # Re-running the rest retires one nameless round and writes one that names its file, so the denominator
+    # stays and the numerator falls by one per round. Projecting the end of the queue is the cheapest way to
+    # say whether continuing is worth the measurement minutes.
+    left = min(len(ready), max(0, len(without_file)))
+    share_after = ((len(without_file) - left) / total) if total else 0.0
+    return {
+        "ready": len(ready),
+        "blocked": len(blocked),
+        "paid": len(paid),
+        "remaining": len(ready),
+        "rounds": total,
+        "without_file": len(without_file),
+        "share_now": share_now,
+        "share_after": share_after,
+    }
+
+
 def _unrecorded_matters(root: Path,
                         library: Optional[Sequence[Tuple[str, Dict[str, Any]]]] = None
                         ) -> List[Tuple[str, str, str, List[str]]]:
@@ -749,6 +795,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("=" * 96)
         _print("candidates        %d of %d round(s) have exactly one file; %d cannot be placed"
                % (len(ready), len(matters), len(blocked)))
+        progress = _rerun_progress(root)
+        _print("progress          %d round(s) already re-measured into a named successor; %d still to do"
+               % (progress["paid"], progress["remaining"]))
+        _print("projection        if the rest are re-run the unrecorded share falls %.0f%% -> %.0f%% of %d "
+               "round(s)" % (100.0 * progress["share_now"], 100.0 * progress["share_after"],
+                             progress["rounds"]))
         for domain, name, _why, files in blocked:
             _print("  skipped         %-32s %s" % (name, _candidate_label(files)))
         limit = max(0, int(getattr(args, "rerun_limit", 1) or 0))
@@ -816,6 +868,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             else:
                 _print("  none of its %d trial(s) appear in the successor: this round is retired as a "
                        "question, not answered" % len(rest))
+            step = _rerun_progress(root)
+            _print("  progress         %d of %d re-measured; %d left, share %.0f%% -> %.0f%% if the rest run"
+                   % (step["paid"], step["paid"] + step["remaining"], step["remaining"],
+                      100.0 * step["share_now"], 100.0 * step["share_after"]))
         if ready:
             remaining = sum(1 for record in history(root) if not str(record.get("stream_path") or ""))
             total = len(history(root))
@@ -899,6 +955,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("=" * 96)
         _print("rounds            %d of %d cannot be attributed; %d of them still decide something"
                % (unknown, len(rounds), len(matters)))
+        queue = _rerun_progress(root)
+        if queue["ready"] or queue["paid"]:
+            # Round 53: the same queue the re-run consumes, on the page that motivates it — a reader who
+            # asks "how much of this can actually be paid off" gets the count and the end state, not a
+            # principle.
+            _print("queue             %d round(s) can be re-run here; %d already re-measured; the share "
+                   "would fall %.0f%% -> %.0f%%"
+                   % (queue["ready"], queue["paid"], 100.0 * queue["share_now"], 100.0 * queue["share_after"]))
         if not matters:
             _print("")
             _print("Every round that still decides something says which file it measured.")
