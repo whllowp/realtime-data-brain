@@ -2874,6 +2874,63 @@ SMD              round-20261118T022144Z.json      data/smd/stream-check.json    
 判为"不匹配"，然后"没有候选"看起来像结论，其实是字段年龄。
 
 
+### 3.59 候选文件要变成一次测量：而且必须测记录里的那个问题
+
+第 51 轮把"这一轮测的是哪个文件"从回想变成了选择题，17 轮全部落到唯一文件上。但它仍然只打印。让比例变小
+的那一步——重跑——还得人一条条敲。这一轮把它变成命令。
+
+第一版做错的地方值得写下来。`--rerun-unrecorded` 最初的做法是：拿到候选文件，然后**像平常一样跑一轮**，
+再把旧记录退役，指向新记录。跑完的输出是：
+
+```
+retired round-20261117T201046Z.json (re-measured as round-20261118T041856Z.json)
+  none of its 1 trial(s) appear in the successor: this round is retired as a question, not answered
+```
+
+退役机制自己说了实话：新那轮测的是**今天的提案**，不是记录里的候选。于是"欠账变小"变成了"旧问题被划掉、
+换成一个新问题"——这是第 34 轮退役语义存在的原因，也正是它当场抓住的东西。数字从表上消失，问题没人回答。
+
+正确的做法在记录里：每一轮的 `trials` 都存了候选的完整定义（`name` / `hypothesis` / `changes` / `veto`），
+`Candidate.from_dict()` 能把它读回来，`run_round(selected=…)` 接受显式候选表。所以重跑就是：**把记录里的
+候选原样再测一遍，测在它自己记录的文件上**。
+
+```
+$ brian evolve --rerun-unrecorded --rerun-limit 1
+candidates        17 of 17 round(s) have exactly one file; 0 cannot be placed
+limit             1 of the 17 will be re-run here; the rest keep their place until the command runs again
+
+---- re-running round-20261117T201046Z.json on data/smd/stream.json
+candidate                 recall@b   fpr@b  tok/rep   tok/inc evidence verdict
+baseline                     0.507   0.091     3358      7419     100% -
+host-scoring-deviation       0.507   0.091     3359      6861     100% accept
+
+recorded round var\evolve\round-20261118T042134Z.json
+retired round-20261117T201046Z.json (re-measured as round-20261118T042134Z.json)
+  1 of its 1 trial(s) appear in the successor: host-scoring-deviation
+file unknown      52 of 55 round(s) still cannot be placed — 16 left by the limit above
+```
+
+这一次重叠是 **1 of 1**：同一份候选、同一个文件、同一套规则。旧记录的总额离开表格，新记录带着
+`stream_path` 进场，读者能顺着它找到测量条件。欠账的下降来自重新测量，而不是来自删除。
+
+三个设计选择：
+
+**一、默认只重跑一轮。** 一轮是几分钟的测量（948 个窗口、8 个候选、加基线）。一次敲键就跑 17 轮不是"可变
+小"，是把一整小时的账单藏进一个动词里。`--rerun-limit N` 由调用方决定花多少，命令每次都报还剩几轮。
+
+**二、候选文件不唯一就跳过，并说出跳过了什么。** 两个文件几何相同的时候（本检出里的两个 RCAEval 文件就是），
+挑一个等于替读者决定这道题该在哪次采样上回答（边界 104）。命令把两行都印出来，等 `--stream-file`。
+
+**三、重跑不部署任何东西。** 沿用第 44 轮（边界 95）：验证可以清掉一条反对，但不能顺手把改动推上线。重跑只写
+测量记录，`write_versions=False`，部署状态一个字节都不动。
+
+**边界 113：重跑必须测记录里的那个问题，否则退役只是把旧问题划掉。** 第 34/35 轮的退役重叠检查在这里第二次
+发挥作用：它当场读了 `none of its trial(s) appear` 这句话，而这句话正是缺陷的样子。
+
+**边界 114：一个会花钱的命令默认只能花一次。** "可以变小"必须写成一个可以按次数调用、每次都报余额的操作，
+而不是一个动词触发的整段预算。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3092,3 +3149,6 @@ missing for the next level
 
 39. `--unrecorded` 现在给出候选文件，但重跑仍要人一条条敲。让它在 `--stream-file` 与候选唯一时接受
 `--rerun-unrecorded`，按候选逐个重跑、逐个记账；候选不唯一的轮次仍然跳过并说明原因（边界 104）。
+
+40. `--rerun-unrecorded` 现在一次一轮。让它在候选文件唯一、且该轮所有候选都能从记录读回时，把 17 轮排成一张
+队列并记录进度（哪几轮已重跑、还剩几轮），这样"98% 会降到多少"可以预估，而不是每次只看到一个移动的数字。

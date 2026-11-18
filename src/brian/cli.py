@@ -428,6 +428,25 @@ def _candidate_label(files: Sequence[str]) -> str:
     return "%d candidates: %s" % (len(files), ", ".join(files))
 
 
+def _recorded_candidates(record: Mapping[str, Any]) -> List[Candidate]:
+    """The candidate definitions a round measured, read back from its record (round 52).
+
+    A re-run has to measure the question the record asked, not the one today's proposer would ask: the first
+    version of `--rerun-unrecorded` re-ran the proposal, and its retirement had to say "none of its trials
+    appear in the successor — retired as a question, not answered". Reading the candidates out of the record is
+    what makes the overlap meaningful, so the round is only skipped when the record kept none.
+    """
+    out: List[Candidate] = []
+    for trial in record.get("trials") or []:
+        if not isinstance(trial, Mapping):
+            continue
+        payload = trial.get("candidate")
+        if not isinstance(payload, Mapping):
+            continue
+        out.append(Candidate.from_dict(payload))
+    return out
+
+
 def _unrecorded_matters(root: Path,
                         library: Optional[Sequence[Tuple[str, Dict[str, Any]]]] = None
                         ) -> List[Tuple[str, str, str, List[str]]]:
@@ -715,6 +734,99 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
         return 0
+
+    if args.rerun_unrecorded:
+        # Round 52: round 51 turned "which file did this round measure?" into a printed answer; this turns the
+        # answer into a run. A round with exactly one candidate file is re-measured on that file, so its totals
+        # become placeable, and the old record retires naming the new one — the debt falls by measurement, not
+        # by printing. Two candidate files is not a tie this command breaks: it skips the round and says which
+        # files it could not choose between (boundary 104).
+        matters = _unrecorded_matters(root)
+        ready = [item for item in matters if len(item[3]) == 1]
+        blocked = [item for item in matters if len(item[3]) != 1]
+        _print("=" * 96)
+        _print("brian evolve - re-run the rounds whose stream file can be named")
+        _print("=" * 96)
+        _print("candidates        %d of %d round(s) have exactly one file; %d cannot be placed"
+               % (len(ready), len(matters), len(blocked)))
+        for domain, name, _why, files in blocked:
+            _print("  skipped         %-32s %s" % (name, _candidate_label(files)))
+        limit = max(0, int(getattr(args, "rerun_limit", 1) or 0))
+        if len(ready) > limit:
+            _print("limit             %d of the %d will be re-run here; the rest keep their place until the "
+                   "command runs again" % (limit, len(ready)))
+        failures = 0
+        rules = _rules_from_args(args)
+        for domain, name, _why, files in ready[:limit]:
+            target_file = files[0]
+            record = next((row for row in history(root) if str(row.get("round")) == name), None) or {}
+            recorded = _recorded_candidates(record)
+            _print("")
+            _print("---- re-running %s on %s" % (name, target_file))
+            if not recorded:
+                # A record with no candidate definitions cannot be measured again: the numbers in it were
+                # compared to something nobody wrote down. Retirement would return nothing.
+                _print("  this record keeps no candidate definitions, so there is nothing to measure again; "
+                       "its totals stay where they are")
+                continue
+            clone = argparse.Namespace(**vars(args))
+            clone.stream_file = target_file
+            # A re-run is a measurement, not a deployment: it writes a round that names its file, and nothing
+            # becomes live because of it (boundary 95, the same rule `--verify` follows).
+            clone.apply = False
+            run_settings, streams, source, _overrides = _evolve_streams(clone, settings)
+            deployment, _sources, _refused, _unknown = in_force_overrides(root, run_settings, domain=domain)
+            run_settings = apply_overrides(run_settings, deployment)
+            result = run_round(run_settings, streams, selected=recorded, rules=rules, source=source,
+                               claim=record.get("claim") or {})
+            result.stream_path = target_file
+            _print("")
+            _print(format_round(result))
+            written = persist(root, result, write_versions=False)
+            fresh = [item for item in history(root) if str(item.get("round")) == str(Path(
+                written.get("round") or "").name)]
+            if not fresh:
+                _print("")
+                _print("the re-run recorded nothing, so %s stays as it is" % name)
+                failures += 1
+                continue
+            successor = str(fresh[0].get("round"))
+            try:
+                mark = retire(root, name, re_measured_as=successor)
+            except (OSError, ValueError) as error:
+                _print("")
+                _print("cannot retire %s: %s" % (name, error))
+                failures += 1
+                continue
+            _print("")
+            _print("recorded round %s" % written.get("round"))
+            _print("retired %s (re-measured as %s)" % (name, successor))
+            overlap = (mark or {}).get("overlap") or {}
+            matches = overlap.get("matches") or []
+            rest = overlap.get("not_repeated") or []
+            if not overlap.get("successor_readable"):
+                _print("  the successor record is not readable, so how much of this round it repeats is "
+                       "unknown")
+            elif matches:
+                _print("  %d of its %d trial(s) appear in the successor: %s"
+                       % (len(matches), len(matches) + len(rest), ", ".join(matches)))
+                if rest:
+                    _print("  the other %d are not repeated there, so this retirement does not claim they "
+                           "were answered" % len(rest))
+            else:
+                _print("  none of its %d trial(s) appear in the successor: this round is retired as a "
+                       "question, not answered" % len(rest))
+        if ready:
+            remaining = sum(1 for record in history(root) if not str(record.get("stream_path") or ""))
+            total = len(history(root))
+            _print("")
+            _print("file unknown      %d of %d round(s) still cannot be placed%s"
+                   % (remaining, total,
+                      " — %d left by the limit above" % max(0, len(ready) - limit) if len(ready) > limit
+                      else ""))
+            _print("The re-run measures the candidates the record names, on the file it names: the totals move")
+            _print("from one sampling to a named one without changing the question. Nothing is deployed by it.")
+        return 2 if failures else 0
 
     if args.retire:
         names = _retire_names(args.retire)
@@ -2392,6 +2504,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --strict: fail when more than this share of the recorded rounds cannot "
                              "be placed on a sampling (0.25 means 25%%); a round written before the field "
                              "existed is still only a warning")
+    evolve.add_argument("--rerun-unrecorded", action="store_true",
+                        help="re-run the rounds whose stream file can be named by geometry, then retire them "
+                             "naming the new record; skips a round whose file cannot be chosen")
+    evolve.add_argument("--rerun-limit", type=int, default=1, metavar="N",
+                        help="with --rerun-unrecorded: how many rounds to re-run in this command (default 1, "
+                             "because a round is minutes of measurement and the rest keep their place)")
     evolve.add_argument("--apply", action="store_true",
                         help="also write a version file per accepted change "
                              "(the round itself is always recorded)")
