@@ -237,3 +237,41 @@ def test_the_page_budget_opens_the_family_only_when_the_command_would(tmp_path, 
     assert "it also re-measures 1 round(s) that named their file" in with_ceilings
     assert "--with-ceilings" in with_ceilings
     assert "--with-ceilings" not in without_budget
+
+
+def test_a_command_that_leaves_the_family_alone_says_so(tmp_path):
+    """Round 76: silence about a family reads as "there is no such debt"."""
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-unrecorded.json", applied=["v020"], shape=shape)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    skipped = cli._queue_budget(tmp_path, limit=1, ceiling_limit=None)
+    opened = cli._queue_budget(tmp_path, limit=1, ceiling_limit=0)
+    assert skipped["ceiling_pending"] == 1
+    assert skipped["ceilings_skipped"] == 1
+    assert opened["ceilings_skipped"] == 0
+    assert "it leaves 1 round(s) that named their file" in budget_text(skipped)
+    assert "it leaves" not in budget_text(opened)
+
+
+def test_an_empty_file_queue_that_left_the_family_alone_is_not_called_empty(tmp_path):
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    budget = cli._queue_budget(tmp_path, limit=1, ceiling_limit=None)
+    text = budget_text(budget)
+    assert budget["rounds"] == 0
+    assert "nothing to spend on the file family" in text
+    assert "1 round(s) named their file" in text
+    assert text.endswith("(the share stays 0%)")
+
+
+def test_the_queue_header_names_the_families_and_their_rounds(tmp_path, monkeypatch, capsys):
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-unrecorded.json", applied=["v020"], shape=shape)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["evolve", "--rerun-unrecorded", "--rerun-limit", "1", "--with-ceilings"])
+    out = capsys.readouterr().out
+    assert "families          2: 1 round(s) from the file queue, 1 from the ceiling queue" in out

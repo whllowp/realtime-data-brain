@@ -4229,6 +4229,33 @@ ceiling debt      2 of 2 round(s) do not record the ceilings they were judged un
 **边界 161：读者为诊断打开的那一页，必须和做出诊断的那一页指向同一个下一步。**`--history` 与 `--campaign` 若各自拼一句命令，两页迟早给出不同答案；同一个函数是唯一能保证它们一致的东西。
 
 
+### 3.83 沉默不等于没有：被留下的那一族要说出来，命令要先报族数
+
+第 75 轮让预算算上了第二族，但只在那族**被开**的时候。`--without-ceilings` 的页面于是和"根本没有上限欠账"印同一句话——什么都不说；`--rerun-unrecorded` 的队列头也只在真开那族时才提它。读者分不清"没有这笔账"和"这次不付"。
+
+三处改动：
+
+1. `_queue_budget` 无论这次开不开这族，都从记录里数出 `ceiling_pending`，并返回 `ceiling_pending` 与 `ceilings_skipped`；
+2. `budget_text` 把留下的那族写成一句话，而不是靠沉默：`... it leaves 1 round(s) that named their file and never recorded their ceilings for another run, about 5 minute(s)`；文件族为空、同时又留下上限族时，那句不再说"没有可花的"：`nothing to spend on the file family: 9 round(s) named their file and never recorded their ceilings, and this command leaves them for another run (the share stays 66%)`；
+3. 队列头新增一行，把"族数"和"每族的轮数"分开报：
+
+```
+families          2: 1 round(s) from the file queue, 1 from the ceiling queue
+```
+
+真实账本上是 `families 1: 0 round(s) from the file queue`——文件族这一轮本来就没有可付的，写着比省掉好：一个总是缺席的字段，读者只会以为它不存在。
+
+三条读法：
+
+- **沉默是一种断言**。页面不写某族，读者只能理解为该族没有欠账；要表达"这次不动"，必须有一句话。
+- **族数不是轮数**。"两族各一轮"和"一族两轮"总轮数相同、等待相同，但它们是两种活：一种把两类账各推进一格，一种把一类账推进两格。
+- **被留下的那族要有下一句**。页面已经给出 `measure` 行，命令头由这一轮补上（见第 64 项）。
+
+**边界 162：没做的那部分也要说出来。**一句"没有"必须能区分"不存在"和"这次不动"；否则读者用一次被拒绝的检查误读整张表。
+
+**边界 163：一次调用的形状是族数加每族的轮数，不是总轮数。**只报总数会把"两族各一轮"和"一族两轮"报成同一种活，而它们推的不是同一本账。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4338,7 +4365,6 @@ missing for the next level
 62. **等价换算是可比性工具，不是最优值。** 在承诺自己的流上，hint 给出的 286 比 200 更差（0.507 → 0.396）。把 hint 读成"应该改成 286"就是把一次换算当成了实验结论；它唯一的作用是让两次测量量同一个东西。
 
 ---
-
 
 ## 6. 下一步（按验证强度排序）
 
@@ -4517,4 +4543,6 @@ missing for the next level
 62. **（3.82 已完成）** 让 `--history` 的 `ceiling debt` 行也带上命令（现在只有 `--campaign` 带），并把"排空会开出两族"
 写进 `budget` 那句话里 —— 预算说的是钱，族数说的是另一个维度。
 
-63. 让 `--rerun-unrecorded` 在排队时也打印 `families` 与每一族的轮数，并把 `--without-ceilings` 的页面预算写成"本次不碰上限族"一句话，而不是沉默。
+63. **（3.83 已完成）** 让 `--rerun-unrecorded` 在排队时也打印 `families` 与每一族的轮数，并把 `--without-ceilings` 的页面预算写成"本次不碰上限族"一句话，而不是沉默。
+
+64. 让 `--rerun-unrecorded` 在 `--without-ceilings` 时也打印被留下的轮数与下一句命令（现在页面有这句、命令头没有），并让 `--auto` 类批处理在拒绝一族时把拒绝写进 `queue` 记录。

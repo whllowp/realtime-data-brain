@@ -1075,14 +1075,18 @@ def _queue_budget(root: Path, limit: Optional[int] = None,
     # understates the wait by exactly the work it is about to do. `ceiling_limit` is how many ceiling rounds this
     # invocation would pay; `families` is the count the sentence states, because "two families" is a different
     # fact from "N rounds" (item 62: money and dimensions are separate answers).
+    # Round 76: `pending` is a fact about the ledger, not about this invocation. Counting it only when the
+    # command opened the family made "no debt" and "not this time" print the same thing -- and a reader who
+    # passed `--without-ceilings` deserves to see what they asked to leave undone.
+    pending = 0
+    try:
+        pending = len(_ceiling_matters(root))
+    except OSError:
+        pending = 0
     ceiling_rounds = 0
     if ceiling_limit is not None:
-        pending = 0
-        try:
-            pending = len(_ceiling_matters(root))
-        except OSError:
-            pending = 0
         ceiling_rounds = pending if int(ceiling_limit or 0) <= 0 else max(0, min(int(ceiling_limit), pending))
+    ceilings_skipped = max(0, pending - ceiling_rounds)
     families = (1 if rounds else 0) + (1 if ceiling_rounds else 0)
     counted_rounds = rounds + ceiling_rounds
     estimated_total = (each * counted_rounds) if (each is not None and counted_rounds) else None
@@ -1118,6 +1122,8 @@ def _queue_budget(root: Path, limit: Optional[int] = None,
         "command": command,
         "rounds": rounds,
         "ceiling_rounds": ceiling_rounds,
+        "ceiling_pending": pending,
+        "ceilings_skipped": ceilings_skipped,
         "families": families,
         "domains": paid,
         "ready": ready,
@@ -1665,6 +1671,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         budget = _queue_budget(root, limit=limit,
                                ceiling_limit=ceiling_limit if ceiling_ready else None)
         _print("budget            %s" % budget_text(budget))
+        # Round 76: the price names the families it opens, but not how many rounds each holds. A reader who is
+        # waiting on this command wants to see the dimensions next to the money -- "one family of one round" and
+        # "two families of one round each" are different jobs at the same count (item 62's second half).
+        _print("families          %d: %d round(s) from the file queue%s"
+               % (int(budget.get("families") or 0), int(budget.get("rounds") or 0),
+                  (", %d from the ceiling queue" % int(budget.get("ceiling_rounds") or 0))
+                  if int(budget.get("ceiling_rounds") or 0) else ""))
         # Round 68: the queue judges every round it pays, so it names the ceilings it judges by -- the same
         # sentence the page and `--audit` print, from the same function, so the three cannot drift apart.
         queue_limits_text = _limits_text(_limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,

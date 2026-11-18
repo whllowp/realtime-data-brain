@@ -567,7 +567,14 @@ def budget_text(budget: Mapping[str, Any]) -> str:
     rounds = int(budget.get("rounds") or 0)
     total = int(budget.get("rounds_total") or 0)
     ceiling_rounds = int(budget.get("ceiling_rounds") or 0)
+    skipped = int(budget.get("ceilings_skipped") or 0)
     if not rounds and not ceiling_rounds:
+        # Round 76: "nothing to spend" is only true when nothing was left behind either. A reader who passed
+        # `--without-ceilings` over a real ceiling family must not be told the queue is empty.
+        if skipped:
+            return ("nothing to spend on the file family: %d round(s) named their file and never recorded "
+                    "their ceilings, and this command leaves them for another run (the share stays %.0f%%)"
+                    % (skipped, 100.0 * float(budget.get("share_now") or 0.0)))
         return ("nothing to spend: the queue has no round it can re-run, so the share stays %.0f%%"
                 % (100.0 * float(budget.get("share_now") or 0.0)))
     if not rounds:
@@ -589,6 +596,13 @@ def budget_text(budget: Mapping[str, Any]) -> str:
     # invocations needs to see that one of them opens two families (item 62).
     if ceiling_rounds:
         line += "; it also re-measures %d round(s) that named their file but never recorded their ceilings" % ceiling_rounds
+    else:
+        # Round 76: silence here reads as "there is no such debt". A command that deliberately left a family
+        # alone must say so, or the reader cannot tell "nothing to do" from "not this time" (boundary 143).
+        skipped = int(budget.get("ceilings_skipped") or 0)
+        if skipped:
+            line += ("; it leaves %d round(s) that named their file and never recorded their ceilings "
+                     "for another run" % skipped)
     by_domain = {str(name): float(value) for name, value in (budget.get("minutes_by_domain") or {}).items()}
     minutes = budget.get("estimated_minutes_by_domain")
     if minutes is None:
