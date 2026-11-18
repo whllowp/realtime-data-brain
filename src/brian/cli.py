@@ -509,14 +509,6 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             deployed, _sources, _refused, _unknown = in_force_overrides(root, settings, domain=source)
         except (OSError, ValueError):
             deployed = {}
-        proposal = propose(rounds, mode=mode, source=source, deployed=deployed,
-                           rules=EvolveRules(min_gain=args.min_gain))
-        if args.catalogue:
-            proposal = Proposal(
-                "catalogue",
-                "forced by --catalogue: the fixed list, so the rule selection was not consulted",
-                list(catalogue()), proposal.space, proposal.source)
-        _print(format_proposal(proposal))
         # Round 36: the dry run reports what the real round would *not* measure, because a proposal the
         # round will skip is not part of what it costs or answers. The shape comes from the stream file
         # when there is one, so a refusal made at another sampling is re-opened here exactly as it would
@@ -529,15 +521,27 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 shape = None
         plan = refusal_plan(rejection_provenance(root, EvolveRules(min_gain=args.min_gain)),
                             source=source, shape=shape)
+        # Round 37: the plan is consulted *before* proposing, so the mechanism does not spend a slot on a
+        # candidate the ledger already answered — and the dry run shows the proposal the round would really
+        # make rather than one it would then filter.
+        proposal = propose(rounds, mode=mode, source=source, deployed=deployed,
+                           rules=EvolveRules(min_gain=args.min_gain), refused=plan["skip"])
+        if args.catalogue:
+            proposal = Proposal(
+                "catalogue",
+                "forced by --catalogue: the fixed list, so the rule selection was not consulted",
+                list(catalogue()), proposal.space, proposal.source)
+        _print(format_proposal(proposal))
         _print_refusal_plan(plan)
-        skipped = set(plan["skip"])
-        proposed = {candidate.name for candidate in proposal.candidates}
         # Printed even when the answer is zero: a saving that never fires on the current ledger is a guard,
         # and a reader who is not told that cannot tell this round from one that saved nothing because the
-        # plan was never consulted (round 36).
-        _print("would skip        %d of %d proposal(s) refused on this stream at this sampling%s"
-               % (len(proposed & skipped), len(proposed),
-                  ": " + ", ".join(sorted(proposed & skipped)) if proposed & skipped else ""))
+        # plan was never consulted (round 36). `--catalogue` does not go through `propose`, so its drop is
+        # counted against the plan here instead of inside `Proposal`.
+        skipped = set(plan["skip"])
+        dropped = proposal.refused if not args.catalogue else sum(
+            1 for candidate in proposal.candidates if candidate.name in skipped)
+        _print("would drop        %d candidate(s) this stream already refused at this sampling"
+               % dropped)
         _print("")
         return 0
 
@@ -729,6 +733,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("")
 
     known = {candidate.name: candidate for candidate in catalogue()}
+    # Round 37: the mechanism must not spend its proposal budget on questions this stream already answered,
+    # so the refusal plan is computed before `propose` rather than after it. The plan is also what the round
+    # prints below, and the proposal carries the count so the round record says how many it saved.
+    plan = refusal_plan(rejection_provenance(root, rules), source=source, shape=stream_shape)
     proposal_record: dict = {}
     if args.candidates:
         names = [name.strip() for name in args.candidates.split(",") if name.strip()]
@@ -750,7 +758,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             mode = Mode("expand", "forced by --expand, so the bounded space is measured even though the "
                                   "ledger did not ask for it")
         proposal = (propose(history(root), mode=mode, source=source, deployed=deployed,
-                            reshaped=reshaped, rules=rules, shape=stream_shape)
+                            reshaped=reshaped, rules=rules, shape=stream_shape,
+                            refused=plan["skip"])
                     if not args.catalogue else None)
         if proposal is None:
             selected = list(known.values())
@@ -767,7 +776,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # round skip a candidate" and "is this a new measurement" have different answers. The plan splits the
     # refusals that still stand into the ones this round may skip and the three kinds it must spend a
     # measurement on again; printing a single count let a reader take all four for the same thing.
-    plan = refusal_plan(rejection_provenance(root, rules), source=source, shape=stream_shape)
+    # Round 37: the plan is computed before `propose` (above), so the mode=expand path never even generates
+    # a neighbour the ledger already answered.
     _print_refusal_plan(plan)
     kept, not_measured = _skip_refused(selected, plan["skip"], named=bool(args.candidates))
     if args.candidates and not_measured:
@@ -784,6 +794,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("nothing to measure: every candidate this round would measure has already been refused on "
                "this stream at this sampling. Name them with --candidates to measure them anyway.")
         return 0
+    # Round 37: the count of measurements this round did not spend travels with the proposal record, so a
+    # reader of the round file can tell a mechanism that was spared work from one that was simply idle.
+    proposal_record["refused_skipped"] = int(proposal_record.get("refused_skipped", 0)) + len(not_measured)
 
     totals = summarise(streams)
     for section, values in base_overrides.items():

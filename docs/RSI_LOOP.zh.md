@@ -1971,6 +1971,64 @@ RCAEval 两行的 `refusals` 行消失了——因为按今天的规则重判之
 `refusals`（今天仍然成立的拒绝）在一次重判之后会不一致；不标注就等于让读者以为自己在看同一个数。
 
 
+### 3.44 提案者不该重新问一遍：过滤器要放在生成器里
+
+第 36 轮把"这一轮可以跳过哪些候选"算清楚了：`refusal_plan` 把仍然成立的拒绝分成四组，`_skip_refused`
+再从 `selected` 里把 `skip` 那组摘掉。但它是在 `propose` **之后**摘的，而 `propose` 已经把名额花掉了：
+提案上限是 8，八条邻居先生成、先排序、先截断，过滤器拿到的是一份已经装好的名单。于是同一轮里能读到两句话，
+一句说账本上 14 个问题已经有答案，一句说"would skip 0 of 8 proposal(s)"——不是两边矛盾，而是过滤器根本没有
+可以摘的东西：机制从不会再生成这些名字，因为它们当初被拒的种子已经不在种子里了。
+
+真正的问题在名额上。一个被本数据集拒绝过的候选如果还能占掉一个名额，这一轮就等于用一次测量去换一个已知答案；
+过滤器后置时，这件事发生在 `propose` 内部，谁都看不到。第 37 轮把过滤器搬进生成器：
+
+- `Proposal` 多一个 `refused` 字段（`to_dict()` 里叫 `refused_skipped`），四个打印点都会说出这个数；
+- `propose(..., refused=[...])` 在**生成邻居时**就跳过这些名字，目录路径（`_from_catalogue`）同样过滤
+  ——目录是一串问题，本数据集答过的问题在这里不再开；
+- 被拒绝的候选占满了空间时，理由要说清楚："N neighbour(s) were already refused on this stream at this
+  sampling and the rest of the space is exhausted"；
+- `reshape`（承诺测试）不受这条规则约束：它不是重复提问，是一条记录里承诺的复测；
+- cli 把 `refusal_plan` 提前到 `propose` **之前**（正式轮与 `--propose` 干跑都一样），并把
+  `refused_skipped` 写进 `proposal_record`，随轮次记录一起落盘。
+
+干跑的前后对比（`data/smd/stream-check.json`，同一份账本）：
+
+```
+before  would skip        0 of 8 proposal(s) refused on this stream at this sampling
+after   2 candidate(s) were dropped because this stream already refused them at this sampling
+        would drop        2 candidate(s) this stream already refused at this sampling
+```
+
+被丢掉的是 `host-scoring-deviation-band-0-92` 与 `-0-82`：它们在本采样上已经被拒过一次。
+
+正式轮的同一条证据（`round-20261118T021614Z.json`）：`proposal.refused_skipped = 3`——两条 band 邻居加上被
+本采样拒过的 reshape——八条候选里补进了 `host-scoring-deviation-band-0-77`，而它上一轮正好被上限截掉；八条全部
+接受（`events-10` −22.7%、`events-1` −43.1%、`events-3` −38.5%、`events-2` −40.8%、`events-6` −31.7%，
+三条 band 走 `cost`）。同一份账本上一轮读到的是 `not measured 1 candidate(s) the proposal includes`，这一轮
+这一行消失了：没有需要事后摘掉的候选。
+
+三句读法：
+
+1. **省下来的是名额，不是测量次数。** 提案仍然有 8 条，只是那两条不再进来，空出的两个名额被 `-0-97` 与
+   `-0-77` 补上——它们本来被上限截掉了。所以这一轮的收益是"八次测量全都问新问题"，不是"少测两次"；把名额
+   省下来当成测量次数来报，是把上限当成了花销（边界 81）。
+2. **数字要落在产物里。** 第 36 轮的"跳过 14 个"只出现在终端里，读轮次文件的人看不到，于是"这个循环省了多少"
+   只能靠读日志回答。现在 `refused_skipped` 写在 `proposal` 记录里，账本自己就能回答（边界 82）。
+3. **过滤器搬进生成器后，`--catalogue` 与 `--candidates` 的旧规则仍然成立。** 目录项按同一条规则过滤；
+   调用者点名的候选照旧测量——点名是指令，不是提案（第 36 轮就定下的区分）。
+
+4. **承诺测试也不该重复问。** 第一版把 `reshape` 豁免了，理由是"它不是重复提问，是承诺的复测"。但同一份账本
+   已经在本采样上回答过这条承诺（0.427 对 0.507，拒绝），于是这一轮的提案照样把名额花在它身上，日志里出现
+   `not measured 1 candidate(s) the proposal includes, already refused on this stream:
+   host-rolling-rank-0-85-200@hint286`——过滤器在事后摘掉它，等于承认生成器刚刚浪费了一个名额。豁免的应当是
+   "用哪个裁判"（`promise` 规则），不是"要不要再测一次"；修正后 `reshape` 与其它候选一样被生成器过滤、计数，
+   腾出的名额给了 `-0-77`。
+
+**边界 81：提案有上限时，被跳过的候选换来的是一个不同的问题，不是一次更便宜的运行。** 说"这一轮省了 N 次
+测量"之前，先看 `len(candidates)` 有没有变。
+
+**边界 82：一个机制省下的东西必须写进它改动的产物，否则它只是一个 print。** 终端会滚走，轮次记录不会。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2129,3 +2187,7 @@ missing for the next level
 
 24. 让 `--campaign` 的 `refusals` 也能按域拆开（现在它是账本级的），并在 `--propose` 输出里标出
     "这条候选之所以没被提出，是因为一条退役记录里的拒绝"——现在它只是静默地少了一条候选。
+
+25. **（3.44 已完成）过滤器搬进生成器，省下的名额写进记录。** `Proposal.refused`（`refused_skipped`）
+    让每一轮的记录自己回答"这一轮没有重复问哪些问题"。剩下的一步：把补进来的候选与被它替下去的候选并列打印，
+    并把 `refused_skipped` 累加进 `--campaign` 的累计节省统计。

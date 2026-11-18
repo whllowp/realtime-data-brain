@@ -312,6 +312,14 @@ class Proposal:
     """Which stream the seeds were drawn from. Empty means "any stream", which is the old behaviour."""
     deployed: int = 0
     """How many neighbours were dropped because they describe the configuration already in force."""
+    refused: int = 0
+    """How many candidates were dropped because this stream already refused them at this sampling.
+
+    Round 37: the refusal plan used to filter the *measurement* after the mechanism had already spent its
+    proposal budget on candidates the ledger could answer. Counting the drop here means the round record
+    says how many measurements the mechanism saved, instead of leaving that arithmetic to the reader of a
+    log line.
+    """
 
     @property
     def space_fingerprint(self) -> Optional[str]:
@@ -325,6 +333,7 @@ class Proposal:
             "space": None if self.space is None else self.space.describe(),
             "space_fingerprint": self.space_fingerprint,
             "deployed": self.deployed,
+            "refused_skipped": self.refused,
             "candidates": [candidate.name for candidate in self.candidates],
         }
 
@@ -514,7 +523,8 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
             deployed: Optional[Mapping[str, Mapping[str, Any]]] = None,
             reshaped: Optional[Candidate] = None,
             rules: Optional[EvolveRules] = None,
-            shape: Optional[Mapping[str, Any]] = None) -> Proposal:
+            shape: Optional[Mapping[str, Any]] = None,
+            refused: Optional[Sequence[str]] = None) -> Proposal:
     """The proposals this round should measure, given the ledger and the configuration in force.
 
     `deployed` is the same shape `apply_overrides` takes (`{section: {field: value}}`) and is used for one
@@ -526,7 +536,20 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
     It goes first and survives the deployed filter's spirit only when it is not itself the deployment. It is
     a proposal like any other from here on: `decide()` judges it against the promise it carries, because it
     is not competing with the baseline.
+
+    `refused` names candidates this stream already refused at this sampling (round 37). The mechanism must
+    not spend its proposal budget re-asking a question the ledger answers: they are dropped from both the
+    catalogue path and the generated neighbours, and the count travels on the `Proposal` so the round
+    record says how many measurements it saved.
     """
+    settled = set(refused or ())
+    settled_reshape = 0
+    if reshaped is not None and reshaped.name in settled:
+        # Round 37: a promise test is exempt from the *catalogue* rules, not from arithmetic. If this
+        # sampling already answered the promise, measuring it again buys the same number a second time, so
+        # it is dropped and counted like any other repeat — and the slot goes to a question still open.
+        settled_reshape = 1
+        reshaped = None
     catalogue_entries = list(entries if entries is not None else catalogue())
     active_space = space if space is not None else space_from_catalogue(catalogue_entries)
     chosen = mode if mode is not None else mode_from_history(rounds, source=source)
@@ -534,8 +557,10 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
     label = "" if not source else " on %s" % source
 
     if chosen.name != "expand":
-        return _from_catalogue(chosen.name, chosen.reason, catalogue_entries, active_space,
-                               source or "", deployed, reshaped)
+        proposal = _from_catalogue(chosen.name, chosen.reason, catalogue_entries, active_space,
+                                   source or "", deployed, reshaped, sorted(settled))
+        proposal.refused += settled_reshape
+        return proposal
 
     unmeasured: List[int] = []
     seeds = _accepted_measurements(rounds, source=source, rules=rules, shape=shape,
@@ -565,8 +590,10 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
             reason = (
                 "%s — but no change has ever been accepted%s, so there is no measured magnitude to search "
                 "around and the catalogue stays the source" % (chosen.reason, label))
-        return _from_catalogue("catalogue", reason, catalogue_entries, active_space, source or "",
-                               deployed, reshaped)
+        proposal = _from_catalogue("catalogue", reason, catalogue_entries, active_space, source or "",
+                                   deployed, reshaped, sorted(settled))
+        proposal.refused += settled_reshape
+        return proposal
 
     known = {tuple(candidate.changes()) for candidate in catalogue_entries}
     if reshaped is not None:
@@ -576,6 +603,7 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
         known.add(tuple(reshaped.changes()))
     generated: List[Candidate] = []
     already = 0
+    settled_here = 0
     for seed in seeds:
         for candidate in neighbours(seed, active_space):
             if tuple(candidate.changes()) in known:
@@ -584,36 +612,60 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
             if _is_deployed(candidate, deployed):
                 already += 1
                 continue
+            if candidate.name in settled:
+                # A neighbour the ledger already answered on this stream: measuring it again would buy the
+                # same number a second time, and the round would report it as if the mechanism had found
+                # something new (round 37).
+                settled_here += 1
+                continue
             generated.append(candidate)
     if not generated:
         exhausted = (
             "%s — but every neighbour describes the configuration already in force (%d of them), so "
             "measuring them would compare the baseline with itself" % (chosen.reason, already)
             if already else
+            "%s — but %d neighbour(s) were already refused on this stream at this sampling and the rest "
+            "of the space is exhausted, so the catalogue stays the source"
+            % (chosen.reason, settled_here) if settled_here else
             "%s — but the space around the accepted values is exhausted (no neighbour inside the "
             "declared intervals), so the catalogue stays the source" % chosen.reason
         )
         fallback = _from_catalogue("catalogue", exhausted, catalogue_entries, active_space,
-                                   source or "", deployed)
+                                   source or "", deployed, refused=sorted(settled))
         fallback.deployed += already
+        fallback.refused += settled_here + settled_reshape
         return fallback
     if reshaped is not None:
         generated.insert(0, reshaped)
-    return Proposal(chosen.name, chosen.reason, generated[:cap], active_space, source or "",
-                    deployed=already)
+    proposal = Proposal(chosen.name, chosen.reason, generated[:cap], active_space, source or "",
+                        deployed=already)
+    proposal.refused = settled_here + settled_reshape
+    return proposal
 
 
 def _from_catalogue(mode: str, reason: str, entries: Sequence[Candidate], space: ProposalSpace,
                     source: str, deployed: Optional[Mapping[str, Mapping[str, Any]]],
-                    reshaped: Optional[Candidate] = None) -> Proposal:
+                    reshaped: Optional[Candidate] = None,
+                    refused: Sequence[str] = ()) -> Proposal:
     """The catalogue, minus the entries that already describe what is running.
 
     A catalogue entry can be the deployment too — once `reuse-300` is accepted it is both a hand-written
     hypothesis and the configuration in force, and measuring it again would compare the baseline with
     itself. The count is reported so a round that proposes nothing says why.
+
+    Round 37 also drops the entries this stream already refused at this sampling: the catalogue is a list
+    of questions, and a question the ledger answered on this data is not open here. The two drops are
+    counted apart, because "already in force" and "already refused" are different claims about a
+    candidate and a round that says nothing must say which one made it silent.
     """
     kept = [candidate for candidate in entries if not _is_deployed(candidate, deployed)]
     dropped = len(entries) - len(kept)
+    refused_set = set(refused)
+    if refused_set:
+        settled = [candidate for candidate in kept if candidate.name in refused_set]
+        kept = [candidate for candidate in kept if candidate.name not in refused_set]
+    else:
+        settled = []
     if reshaped is not None:
         # The reshape is not a catalogue entry, so it is not subject to "the catalogue ran dry" — it is
         # derived from a recorded claim. It still must not be the deployment itself, or the round would
@@ -622,10 +674,13 @@ def _from_catalogue(mode: str, reason: str, entries: Sequence[Candidate], space:
             dropped += 1
         else:
             kept.insert(0, reshaped)
-    if not kept and dropped:
+    if not kept and (dropped or settled):
         reason = ("%s — but every catalogue entry describes the configuration already in force (%d of "
-                  "them), so this round has nothing to measure" % (reason, dropped))
-    return Proposal(mode, reason, kept, space, source, deployed=dropped)
+                  "them) or was refused on this stream at this sampling (%d), so this round has nothing "
+                  "to measure" % (reason, dropped, len(settled)))
+    proposal = Proposal(mode, reason, kept, space, source, deployed=dropped)
+    proposal.refused = len(settled)
+    return proposal
 
 
 def _wrap(text: str, width: int) -> List[str]:
@@ -654,6 +709,9 @@ def describe_proposal(proposal: Proposal) -> List[str]:
     if proposal.deployed:
         lines.append("                %d neighbour(s) dropped: they describe the configuration already in "
                      "force" % proposal.deployed)
+    if proposal.refused:
+        lines.append("                %d candidate(s) dropped: this stream already refused them at this "
+                     "sampling" % proposal.refused)
     for reason_line in _wrap("why             " + proposal.reason, 96):
         lines.append(reason_line)
     for candidate in proposal.candidates:
@@ -675,6 +733,10 @@ def format_proposal(proposal: Proposal) -> str:
     if proposal.deployed:
         lines.append("%d neighbour(s) were dropped because they describe the configuration already in force"
                      % proposal.deployed)
+        lines.append("")
+    if proposal.refused:
+        lines.append("%d candidate(s) were dropped because this stream already refused them at this "
+                     "sampling" % proposal.refused)
         lines.append("")
     if not proposal.candidates:
         lines.append("no candidate was proposed")
