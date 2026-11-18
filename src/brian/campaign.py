@@ -88,6 +88,13 @@ class Campaign:
     never_checked: int = 0
     # Of the verdicts above, the ones older than the expiry: still recorded, no longer evidence.
     overdue: int = 0
+    # Comparisons the audit could not reconstruct: not a moved verdict and not an unchanged one, no
+    # answer at all (round 32). Counted separately so a campaign cannot read "nothing moves" about a
+    # ledger whose comparison is missing.
+    unreconstructable: int = 0
+    # Of those, the ones in records that carry the geometry and still lack the reference: a defect in this
+    # build rather than a record written before the field existed (round 33).
+    inconsistent: int = 0
 
     @property
     def domains(self) -> List[str]:
@@ -108,6 +115,8 @@ class Campaign:
             "versions_not_comparable": self.not_comparable,
             "versions_never_checked": self.never_checked,
             "versions_overdue": self.overdue,
+            "comparisons_unreconstructable": self.unreconstructable,
+            "comparisons_inconsistent": self.inconsistent,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -195,6 +204,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     report = audit(root, rules)
     result.moved = report.moved
     result.relabelled = report.relabelled
+    result.unreconstructable = report.cross
+    result.inconsistent = report.inconsistent
     return result
 
 
@@ -236,8 +247,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
                  % (result.rounds, result.trials, result.accepted, result.rejected))
     lines.append("applied           %d round(s) wrote versions; %d version(s) were reverted"
                  % (result.applied, result.reverted))
-    lines.append("audit             %d verdict(s) would be decided differently today, %d relabelled"
-                 % (result.moved, result.relabelled))
+    audit_line = ("audit             %d verdict(s) would be decided differently today, %d relabelled"
+                  % (result.moved, result.relabelled))
+    if result.unreconstructable:
+        # Separate from both columns: "would move" and "did not move" are answers, and this is the absence
+        # of one. Printing only the first two would let a ledger with missing comparisons read as settled.
+        audit_line += ", %d not reconstructable" % result.unreconstructable
+        if result.inconsistent:
+            audit_line += " (%d of them in records that should carry the reference)" % result.inconsistent
+        else:
+            audit_line += " (all from records written before the geometry was recorded)"
+    lines.append(audit_line)
     lines.append("verification      %d holding, %d not comparable, %d never re-checked"
                  % (result.holding, result.not_comparable, result.never_checked))
     if result.overdue:
@@ -284,4 +304,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
     lines.append("be running. What it is not: a claim that the campaign improved anything — every number")
     lines.append("here was measured by the round that wrote it, and the audit column is the only part")
     lines.append("that was recomputed today.")
+    if result.unreconstructable:
+        lines.append("Where the audit says \"not reconstructable\", it did not recompute anything: the")
+        lines.append("record no longer says which reference the round compared against, so the absence")
+        lines.append("of a verdict there is not the absence of a problem.")
     return "\n".join(lines)

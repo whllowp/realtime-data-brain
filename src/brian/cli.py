@@ -232,6 +232,40 @@ def _evolve_streams(args: argparse.Namespace, settings: Settings
     return settings, streams, "demo", {}
 
 
+def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent: int = 0) -> int:
+    """The exit code is what makes an audit a check rather than a report (round 15).
+
+    Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
+    would be decided differently now; 2 part of the ledger cannot be replayed at all, because the
+    record does not say which reference the round compared against (round 32).
+
+    2 outranks 1 on purpose. A moved verdict is an answer — a rule change rewrote history — while an
+    unreconstructable comparison has no answer, and a check that only reports the part it could finish
+    is the failure mode this contains: "no verdict moved" printed above a list of trials nobody looked
+    at.
+
+    Only `inconsistent` counts against the gate (round 33). A comparison that cannot be replayed because
+    the record was written before the geometry was recorded is history: nothing about it is wrong, and
+    re-running that round writes a record that can be. Failing the build on it forever would leave the
+    check permanently red, which is how a check stops being run.
+    """
+    if not strict:
+        return 0
+    if inconsistent:
+        _print("")
+        _print("%d comparison(s) cannot be reconstructed in records that carry the geometry and still lack "
+               "the reference:" % inconsistent)
+        _print("that is a defect in this build, so --strict exits 2.")
+        return 2
+    if unreconstructable:
+        _print("")
+        _print("%d comparison(s) predate the geometry field and cannot be replayed; re-running those rounds "
+               "writes records that can be." % unreconstructable)
+        _print("They do not fail the check (their rules still move the exit code), but --strict has not "
+               "verified them.")
+    return 1 if moved else 0
+
+
 def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     """Run the improvement mechanism: propose, measure, select, and (only with --apply) integrate."""
     root = Path(".")
@@ -296,7 +330,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
-        return 0
+        return _strict_exit(args.strict, result.moved, result.unreconstructable,
+                            result.inconsistent)
 
     if args.audit:
         rules = EvolveRules(min_gain=args.min_gain)
@@ -309,7 +344,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # The exit code is the part that makes this a check rather than a report: a rule change that
         # rewrites history should fail the build, or it will be noticed months later by whoever reads the
         # table last.
-        return 1 if (args.strict and result.moved) else 0
+        return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent)
 
     if args.grade:
         try:
@@ -1654,7 +1689,8 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--verify-version", type=int, default=0,
                         help="with --verify: only that version number (default: everything unverified)")
     evolve.add_argument("--strict", action="store_true",
-                        help="with --audit: exit 1 when any recorded verdict would be decided differently")
+                        help="with --audit or --campaign: exit 1 when a recorded verdict would be decided "
+                             "differently today, 2 when part of the ledger cannot be replayed at all")
     evolve.add_argument("--json-out", help="write the round to this file as well")
     evolve.set_defaults(func=cmd_evolve)
 

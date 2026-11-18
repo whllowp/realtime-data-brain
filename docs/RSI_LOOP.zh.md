@@ -1693,6 +1693,71 @@ host-rolling-rank-0-85-200@hint286-0-8-572 accept operational reject recall     
 **边界 72：一次测量必须带上它被测量时的几何；参照存在但没有标明用在哪一次测量上，等于没有参照。**
 
 
+## 3.40 退出码是一种断言：0 不能表示"我读得了多少就查了多少"
+
+上一轮给了 `--audit` 第三种结局（无法重建），但它只活在表尾一段话里；`--strict` 仍然是
+
+```python
+return 1 if (args.strict and result.moved) else 0
+```
+
+于是一份"23 条比较读不回来"的账本，在 CI 里是**绿的**。这正是这一轮要消灭的那类断言：
+"没有判决改变"被印在一串没人看过的试验上面。检查器读回来多少就查多少，剩下的沉默——而沉默在
+一个退出码里等于通过。
+
+修法两件：
+
+1. **campaign 上的第三列**。`audit` 行现在读：
+   `7 verdict(s) would be decided differently today, 18 relabelled, 23 not reconstructable (all from
+   records written before the geometry was recorded)`。0 个移动、0 个改属规则、23 个读不回来，和
+   "35 轮全部通过"不是同一句话，现在表头就把它们分开。
+2. **`--strict` 三种退出码**。0 = 记录仍然支持今天的判决；1 = 有判决会被改判；2 = 账本有一部分
+   读不回来，检查没有完成。2 优先于 1：一个"改判"是答案，而"读不回来"是没有答案——只报告自己
+   能读完的那部分，就是这一轮要堵的那个洞。
+
+但这里有个更难的判断。23 条读不回来的比较全部来自 round 31 与 round 32 之间写下的记录：参照存在，
+但每条试验没标明用了哪一个。那是**当时还没装上那个字段**的结果，不是这个构建弄丢了什么。把这种
+历史欠账算进 `--strict`，红叉会永远挂着，直到有人去重写本不该被重写的历史——而一个永远红的检查，
+最后一定会被关掉。
+
+所以 `Audit.cross` 拆成两种债，用 `measurement.window` 区分：
+
+- `kind="legacy"`：没有 `window`，记录写在字段存在之前。它读不回来，但它没有错；重跑那一轮会写下
+  一份读得回来的记录。表尾说明，不判失败。
+- `kind="missing"`：有 `window` 却没有对应的参照。这是**当前构建的缺陷**——它答应了记录几何，却
+  没有把参照接上。`--strict` 退出 2。
+
+今天实跑的账本：
+
+```
+$ python -m brian.cli evolve --campaign
+audit             7 verdict(s) would be decided differently today, 18 relabelled, 23 not reconstructable
+                  (all from records written before the geometry was recorded)
+
+$ python -m brian.cli evolve --audit --strict
+23 comparison(s) predate the geometry field and cannot be replayed; re-running those rounds writes
+records that can be.
+They do not fail the check (their rules still move the exit code), but --strict has not verified them.
+exit 1
+```
+
+注意最后一行：`--strict` 在这里退出 **1**，不是因为那 23 条，而是因为确有 7 个判决会被改判。检查
+没有假装那 23 条被验证过——它把它们说出来了，然后让真正的问题决定退出码。
+
+三条读法：
+
+- **退出码是一种断言**，而 0 的意思是"检查跑完了并且没问题"。只跑完一部分就说 0，是把沉默当成
+  通过——这比不检查更糟，因为它留下了一条绿色的记录。
+- **"读不回来"要分成历史与缺陷**。历史是记录写在字段之前，缺陷是构建明知该写却没写；把两者算在
+  同一个计数器里，等于让历史去关掉检查。
+- **表头比表尾重要**。第三种结局放在脚注里，读者读到的是"Why this is not a claim"，而不是
+  "23 个没有答案的比较"。
+
+**边界 73：检查必须区分"记录早于字段"与"记录丢了字段"；把历史欠账算进闸门，闸门最后一定会被关掉。**
+
+**边界 74：退出码 0 只能表示检查跑在全部记录上并且通过；跑在它读得懂的记录上，不算通过。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -1840,3 +1905,7 @@ missing for the next level
 21. `--audit` 的 campaign 列分成 changed / relabelled / not-reconstructable 三列，并让
     `--strict` 对"无法重建"给出语义（现在它只出现在表尾一句话里）；旧记录可以在下一次重测时
     补上几何，而不是永远停在"读不回来"。
+
+22. 那 23 条 legacy 比较可以在下一次重测时自然消掉（重跑 round 31/32 的两轮，新记录带几何），
+    而不是回填——回填等于替当时的试验补一个它没用过的参照；同时让 campaign 的 audit 列按域拆分，
+    现在它是全账本一个数，而其他每一行都是按域的。

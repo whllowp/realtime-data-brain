@@ -2112,6 +2112,19 @@ class Audit:
         """
         return sum(len(entry["cross"]) for entry in self.entries)
 
+    @property
+    def inconsistent(self) -> int:
+        """Unreconstructable comparisons in records that carry the geometry and still lack the reference.
+
+        Round 33. Two different debts hide behind `cross`. A round written before round 32 could not
+        record which reference each trial used — the field did not exist — so nothing about it is wrong,
+        it is only unreadable, and re-running it writes a new record. A round written *after* the field
+        exists that still cannot name its reference is a defect in this build. Charging both to the same
+        gate would make `--strict` fail forever on history, and a check that always fails is a check
+        nobody runs.
+        """
+        return sum(1 for entry in self.entries for item in entry["cross"] if item["kind"] == "missing")
+
 
 def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
     """Re-decide every stored round under `rules` and report what moves.
@@ -2147,7 +2160,10 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
             )
             reference = recorded_reference(payload, measurement, baseline)
             if reference is None:
-                cross.append(candidate.name)
+                # Round 33: say which debt this is. No `window` means the record predates the field;
+                # a `window` with no reference means this build lost something it should have kept.
+                cross.append({"candidate": candidate.name,
+                              "kind": "legacy" if measurement.window is None else "missing"})
                 continue
             new = decide(reference, measurement, active, veto=candidate.veto)
             if old.accepted != new.accepted:
@@ -2217,6 +2233,14 @@ def format_audit(result: Audit) -> str:
         lines.append("the round compared them with, so replaying them against the stored baseline would")
         lines.append("measure a different geometry and report that as a rule change (boundary 71). No")
         lines.append("verdict is reported for them.")
+        if result.inconsistent:
+            lines.append("%d of them come from records that carry the geometry and still lack the "
+                         "reference: that" % result.inconsistent)
+            lines.append("is a defect in this build, not a record written before the field existed.")
+        else:
+            lines.append("All of them predate the geometry field: they cannot be replayed, but re-running "
+                         "such a round")
+            lines.append("writes a record that can be.")
     return "\n".join(lines)
 
 
