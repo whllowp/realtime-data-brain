@@ -167,6 +167,10 @@ class Campaign:
     # How many domains add up rounds measured on more than one stream file (round 48): the rows stay per
     # dataset, so this is the page saying which rows are pooling two samplings into one total.
     pooled: int = 0
+    # Rounds that do not say which file they measured (round 49). The per-row detail carries the count, but
+    # the header is what a reader sees first: "54 rounds" reads as fully attributable until the page says
+    # how much of it cannot be placed on a sampling.
+    unattributable: int = 0
 
     @property
     def domains(self) -> List[str]:
@@ -197,6 +201,7 @@ class Campaign:
             "withheld_due_for_check": self.withheld_due,
             "withheld_oldest_evidence_days": self.withheld_oldest_days,
             "domains_pooling_files": self.pooled,
+            "rounds_without_recorded_file": self.unattributable,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -238,6 +243,10 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
         # name is what rounds 46 and 47 each refused to do.
         path = str(record.get("stream_path") or "")
         row.files[path or "(not recorded)"] = row.files.get(path or "(not recorded)", 0) + 1
+        if not path:
+            # Counted here rather than derived from the rows later: a round that predates the field is
+            # unattributable, and the header says how much of the page that is (round 49).
+            result.unattributable += 1
         finished = record.get("finished_at") or record.get("started_at") or ""
         if not row.first or finished < row.first:
             row.first = finished
@@ -477,6 +486,13 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # reader comparing domains otherwise cannot tell that SMD's total answers two questions.
         lines.append("stream files      %d domain(s) add up rounds measured on more than one file: their totals "
                      "answer more than one question" % result.pooled)
+    if result.unattributable:
+        # Round 49: the per-row detail has said this since round 48, but the header is what a reader reads
+        # first, and "54 rounds" reads as fully attributable until the page states otherwise.
+        share = 100.0 * result.unattributable / result.rounds if result.rounds else 0.0
+        lines.append("file unknown      %d of %d round(s) do not say which file they measured, so %.0f%% of "
+                     "the totals above cannot be placed on a sampling"
+                     % (result.unattributable, result.rounds, share))
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")

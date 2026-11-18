@@ -550,6 +550,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # asking a different question from "what does it still owe an answer for".
                 successor = retired.get("re_measured_as") if isinstance(retired, dict) else None
                 mark += "  [retired%s]" % ("" if not successor else ", re-measured as %s" % successor)
+            # Round 49: which file this round measured, on its own line. The campaign's header gives the
+            # proportion that cannot be attributed; this is the other half of that question, answered one
+            # round at a time, and it is where a reader looks after asking "which file was that?".
+            stream_file = str(record.get("stream_path") or "")
+            mark += "  [%s]" % (stream_file or "no file recorded")
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
