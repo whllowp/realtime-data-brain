@@ -3058,6 +3058,49 @@ queue             0 round(s) can be re-run from the record; 16 already re-measur
 就是"意外花掉"和"请求花掉"。
 
 
+### 3.62 欠账在下降，还是在被新记录冲淡
+
+第 54 轮把余额印上了战役报表，也把队列印上了："14 轮可以重跑，跑完从 93% 到 67%"。但它回答不了另一个
+问题：这个比例**动过没有**。一个读者决定要不要再花一小时测量，需要的正是这个；一个数字说"还剩 67%"，不
+说它是从 95% 降下来的，还是从 67% 涨上来的。
+
+记录里其实两件事都写了：一轮在 `started_at` 到达，在 `retired.at` 离开。于是任意过去时刻的比例都可重算：
+
+```
+$ brian evolve --campaign
+file unknown      37 of 55 round(s) do not say which file they measured, so 67% of the totals above
+                  cannot be placed on a sampling
+queue             0 round(s) can be re-run from the record; 16 already re-measured; all of them would
+                  take the share 67% -> 67%
+trend             the unrecorded share fell 33 point(s) since the first recorded round 10.8 hour(s) ago
+                  (100% -> 67%): 18 round(s) were retired after a named re-measurement and 73 record(s)
+                  arrived in that window; the history is shorter than a day, so no rate is claimed
+```
+
+`debt_history()` 从账本重建这条曲线，不写第二个进度文件（边界 116）：一个单独的进度文件能说出与账本不同
+的故事，而读者无从判断哪个是真的。它只在内存里按事件顺序重放，所以"多少轮被付清"永远是账本自己的答案。
+
+**建的时候撞到的缺陷：窗口比账本还长。** 第一版请求"最近 7 天"，而这本账只有 0.45 天，于是"7 天前"是一个
+空账本，比较对象是"什么都没有"，输出变成"比例没有变化"——一笔明明刚被付掉的债，在报表上显示为没动。修法
+是把基准换成**记录能命名的最早状态**（第一条记录之后），并且把 `truncated` 带出来，让句子说"自第一条记录
+以来 10.8 小时"，而不是"最近 7 天"。一句话说得比证据长，就是这句报表的第一次撒谎。
+
+**整队的收尾。** 一条命令付掉几轮欠账，应该结束时说自己付了什么：
+
+```
+drained           1 round(s) retired in this invocation; 0 still in the queue; the unrecorded share
+                  68% -> 66%
+```
+
+这行也是**推导**出来的：每次退役自带时刻，所以它就是账本事件的另一个视角，不是第二本账。
+
+**边界 120：不到一天的记录不报速率。** 一次在几分钟内跑完的整队能说"动了 33 个百分点"，不能说"每天 33 个
+点"——把一下午写成速率，就把它变成了一句承诺（第 40 轮"容忍度是个假设"的时间版）。
+
+**边界 121：比例下降可能来自分子，也可能来自分母。** 一条只说"下降了"的曲线，在记录变多时同样会下降。所以
+那行必须同时印出它用到的两个计数：付清了几轮、新到了几条记录。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3285,3 +3328,6 @@ missing for the next level
 
 42. 让整队自己记账：`var/evolve/rerun.json` 记下每次整队何时开始、付清了几轮、停在哪里，这样
 `--campaign` 能说"这笔欠账在下降"，而不只是"还剩多少"。
+
+43. 让趋势进入闸门：`--trend-days` 选择窗口，`--strict` 在比例**上升**时失败（欠账变大是缺陷，不是一个数字），
+并且让 `--campaign` 在速率第一次可测时把当时的斜率写进记录。

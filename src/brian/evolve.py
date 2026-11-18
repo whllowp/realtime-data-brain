@@ -37,7 +37,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -2386,6 +2386,118 @@ def retire(root: Path, name: str, re_measured_as: Optional[str] = None,
         temporary.write_text("\n".join(rewritten) + "\n", encoding="utf-8", newline="\n")
         temporary.replace(path)
     return mark or {}
+
+
+def _moment(stamp: Any) -> Optional[datetime]:
+    """A recorded ISO stamp as an aware UTC moment, or None when it cannot be read.
+
+    A stamp with no offset is the write time of a record on a machine that writes UTC, and reading it as
+    "now" would make an old record look new -- the rule round 29 set for claim checks applies to the debt
+    as well.
+    """
+    text = str(stamp or "").strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def debt_history(root: Path, days: float = 7.0, now: Optional[datetime] = None) -> Dict[str, Any]:
+    """How far the unrecorded share has moved, reconstructed from the ledger (round 55).
+
+    A single number says how much is left and cannot say whether the loop is paying it down or the ledger
+    is growing around it. Both events are recorded: a round arrives at `started_at` and leaves at
+    `retired.at`, so the share at any past moment is recomputable. Nothing is written and nothing is
+    measured -- progress stays derived from the ledger rather than kept in a second bookkeeping file
+    (round 53's rule), which also means this cannot disagree with the ledger it describes.
+
+    `points` is the fall in percentage points across the window, positive when the share fell. `per_day`
+    is only defined over at least one day: a drain that finished inside a minute says what happened but
+    not at what rate, and inventing a rate from it is how a projection becomes a promise.
+    """
+    moment_now = now or datetime.now(timezone.utc)
+    rounds = history(root, include_retired=True)
+    events: List[tuple] = []
+    for row in rounds:
+        name = str(row.get("round") or "")
+        started = _moment(row.get("started_at") or row.get("finished_at"))
+        if started is not None:
+            events.append((started, 1, name, str(row.get("stream_path") or "")))
+        retired = row.get("retired")
+        if isinstance(retired, Mapping):
+            gone = _moment(retired.get("at"))
+            if gone is not None:
+                events.append((gone, -1, name, ""))
+    # Arrivals before departures at the same instant, so a round that replaced another never makes the
+    # denominator dip below zero on the way through.
+    events.sort(key=lambda item: (item[0], -item[1]))
+    since = moment_now - timedelta(days=days)
+    events = [item for item in events if item[0] <= moment_now]
+    alive: Dict[str, bool] = {}
+    opening: Optional[tuple] = None
+    # The window asked for can reach back further than the ledger does. Then "seven days ago" is an empty
+    # ledger, and comparing today's share with it would print "0 points" for a debt that has visibly been
+    # paid down: the baseline becomes the first state the record can name, and `truncated` makes the caller
+    # say "since the first round" instead of "in the last seven days".
+    truncated = bool(events) and events[0][0] > since
+    baseline_moment: Optional[datetime] = None if truncated else since
+    paid = 0
+    arrived = 0
+
+    def snapshot() -> tuple:
+        total = len(alive)
+        empty = sum(1 for named in alive.values() if not named)
+        return total, empty
+
+    for when, kind, name, path in events:
+        if not truncated and when > since and opening is None:
+            opening = snapshot()
+        if kind == 1:
+            alive[name] = bool(path)
+            if when > since:
+                arrived += 1
+        else:
+            alive.pop(name, None)
+            if when > since:
+                paid += 1
+        if truncated and opening is None and alive:
+            opening = snapshot()
+            baseline_moment = when
+    rounds_now, empty_now = snapshot()
+    if opening is None:
+        opening = (0, 0)
+        baseline_moment = moment_now
+    before_rounds, before_empty = opening
+    share_now = (empty_now / rounds_now) if rounds_now else 0.0
+    share_before = (before_empty / before_rounds) if before_rounds else share_now
+    points = (share_before - share_now) * 100.0
+    elapsed = ((moment_now - baseline_moment).total_seconds() / 86400.0) if baseline_moment else days
+    per_day: Optional[float] = (points / elapsed) if elapsed >= 1.0 else None
+    reaches_zero: Optional[str] = None
+    if per_day is not None and per_day > 0 and share_now > 0:
+        needed = (share_now * 100.0) / per_day
+        reaches_zero = (moment_now + timedelta(days=needed)).date().isoformat()
+    return {
+        "days": elapsed,
+        "asked_days": days,
+        "truncated": truncated,
+        "rounds": rounds_now,
+        "without_file": empty_now,
+        "share": share_now,
+        "before_rounds": before_rounds,
+        "before_file": (before_rounds - before_empty),
+        "before_share": share_before,
+        "points": points,
+        "paid": paid,
+        "arrived": arrived,
+        "per_day": per_day,
+        "reaches_zero": reaches_zero,
+    }
 
 
 def retirement_overlap(root: Path, retired: str, successor: Optional[str]) -> Dict[str, Any]:

@@ -42,6 +42,7 @@ from .evolve import (
     build_pool,
     Candidate,
     catalogue,
+    debt_history,
     format_audit,
     format_rejudge,
     format_round,
@@ -828,6 +829,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    "cannot be re-run" % limit)
         failures = 0
         stopped = False
+        paid_now = 0
+        share_before = float(progress["share_now"])
         rules = _rules_from_args(args)
         for domain, name, _why, files in ready[:limit]:
             target_file = files[0]
@@ -875,6 +878,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("")
             _print("recorded round %s" % written.get("round"))
             _print("retired %s (re-measured as %s)" % (name, successor))
+            paid_now += 1
             overlap = (mark or {}).get("overlap") or {}
             matches = overlap.get("matches") or []
             rest = overlap.get("not_repeated") or []
@@ -908,6 +912,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (remaining, total,
                       " — %d left by the limit above" % max(0, len(ready) - limit) if len(ready) > limit
                       else ""))
+            if paid_now:
+                # Round 55: the drain records itself in the ledger it changed (each retirement carries its
+                # own moment), so this line is derived, not written a second time. A command that pays a
+                # debt should end by saying what it paid -- the reader who stopped watching at round four
+                # has no other place to learn it.
+                after = _rerun_progress(root)
+                _print("drained           %d round(s) retired in this invocation; %d still in the queue; the "
+                       "unrecorded share %.0f%% -> %.0f%%"
+                       % (paid_now, after["remaining"], 100.0 * share_before,
+                          100.0 * float(after["share_now"])))
             _print("The re-run measures the candidates the record names, on the file it names: the totals move")
             _print("from one sampling to a named one without changing the question. Nothing is deployed by it.")
         return 2 if failures else 0
@@ -1025,7 +1039,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
-                               refusal_expiry_days=horizon, queue=_rerun_progress(root)))
+                               refusal_expiry_days=horizon, queue=_rerun_progress(root),
+                               trend=debt_history(root)))
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")

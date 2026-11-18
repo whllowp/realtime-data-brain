@@ -442,10 +442,47 @@ def _verdict_line(row: CampaignRow) -> str:
     return note
 
 
+def _trend_line(trend: Mapping[str, Any]) -> str:
+    """One line saying whether the unrecorded share is falling, and how fast when it can be known.
+
+    Round 55: the campaign printed how much of the page cannot be attributed and how much of it a queue
+    could repay, but never whether the number had moved. Movement is recomputed from the ledger's arrival
+    and retirement events, so it cannot flatter the loop with a separate progress file.
+
+    A rate needs at least a day of history: a drain that finished inside a minute says what moved, not how
+    fast, and printing points-per-day from it would turn one afternoon into a promise (round 40's lesson
+    about a tolerance being an assumption, applied to time).
+    """
+    points = float(trend.get("points") or 0.0)
+    share = 100.0 * float(trend.get("share") or 0.0)
+    before = 100.0 * float(trend.get("before_share") or 0.0)
+    days = float(trend.get("days") or 0.0)
+    span = ("%.0f day(s)" % days) if days >= 1.0 else ("%.1f hour(s)" % (days * 24.0))
+    window = ("since the first recorded round %s ago" % span if trend.get("truncated")
+              else "in the last %s" % span)
+    if points > 0.005:
+        line = ("trend             the unrecorded share fell %.0f point(s) %s (%.0f%% -> %.0f%%)"
+                % (points, window, before, share))
+    elif points < -0.005:
+        line = ("trend             the unrecorded share rose %.0f point(s) %s (%.0f%% -> %.0f%%)"
+                % (-points, window, before, share))
+    else:
+        line = ("trend             the unrecorded share has not moved %s (%.0f%%)" % (window, share))
+    if trend.get("paid") or trend.get("arrived"):
+        line += (": %d round(s) were retired after a named re-measurement and %d record(s) arrived in that "
+                 "window" % (int(trend.get("paid") or 0), int(trend.get("arrived") or 0)))
+    if trend.get("reaches_zero"):
+        line += ", so at this rate it reaches 0%% on %s" % trend.get("reaches_zero")
+    elif points > 0.005 and trend.get("per_day") is None:
+        line += "; the history is shorter than a day, so no rate is claimed"
+    return line
+
+
 def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     rules: Optional[EvolveRules] = None,
                     refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS,
-                    queue: Optional[Mapping[str, Any]] = None) -> str:
+                    queue: Optional[Mapping[str, Any]] = None,
+                    trend: Optional[Mapping[str, Any]] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -532,6 +569,12 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                      % (queue.get("ready") or 0, queue.get("paid") or 0,
                         100.0 * float(queue.get("share_now") or 0.0),
                         100.0 * float(queue.get("share_after") or 0.0)))
+    if trend is not None:
+        # Round 55: "how much is left" and "is it falling" are different questions, and the second one is
+        # answered from the ledger's own events rather than from a second bookkeeping file.
+        line = _trend_line(trend)
+        if line:
+            lines.append(line)
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")
