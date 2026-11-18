@@ -572,6 +572,94 @@ def _unrecorded_matters(root: Path,
     return out
 
 
+def _debt_by_domain(root: Path) -> List[Tuple[str, int, int, float, int]]:
+    """(domain, rounds, without a file, share, re-runnable) per stream (round 57).
+
+    The campaign page counts the unrecorded rounds of the whole ledger and the rows name their files, but
+    nothing said **which domain owes what**, so "where should the next round measure?" was a question the
+    operator answered by reading a table by eye. The debt is computed from the live records (a retired round
+    has been paid), and "re-runnable" reuses the geometry match: a round whose file cannot be chosen is a
+    debt nobody can pay by re-running, so it is counted separately rather than added to the payable total.
+    """
+    counts: Dict[str, List[int]] = {}
+    for record in history(root):
+        domain = str((record.get("stream") or {}).get("source") or "(unattributed)")
+        entry = counts.setdefault(domain, [0, 0])
+        entry[0] += 1
+        if not str(record.get("stream_path") or ""):
+            entry[1] += 1
+    ready: Dict[str, int] = {}
+    for domain, _name, _why, files in _unrecorded_matters(root):
+        if len(files) == 1:
+            ready[domain] = ready.get(domain, 0) + 1
+    rows: List[Tuple[str, int, int, float, int]] = []
+    for domain, (rounds, without) in counts.items():
+        share = (float(without) / float(rounds)) if rounds else 0.0
+        rows.append((domain, rounds, without, share, ready.get(domain, 0)))
+    rows.sort(key=lambda row: (-row[3], -row[4], row[0]))
+    return rows
+
+
+def _largest_debt(root: Path) -> Optional[Dict[str, Any]]:
+    """The domain whose share a round could still pay down, or None when nothing is payable (round 57).
+
+    Only a debt with a nameable file is payable by the commands this build has, so a domain that is 100 %
+    unrecorded but has no re-runnable round is not the largest *payable* debt even when its share is bigger.
+    """
+    for domain, rounds, without, share, ready in _debt_by_domain(root):
+        if ready:
+            return {"domain": domain, "rounds": rounds, "without": without, "share": share,
+                    "ready": ready}
+    return None
+
+
+def _order_by_debt(root: Path,
+                   ready: Sequence[Tuple[str, str, str, List[str]]]
+                   ) -> List[Tuple[str, str, str, List[str]]]:
+    """The re-run queue, biggest debtor first (round 57).
+
+    An unordered queue pays whichever stream happened to be measured first, so the loudest domain gets fixed
+    and the largest debt does not. The order comes from `_debt_by_domain`, and a domain it does not know
+    (a round whose stream was never recorded) keeps its relative place at the end rather than being dropped.
+    """
+    order = {row[0]: index for index, row in enumerate(_debt_by_domain(root))}
+    return sorted(ready, key=lambda item: order.get(item[0], len(order)))
+
+
+def _print_debt(root: Path, source: str, *, named_file: bool) -> None:
+    """Say where the largest payable debt is before the round decides what to measure (round 57).
+
+    A round run without `--stream-file` measures the generated stream, which cannot name a file: it adds one
+    unrecorded round and pays none of the debt. That was true since round 50 and printed nowhere, so the loop
+    could grow the debt it then had to pay. The line is printed before the proposal, because it is an input
+    to the decision and not a postscript to it.
+    """
+    largest = _largest_debt(root)
+    if largest is not None:
+        _print("debt              the largest payable debt is on %s: %d of %d round(s) cannot be placed on a "
+               "sampling (%.0f%%), %d of them can be re-run from the record"
+               % (largest["domain"], largest["without"], largest["rounds"],
+                  100.0 * largest["share"], largest["ready"]))
+    if named_file:
+        return
+    mine = next((row for row in _debt_by_domain(root) if row[0] == source), None)
+    if mine is None:
+        # A domain with no recorded round yet cannot be described by a share: "0 of 0" reads as a measurement
+        # of nothing, which is the defect round 27 fixed for an empty stream summary.
+        here = "it is the first round on %s" % source
+    else:
+        here = "%s already has %d of %d unrecorded" % (source, mine[2], mine[1])
+    if largest is not None:
+        _print("!                 this round measures the generated stream, which has no file to name: it adds "
+               "one unrecorded round, %s, and pays none of %s's debt (boundary 124)"
+               % (here, largest["domain"]))
+    else:
+        # Nothing is payable by a re-run, but the round still grows the unrecorded side: saying "no debt" would
+        # hide the only fact that matters here, which is that this round's own record will be unattributable.
+        _print("!                 no payable debt remains, and this round measures the generated stream, which "
+               "has no file to name: its record will be unattributable too (%s)" % here)
+
+
 def _withheld_pairs(values: Sequence[str]) -> List[Tuple[str, Path]]:
     """`--withheld-stream domain=stream.json`, repeatable, into (domain, path) pairs (round 45).
 
@@ -830,11 +918,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         matters = _unrecorded_matters(root)
         ready = [item for item in matters if len(item[3]) == 1]
         blocked = [item for item in matters if len(item[3]) != 1]
+        # Round 57: the queue is paid in order of what each domain owes, not in ledger order. A reader who
+        # starts at the top of an unordered list pays whichever stream happened to be measured first, which
+        # is how the loudest domain gets fixed and the largest debt does not.
+        ready = _order_by_debt(root, ready)
         _print("=" * 96)
         _print("brian evolve - re-run the rounds whose stream file can be named")
         _print("=" * 96)
         _print("candidates        %d of %d round(s) have exactly one file; %d cannot be placed"
                % (len(ready), len(matters), len(blocked)))
+        for domain, rounds, without, share, re_runnable in _debt_by_domain(root):
+            if re_runnable:
+                _print("debt              %-16s %d of %d round(s) unrecorded (%.0f%%), %d re-runnable"
+                       % (domain, without, rounds, 100.0 * share, re_runnable))
         progress = _rerun_progress(root)
         _print("progress          %d round(s) already re-measured into a named successor; %d still to do"
                % (progress["paid"], progress["remaining"]))
@@ -1067,7 +1163,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             return 2
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
-                               trend=trend))
+                               trend=trend, debt=_largest_debt(root)))
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")
@@ -1231,6 +1327,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # Round 37: the plan is consulted *before* proposing, so the mechanism does not spend a slot on a
         # candidate the ledger already answered — and the dry run shows the proposal the round would really
         # make rather than one it would then filter.
+        # Round 57: the dry run also says where the largest payable debt is, because it is the place an
+        # operator decides whether this round is worth its minutes at all.
+        _print_debt(root, source, named_file=bool(args.stream_file))
         proposal = propose(rounds, mode=mode, source=source, deployed=deployed,
                            rules=_rules_from_args(args), refused=plan["skip"])
         if args.catalogue:
@@ -1534,6 +1633,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("  %s" % reshaped.provenance)
                 _print("")
 
+    # Round 57: where the largest payable debt is belongs before the proposal, not in a report afterwards —
+    # a round aimed at the wrong stream grows the debt it will later have to pay.
+    _print_debt(root, source, named_file=bool(args.stream_file))
     known = {candidate.name: candidate for candidate in catalogue()}
     # Round 37: the mechanism must not spend its proposal budget on questions this stream already answered,
     # so the refusal plan is computed before `propose` rather than after it. The plan is also what the round

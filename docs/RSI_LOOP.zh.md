@@ -3142,6 +3142,62 @@ re-run the queue, or write the rounds with --stream-file so they name a sampling
 **边界 123：只有当账本能归属这次上升时，它才可收费。** 这个构建在生成的演示流上按设计写没有文件名的轮次（第 50 轮），所以默认只警告，`--max-share-rise` 才是收费开关；收费的段落必须同时说出窗口里**还了多少**（退役后重测）和**来了多少**（新记录），否则"上升"无法区分"债务在增加"与"工程在推进"。
 
 
+### 3.64 欠账在哪一流，这一轮该测哪里：把趋势变成输入
+
+第 56 轮让"未归属比例在涨"能失败，但那一整页说的都是整本账的份额。`--campaign` 的 `file unknown 37 of
+56 round(s) … 66%` 说明了有多少无法定位，却没说**欠在哪个流**；而 `--propose` 可以在完全不管欠账的情况下
+跑一轮 `demo`——那一轮的记录本身也会不可归属，于是欠账又加一条。这不是打印不足，是决策没有输入。
+
+修法分两处，都从账本算，不引入第二个记账文件：
+
+- `_debt_by_domain(root)` 在每个流上数三件事：轮数、没有文件的轮数、其中**可重跑**的轮数（几何匹配唯一时
+  才算）。"可重跑"必须单独数：一条几何匹配不上的欠账，重跑这条命令永远付不掉，把它算进可付总额只是把一个
+  无法清偿的数字放在分子里。
+- `_largest_debt(root)` 只在可付欠账里挑；`_print_debt` 在**提议之前**打印它，并在本轮没有
+  `--stream-file`（即要测生成的 demo 流）时按边界 124 声明：这一轮会多一条不可归属记录，并且不付任何欠账。
+- `_order_by_debt(root, ready)`：重跑队列按欠账排序，而不是按账本先后。
+
+真实账本上，可付欠账已经是 0——第 54 轮那一整队把它跑完了，所以本轮只在 dry run 里读到那句更短的诚实答案：
+
+```
+$ python -m brian.cli evolve --propose
+!                 no payable debt remains, and this round measures the generated stream, which has no file to
+                  name: its record will be unattributable too (demo already has 1 of 1 unrecorded)
+```
+
+要让"最大可付欠账"这句话出现，需要一个还有欠账的账本，于是用 `var/debt57_demo.py` 造了一个两轮的小根
+（一轮 SMD 写了版本、没记文件、几何唯一可匹配；一轮 demo 无文件），同一根上两条输出：
+
+```
+$ python -m brian.cli evolve --propose             # 在 var/debt57 下
+debt              the largest payable debt is on SMD: 1 of 1 round(s) cannot be placed on a sampling
+                  (100%), 1 of them can be re-run from the record
+!                 this round measures the generated stream, which has no file to name: it adds one
+                  unrecorded round, demo already has 1 of 1 unrecorded, and pays none of SMD's debt
+
+$ python -m brian.cli evolve --rerun-unrecorded --rerun-limit 0
+candidates        1 of 1 round(s) have exactly one file; 0 cannot be placed
+debt              SMD              1 of 1 round(s) unrecorded (100%), 1 re-runnable
+projection        if the rest are re-run the unrecorded share falls 100% -> 50% of 2 round(s)
+```
+
+三个读数：
+
+1. **"最大"只在可付的集合里有意义。** 一个域可以 100% 不可归属却没有一条能重跑的轮次；把它叫"最大欠账"
+   会让操作员去付一笔这条代码根本付不掉的账。
+2. **没有可付欠账时仍要说话。** 真实账本上可付欠账是 0，但这一轮的记录**仍会**不可归属；沉默会让"没有欠账"
+   与"这一轮不让它变大"看起来是同一件事，而它们不是。
+3. **排序也是策略。** 按账本先后付，付的是"先被测的那个流"；按欠账付，付的才是"欠得最多的那个流"。第 54 轮
+   的队列从头跑到尾看不出差别，一旦队列中途停下（边界 117），差别就是付了 8 轮还是付了 2 轮。
+
+**边界 124：测一个说不出文件名的流，就是把不可归属的那一列加一。** 跑这一轮的命令必须在花掉这几分钟之前
+说明这一点，并同时说出可付欠账在哪个域；否则循环会先制造它之后必须偿还的欠账，而且没有人被告知。
+
+**边界 125：队列按什么排序，就是在按什么付账。** 按欠账排的队列付最大的那一笔；按账本先后排的队列付最早
+测的那个流。中途会停的队列（边界 117）里，这两种排序付出的是不同的结果，所以排序必须写下来，而不是留给
+`sort()` 的稳定默认。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3375,3 +3431,5 @@ missing for the next level
 
 44. 趋势要能作为一轮的输入：`--campaign` 已经说出份额在升，下一步应让 `--propose` 先补齐欠账最大的那个域，直到它的份额开始下降；并把窗口内新增记录的文件来源逐条列出，让"上升"归因到具体的域，而不是账本整体。
 
+45. 让"最大可付欠账"这一行也能进闸门：`--audit --max-debt-share` 在一整个域的未归属比例超过阈值时失败，
+    并且让 `--rerun-unrecorded` 在按域排完序之后，把"本轮付了哪个域、还剩哪个域最大"写进记录本身。

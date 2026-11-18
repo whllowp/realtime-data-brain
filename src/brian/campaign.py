@@ -499,7 +499,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     rules: Optional[EvolveRules] = None,
                     refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS,
                     queue: Optional[Mapping[str, Any]] = None,
-                    trend: Optional[Mapping[str, Any]] = None) -> str:
+                    trend: Optional[Mapping[str, Any]] = None,
+                    debt: Optional[Mapping[str, Any]] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -592,6 +593,15 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         line = _trend_line(trend)
         if line:
             lines.append(line)
+    if debt is not None and debt.get("ready"):
+        # Round 57: the page's `file unknown` line is ledger-wide, so it cannot answer "which stream should
+        # the next round measure?"; this line names the domain a re-run could actually pay down (a round
+        # whose file cannot be chosen is a debt nobody can pay by re-running, so it is not counted here).
+        lines.append("debt              the largest payable debt is on %s: %d of %d round(s) cannot be placed "
+                     "on a sampling (%.0f%%), %d of them can be re-run from the record"
+                     % (debt.get("domain") or "?", int(debt.get("without") or 0),
+                        int(debt.get("rounds") or 0), 100.0 * float(debt.get("share") or 0.0),
+                        int(debt.get("ready") or 0)))
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")
