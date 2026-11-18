@@ -3492,6 +3492,58 @@ lower the budget with --rerun-limit, or re-run the queue when a shorter window i
 `persist` 真正写出的形状来造。
 
 
+### 3.70 一次不是全部：给"付清"单独算一次价，让每个域自己的等待有上限
+
+第 62 轮把等待按域算了，但句子回答的是"**这一次**调用要多久"。读者要决定的是"我现在要不要开始"，
+而这件事取决于两个数：这一下多久，全部付清多久。只给一个，读者就得自己乘——乘出来的数错了，
+他会在中途发现，那时他已经在等了。
+
+同时，`--max-minutes` 还是一个数。一条队付 SMD 和 RCAEval，等待不是同一种：四点五分钟和六分钟，
+不是"十分钟半这里可以、那里不行"。所以要能说"这个域最多四分钟，其他随意"。
+
+两处改动：
+
+| 位置 | 改了什么 |
+| --- | --- |
+| `_queue_budget` | 多两个字段：`drain_minutes`（把整个可付队列按域加总）和 `runs`（按这一下的轮数要跑几次才清空，`-(-ready // rounds)`，不引 math） |
+| `budget_text` | `runs > 1` 时追加"；draining it would take N such run(s) and about X minute(s)"——只有分几次付时才说，因为全付时它就是这一下 |
+| `_minute_limits` | `--max-minutes` 变成可重复：裸数字是全局上限，`domain=minutes`（或 `default=minutes`）只覆盖该域；域按 slug 比较，所以 `rcaeval-re1-ob=4` 认得出 `RCAEval RE1-OB` |
+| `_strict_exit` | 逐域判上限：每个域用自己的上限，没有就继承全局；谁超了就只点谁的名，输出 `… on <domain>, above the X asked for:`；没有任何逐域数字时才退回全局那一句 |
+
+页面（`var/budget61`，SMD 的轮 4.5 分钟、RCAEval 6 分钟，可付两轮）：
+
+```
+budget            brian evolve --rerun-unrecorded --rerun-limit 1 pays 1 round(s) (RCAEval RE1-OB); the queue falls 67% -> 33% of 3 round(s), about 6 minute(s); draining it would take 2 such run(s) and about 10.5 minute(s)
+```
+
+逐域上限（同一页面，`--strict --rerun-limit 0`）：
+
+```
+$ … --max-minutes "default=10" --max-minutes "rcaeval-re1-ob=4"
+the next queue run would spend about 6.0 minute(s) on RCAEval RE1-OB, above the 4.0 asked for:
+
+$ … --max-minutes "SMD=4"
+the next queue run would spend about 4.5 minute(s) on SMD, above the 4.0 asked for:
+
+$ … --max-minutes "5x"
+--max-minutes wants a number or domain=minutes, got '5x'        (exit 2)
+```
+
+三条读法：
+
+1. **两个问题要两个数。** "这一下多久"和"付清多久"不能互相代替；分几次付时第二个才是读者真正在权衡的，
+   所以它必须由同一个函数算出来，而不是读者用轮数去乘一个中位数。
+2. **逐域上限不是打折，是点名。** 它说的是"我不接受这个域的这段等待"，于是超出时点名的也必须是那个域；
+   一个只说"总共超了"的闸门，会让读者以为要减的是另一个域。
+3. **读不懂的上限必须报错，不能变成豁免。** 解析失败若被忽略，页面会继续声称一个没人检查的上限——
+   那比没有上限更坏，因为它把"我设了限"写进了读者的信心里。
+
+**边界 136：预算必须同时给"这一次"和"付清"的代价。** 只给前者，读者要自己乘；乘错的代价在他已经开始等之后才出现。
+
+**边界 137：逐域的上限要在它点名的那个域上收费，没点名的域继承全局，绝不求和。** 而且这条参数读不懂时是错误，
+不是豁免——一个不生效的上限比没有上限更坏。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3750,3 +3802,7 @@ missing for the next level
 
 50. **（3.69 已完成）按域给等待定价，并让它能被 `--max-minutes` 拒绝。** 剩下的：页面还要
     给**排空**的队算一次价，让"现在全付"和"分几次付"可比；`--max-minutes` 应能按域配一个默认上限。
+
+51. **（3.70 已完成）给"付清"单独定价，并让 `--max-minutes` 支持逐域上限。** 剩下的：把逐域上限写进
+    部署状态（`var/evolve/domains/<slug>/current.json`），让它跟着域走而不是跟着命令行走；
+    `--rerun-unrecorded` 自己也要在开头打印同一句预算（现在它在第一次测量后才有数字）。

@@ -259,7 +259,9 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  payable: Optional[Mapping[str, Any]] = None,
                  max_debt: Optional[float] = None,
                  budget_minutes: Optional[float] = None,
-                 max_minutes: Optional[float] = None) -> int:
+                 max_minutes: Optional[float] = None,
+                 minutes_by_domain: Optional[Mapping[str, Any]] = None,
+                 max_minutes_by_domain: Optional[Mapping[str, Any]] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -372,9 +374,26 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     # narrower than the others in one way and wider in another: it fails only when the *recommended* budget
     # already exceeds the limit (so fewer rounds clear it, which is a command the reader has), and it fails on
     # a budget derived from measurements their own records took, not on an assumption about how long a round is.
-    minutes_capped = (max_minutes is not None and budget_minutes is not None
-                      and budget_minutes > max_minutes)
-    if max_minutes is not None and budget_minutes is not None and budget_minutes > max_minutes:
+    #
+    # Round 63: the limit may be per domain, because a queue paying SMD and RCAEval does not wait the same way
+    # in both — four and a half minutes against six is not "ten and a half is fine here and not there". A
+    # per-domain ceiling overrides the global one for its own domain and is silent about the rest.
+    ceilings = {domain_slug(str(name)): float(value)
+                for name, value in (max_minutes_by_domain or {}).items()}
+    over: List[Tuple[str, float, float]] = []
+    for domain, minutes in sorted((minutes_by_domain or {}).items()):
+        ceiling = ceilings.get(domain_slug(str(domain)), max_minutes)
+        if ceiling is not None and float(minutes) > float(ceiling):
+            over.append((str(domain), float(minutes), float(ceiling)))
+    minutes_capped = bool(over)
+    if over:
+        _print("")
+        for domain, minutes, ceiling in over:
+            _print("the next queue run would spend about %.1f minute(s) on %s, above the %.1f asked for:"
+                   % (minutes, domain, ceiling))
+        _print("lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.")
+    elif (max_minutes is not None and budget_minutes is not None and budget_minutes > max_minutes):
+        minutes_capped = True
         _print("")
         _print("the next queue run would spend about %.1f minute(s), above the %.1f asked for:"
                % (budget_minutes, max_minutes))
@@ -384,6 +403,44 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     rose = max_rise is not None and trend_rise > max_rise and trend_rise > trend_tolerance
     capped = max_unrecorded is not None and unrecorded_share > max_unrecorded
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped) else 0
+
+
+def _minute_limits(values: Optional[Sequence[str]]) -> Tuple[Optional[float], Dict[str, float]]:
+    """Read `--max-minutes` as a global ceiling and/or one ceiling per domain (round 63).
+
+    The flag used to take one number, so a reader who could wait ten minutes for a whole queue but only
+    four for the long SMD recording had to pick a number that was wrong about one of them. A bare number
+    stays the global ceiling; `DOMAIN=MINUTES` (or `default=MINUTES`) overrides it for that domain only,
+    and the domain is compared as a slug so `rcaeval-re1-ob=4` and `RCAEval RE1-OB` are the same domain.
+
+    An entry that is neither is an error, not a silently ignored flag: a ceiling that does not apply is
+    worse than no ceiling, because the page keeps claiming a limit nobody is checking.
+    """
+    global_ceiling: Optional[float] = None
+    by_domain: Dict[str, float] = {}
+    for entry in values or []:
+        text = str(entry).strip()
+        if not text:
+            continue
+        if "=" not in text:
+            try:
+                global_ceiling = float(text)
+            except ValueError:
+                raise ValueError("--max-minutes wants a number or domain=minutes, got %r" % entry)
+            continue
+        name, _, number = text.partition("=")
+        name = name.strip()
+        try:
+            limit = float(number.strip())
+        except ValueError:
+            raise ValueError("--max-minutes wants a number or domain=minutes, got %r" % entry)
+        if not name:
+            raise ValueError("--max-minutes wants a domain before the '=' (use domain=minutes), got %r" % entry)
+        if name.lower() == "default":
+            global_ceiling = limit
+        else:
+            by_domain[domain_slug(name)] = limit
+    return global_ceiling, by_domain
 
 
 def _withheld_debt(root: Path, horizon: float) -> Tuple[int, Optional[float]]:
@@ -766,6 +823,17 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
         if rate is not None:
             minutes_by_domain[domain] = rate * count
     estimated = sum(minutes_by_domain.values()) if minutes_by_domain else None
+    # Round 63: price the queue being drained as well as the step, so "pay it all now" and "pay it in steps"
+    # are two numbers a reader can compare instead of two words they have to trust.
+    drain_by_domain: Dict[str, float] = {}
+    for row in plan:
+        domain = str(row.get("domain"))
+        rate = rates.get(domain, each)
+        count = int(row.get("ready") or 0)
+        if rate is not None and count:
+            drain_by_domain[domain] = rate * count
+    drain_minutes = sum(drain_by_domain.values()) if drain_by_domain else None
+    runs = -(-ready // rounds) if (ready and rounds) else 0
     return {
         "command": "brian evolve --rerun-unrecorded --rerun-limit %d" % requested,
         "rounds": rounds,
@@ -778,6 +846,9 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
         "estimated_minutes": (each * rounds) if (each is not None and rounds) else None,
         "minutes_by_domain": minutes_by_domain,
         "estimated_minutes_by_domain": estimated,
+        "drain_by_domain": drain_by_domain,
+        "drain_minutes": drain_minutes,
+        "runs": runs,
     }
 
 
@@ -1045,6 +1116,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     """Run the improvement mechanism: propose, measure, select, and (only with --apply) integrate."""
     root = Path(".")
     directory = Path(EVOLVE_DIR)
+    # Round 63: the wait ceiling is read once, before any branch, so every mode charges the same limits and a
+    # badly formed flag fails loudly here instead of being ignored by the mode the reader happened to pick.
+    try:
+        minute_ceiling, minute_ceilings = _minute_limits(getattr(args, "max_minutes", None))
+    except ValueError as error:
+        _print(str(error))
+        return 2
 
     if args.history:
         rounds = history(root, include_retired=True)
@@ -1398,7 +1476,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             max_debt=getattr(args, "max_debt_share", None),
                             budget_minutes=(None if budget.get("estimated_minutes_by_domain") is None
                                             else float(budget["estimated_minutes_by_domain"])),
-                            max_minutes=getattr(args, "max_minutes", None))
+                            minutes_by_domain=budget.get("minutes_by_domain") or {},
+                            max_minutes=minute_ceiling,
+                            max_minutes_by_domain=minute_ceilings)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -1481,7 +1561,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             max_debt=getattr(args, "max_debt_share", None),
                             budget_minutes=(None if audit_budget.get("estimated_minutes_by_domain") is None
                                             else float(audit_budget["estimated_minutes_by_domain"])),
-                            max_minutes=getattr(args, "max_minutes", None))
+                            minutes_by_domain=audit_budget.get("minutes_by_domain") or {},
+                            max_minutes=minute_ceiling,
+                            max_minutes_by_domain=minute_ceilings)
 
     if args.grade:
         try:
@@ -2996,10 +3078,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --strict: fail when the worst domain's unrecorded share is above this "
                              "fraction (0.5 = half its rounds cannot be placed), provided a re-run can lower "
                              "it; a share no command can pay is printed but never charged")
-    evolve.add_argument("--max-minutes", type=float, default=None, metavar="MINUTES",
+    evolve.add_argument("--max-minutes", action="append", default=None, metavar="MINUTES|DOMAIN=MINUTES",
                         help="with --strict: fail when the next queue run would spend more than this many "
                              "minutes (estimated per domain from the median duration of the recorded rounds, "
-                             "so it is a wait the ledger can prove, not a guess)")
+                             "so it is a wait the ledger can prove, not a guess). Repeat as domain=minutes to "
+                             "give one domain its own ceiling; a bare number is the global one")
     evolve.add_argument("--rerun-unrecorded", action="store_true",
                         help="re-run the rounds whose stream file can be named by geometry, then retire them "
                              "naming the new record; skips a round whose file cannot be chosen")

@@ -524,6 +524,12 @@ def budget_text(budget: Mapping[str, Any]) -> str:
         line += ", about %.0f minute(s)" % float(minutes)
     if len(by_domain) > 1:
         line += " (%s)" % ", ".join("%s %g" % (name, value) for name, value in by_domain.items())
+    # Round 63: a step is not the whole job. "about 6 minutes" answers "what does this invocation cost",
+    # not "what does finishing the queue cost", and a reader who is deciding whether to start deserves both.
+    runs = int(budget.get("runs") or 0)
+    drain = budget.get("drain_minutes")
+    if runs > 1 and drain is not None and float(drain) > 0.0:
+        line += ("; draining it would take %d such run(s) and about %g minute(s)" % (runs, float(drain)))
     return line
 
 

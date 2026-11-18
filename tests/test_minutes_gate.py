@@ -190,4 +190,75 @@ def test_the_audit_prices_the_same_budget_the_page_does(tmp_path, monkeypatch, c
     cli.main(["evolve", "--audit", "--strict", "--max-minutes", "5", "--rerun-limit", "0"])
     audit = capsys.readouterr().out
     assert "about 10 minute(s)" in page
-    assert "about 10.5 minute(s)" in audit
+    # Round 63 reports the domain that exceeds its own ceiling, not just the total.
+    assert "on RCAEval RE1-OB, above the 5.0 asked for" in audit
+
+
+def test_the_budget_says_what_draining_would_cost(tmp_path):
+    """A step is not the whole job: "about 6 minutes" answers the wrong question on its own."""
+    _two_domain_root(tmp_path)
+    budget = cli._queue_budget(tmp_path, limit=1)
+    assert budget["runs"] == 2  # two payable rounds, one per invocation
+    assert budget["drain_minutes"] == 10.5
+    text = budget_text(budget)
+    assert "draining it would take 2 such run(s) and about 10.5 minute(s)" in text
+
+
+def test_a_draining_budget_does_not_repeat_itself(tmp_path):
+    _two_domain_root(tmp_path)
+    budget = cli._queue_budget(tmp_path, limit=0)
+    assert budget["runs"] == 1
+    assert "draining it would take" not in budget_text(budget)
+
+
+def test_a_bare_number_is_the_global_ceiling():
+    assert cli._minute_limits(["5"]) == (5.0, {})
+    assert cli._minute_limits(["default=7.5"]) == (7.5, {})
+    assert cli._minute_limits(None) == (None, {})
+
+
+def test_a_domain_can_have_its_own_ceiling():
+    assert cli._minute_limits(["default=10", "rcaeval-re1-ob=4"]) == (10.0, {"rcaeval-re1-ob": 4.0})
+    # A domain is compared as a slug, so the spelling a reader types does not have to match the record's.
+    assert cli._minute_limits(["RCAEval RE1-OB=4"]) == (None, {"rcaeval-re1-ob": 4.0})
+
+
+def test_a_malformed_ceiling_is_an_error_not_a_waiver():
+    for bad in ("5x", "=4", "SMD="):
+        try:
+            cli._minute_limits([bad])
+        except ValueError as error:
+            assert "domain=minutes" in str(error)
+        else:  # pragma: no cover - the assertion below is the failure
+            raise AssertionError("%r was accepted" % bad)
+
+
+def test_only_the_domain_over_its_own_ceiling_is_charged(capsys):
+    assert cli._strict_exit(True, 0, 0, 0,
+                            minutes_by_domain={"RCAEval RE1-OB": 6.0, "SMD": 4.5},
+                            max_minutes=10.0,
+                            max_minutes_by_domain={"rcaeval-re1-ob": 4.0}) == 1
+    out = capsys.readouterr().out
+    assert "on RCAEval RE1-OB, above the 4.0 asked for" in out
+    assert "on SMD" not in out  # 4.5 is inside the global 10
+
+
+def test_a_domain_without_its_own_ceiling_borrows_the_global_one(capsys):
+    assert cli._strict_exit(True, 0, 0, 0,
+                            minutes_by_domain={"RCAEval RE1-OB": 6.0, "SMD": 4.5},
+                            max_minutes=4.0) == 1
+    out = capsys.readouterr().out
+    assert "on RCAEval RE1-OB, above the 4.0 asked for" in out
+    assert "on SMD, above the 4.0 asked for" in out
+
+
+def test_the_per_domain_ceiling_reaches_the_gate_end_to_end(tmp_path, monkeypatch, capsys):
+    _two_domain_root(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--campaign", "--strict", "--rerun-limit", "0",
+                     "--max-minutes", "default=10", "--max-minutes", "rcaeval-re1-ob=4"]) == 1
+    out = capsys.readouterr().out
+    assert "on RCAEval RE1-OB, above the 4.0 asked for" in out
+    assert cli.main(["evolve", "--campaign", "--strict", "--rerun-limit", "0",
+                     "--max-minutes", "default=12", "--max-minutes", "rcaeval-re1-ob=8"]) == 0
+    capsys.readouterr()
