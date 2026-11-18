@@ -146,3 +146,53 @@ def test_the_round_record_says_how_many_measurements_it_did_not_spend() -> None:
     )
 
     assert result.to_dict()["proposal"]["refused_skipped"] == 4
+
+
+def _seeds() -> list:
+    """Two measured points, so the neighbourhood is wider than one seed's two neighbours."""
+    return [Candidate("events-8", "hypothesis", "llm", "max_context_events", 8),
+            Candidate("events-4", "hypothesis", "llm", "max_context_events", 4)]
+
+
+def _neighbour_names(max_proposals: int, refused=()) -> list:
+    proposal = propose([_round_file(*_seeds())], source="SMD",
+                       max_proposals=max_proposals, refused=list(refused))
+    return [candidate.name for candidate in proposal.candidates]
+
+
+def test_a_slot_a_refusal_freed_is_named() -> None:
+    """Round 38: with a capped proposal the saving is not cheaper — the cap refills the slot."""
+    unfiltered = _neighbour_names(4)
+    assert len(unfiltered) == 4
+    proposal = propose([_round_file(*_seeds())], source="SMD", max_proposals=2,
+                       refused=unfiltered[:1])
+
+    assert [candidate.name for candidate in proposal.candidates] == unfiltered[1:3]
+    assert proposal.substitutes == [unfiltered[2]]
+    assert proposal.refused == 1
+
+
+def test_an_uncapped_proposal_names_no_substitute() -> None:
+    # Nothing was cut, so nothing could have been admitted in a refusal's place: an empty list is the
+    # honest answer, and a substitute invented here would be a claim about a cap that never bound.
+    names = _neighbour_names(100)
+    proposal = propose([_round_file(*_seeds())], source="SMD", max_proposals=100,
+                       refused=names[:1])
+
+    assert proposal.refused == 1
+    assert proposal.substitutes == []
+
+
+def test_the_printers_name_the_substitute_and_the_empty_case_prints_nothing() -> None:
+    proposal = Proposal("expand", "reason", [], None, "")
+    proposal.refused = 2
+    proposal.substitutes = ["events-12"]
+
+    described = "\n".join(describe_proposal(proposal))
+    printed = format_proposal(proposal)
+    assert "1 slot(s) went to candidate(s) the cap would have cut: events-12" in described
+    assert "1 slot(s) went to candidate(s) the cap would otherwise have cut: events-12" in printed
+
+    proposal.substitutes = []
+    assert "slot(s)" not in "\n".join(describe_proposal(proposal))
+    assert "slot(s)" not in format_proposal(proposal)

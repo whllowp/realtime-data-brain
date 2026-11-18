@@ -2029,6 +2029,82 @@ after   2 candidate(s) were dropped because this stream already refused them at 
 
 **边界 82：一个机制省下的东西必须写进它改动的产物，否则它只是一个 print。** 终端会滚走，轮次记录不会。
 
+### 3.45 省下来的名额去了哪里：一次替换，或者一次沉默
+
+round 37 把 `refused_skipped` 写进了每一轮的记录，也在那一轮打印出来。这一轮补的是它留下的两个问题：
+这个数没有任何人累加；以及"丢了 N 条候选"读起来像"省了 N 次测量"。
+
+后者在有名额上限的提案里是错的。生成器每轮最多提 8 条，被拒绝的候选空出一个名额，名额会被后面的
+候选填上——所以省下来的不是一个测量，而是一个名额。round 37 的表格里 `host-scoring-deviation-band-0-77`
+正是这样进来的：上一轮它被上限切掉，这一轮两条同族候选被拒绝后它进了名单。
+
+**第一处：替换要有名字。** `propose` 现在并行记下一条**没有**过滤的生成顺序（`without_refusals`，
+与过滤后的顺序共用同一份 `known` 去重表），然后比较两者被上限截断后的前 `cap` 条：
+
+```
+selected       = generated[:cap]
+baseline_order = ([reshaped] if reshaped else []) + without_refusals
+substitutes    = [c for c in selected if c.name not in {b.name for b in baseline_order[:cap]}]
+```
+
+`Proposal.substitutes` 进 `to_dict()`（键 `substitutes`），两个打印器各一行：
+
+```
+                1 slot(s) went to candidate(s) the cap would have cut: events-2
+1 slot(s) went to candidate(s) the cap would otherwise have cut: events-2
+```
+
+在真实账本上，`data/smd/stream-check.json` 的 dry run 丢掉两条（`host-scoring-deviation-band-0-92/-0-82`），
+替换列表是**空的**：
+
+```
+2 candidate(s) were dropped because this stream already refused them at this sampling
+
+candidate                      change
+events-5                       llm.max_context_events = 5
+...
+```
+
+这是诚实的那种答案：两条被拒绝的候选在**没有**过滤的顺序里本来就排在第 9、第 10 位，上限是 8，
+它们本来也不会被测量。所以这一轮丢掉的不是上限内的名额，而是生成器原本多余的两条。一个非空的替换
+列表只在名额确实被填上时出现——用了两个已测量的种子和 `max_proposals=2` 的构造用例：
+
+```
+unfiltered ['events-16', 'events-9', 'events-2', 'events-5']
+selected   ['events-9', 'events-2']
+substitutes ['events-2']
+```
+
+被拒绝的 `events-16` 空出的名额给了 `events-2`；没有它，这一轮只测 `events-9`。
+
+**第二处：节省要累加。** `Campaign.skipped`（`to_dict()` 键 `measurements_not_repeated`）与
+`CampaignRow.skipped` 从每一轮记录的 `proposal.refused_skipped` 累加，页面上一行表头、一行域：
+
+```
+refusals          35 candidate(s) are still held as rejected, 5 of them on retired record(s)
+saving            6 candidate measurement(s) the mechanism never proposed: a stream had already refused them
+
+SMD                    27    157     68 20        recall 0.507 at the 10% budget, 3358 tokens/report
+  refusals          35 held, 5 inherited from a retired record
+  saving            6 candidate measurement(s) not repeated
+```
+
+三条读法：
+
+1. **有名额上限时，"省了"只能是替换或明文否认。** 候选被丢掉之后名额会被别人占走，所以"省了一次测量"
+   这个说法在上限内是假的；唯一可核对的说法是"这一格给了谁"，或者"没有任何一格易主"。前者有名字，
+   后者说明被丢掉的候选本来就排在名额之外。
+2. **一次性的打印不是账。** 只出现在某一轮日志里的节省，和从未发生的节省无法区分：下一轮从同一本账出发，
+   照原来的方式提案。所以这个数必须累加到读者会看的那张表上。
+3. **空的替换列表本身是信息。** 它说这一轮丢掉的候选不会进入测量，也就是说 round 37 的收益在"生成"，
+   不在"测量预算"——两个说法在报表上长得一样，在工程上完全不同。
+
+**边界 83：一个被拒绝的候选在有名额上限的提案里省下的不是一个测量，而是一个名额；名额会被别人占走，
+所以"省了"必须报成替换（有名字）或报成"没有替换"（名额本来就不属于它）。**
+
+**边界 84：一次性的打印不是账；节省必须累加到读者会看的那张表上，否则它与"从未发生"不可区分。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2188,6 +2264,10 @@ missing for the next level
 24. 让 `--campaign` 的 `refusals` 也能按域拆开（现在它是账本级的），并在 `--propose` 输出里标出
     "这条候选之所以没被提出，是因为一条退役记录里的拒绝"——现在它只是静默地少了一条候选。
 
-25. **（3.44 已完成）过滤器搬进生成器，省下的名额写进记录。** `Proposal.refused`（`refused_skipped`）
-    让每一轮的记录自己回答"这一轮没有重复问哪些问题"。剩下的一步：把补进来的候选与被它替下去的候选并列打印，
-    并把 `refused_skipped` 累加进 `--campaign` 的累计节省统计。
+25. **（3.44 / 3.45 已完成）过滤器搬进生成器，省下的名额写进记录，再累加到战役报表。**
+    `Proposal.refused`（`refused_skipped`）让每一轮回答"这一轮没有重复问哪些问题"；
+    `Proposal.substitutes` 回答"空出的名额给了谁"；`Campaign.skipped` 把它加总成账本级的节省。
+
+26. 让替换列表进入提案的**下一轮**：现在它只被打印，没有被用来做什么。可以把它当作"这一轮实际问到了
+    多少新问题"的分母——如果一整轮的 8 条全是替换，说明提案空间的边界正在被拒绝填满，机制该换空间了，
+    而不是继续在同一圈里换名字。

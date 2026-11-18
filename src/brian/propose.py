@@ -320,6 +320,14 @@ class Proposal:
     says how many measurements the mechanism saved, instead of leaving that arithmetic to the reader of a
     log line.
     """
+    substitutes: List[str] = field(default_factory=list)
+    """Candidates that are in the capped proposal only because a refused one gave up a slot (round 38).
+
+    A dropped candidate does not make the round cheaper when the proposal is capped: the cap refills the
+    slot. This list names the refills, so "the saving is a slot" is a claim with names attached — and an
+    empty list is the honest answer for an uncapped proposal, where every candidate would have been
+    measured anyway.
+    """
 
     @property
     def space_fingerprint(self) -> Optional[str]:
@@ -334,6 +342,7 @@ class Proposal:
             "space_fingerprint": self.space_fingerprint,
             "deployed": self.deployed,
             "refused_skipped": self.refused,
+            "substitutes": list(self.substitutes),
             "candidates": [candidate.name for candidate in self.candidates],
         }
 
@@ -602,6 +611,10 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
         # it under `quality` and accept a configuration the promise rule had just refused.
         known.add(tuple(reshaped.changes()))
     generated: List[Candidate] = []
+    # Round 38: the same walk *without* the refusal filter, kept only for its head. A dropped candidate's
+    # slot is not lost — the cap refills it from further down the order — so "the saving is a slot" is a
+    # claim that can be checked by naming the candidates the cap would have cut.
+    without_refusals: List[Candidate] = []
     already = 0
     settled_here = 0
     for seed in seeds:
@@ -617,8 +630,10 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
                 # same number a second time, and the round would report it as if the mechanism had found
                 # something new (round 37).
                 settled_here += 1
+                without_refusals.append(candidate)
                 continue
             generated.append(candidate)
+            without_refusals.append(candidate)
     if not generated:
         exhausted = (
             "%s — but every neighbour describes the configuration already in force (%d of them), so "
@@ -637,9 +652,17 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
         return fallback
     if reshaped is not None:
         generated.insert(0, reshaped)
-    proposal = Proposal(chosen.name, chosen.reason, generated[:cap], active_space, source or "",
+    selected = generated[:cap]
+    # Round 38: which of the selected candidates are here only because a refused one gave up a slot. The
+    # comparison is against the head of the unfiltered order, so it is an observation about this round's cap
+    # rather than a claim about any individual candidate's worth.
+    baseline_order = ([reshaped] if reshaped is not None else []) + without_refusals
+    baseline_names = {candidate.name for candidate in baseline_order[:cap]}
+    proposal = Proposal(chosen.name, chosen.reason, selected, active_space, source or "",
                         deployed=already)
     proposal.refused = settled_here + settled_reshape
+    proposal.substitutes = [candidate.name for candidate in selected
+                            if candidate.name not in baseline_names]
     return proposal
 
 
@@ -712,6 +735,9 @@ def describe_proposal(proposal: Proposal) -> List[str]:
     if proposal.refused:
         lines.append("                %d candidate(s) dropped: this stream already refused them at this "
                      "sampling" % proposal.refused)
+    if proposal.substitutes:
+        lines.append("                %d slot(s) went to candidate(s) the cap would have cut: %s"
+                     % (len(proposal.substitutes), ", ".join(proposal.substitutes)))
     for reason_line in _wrap("why             " + proposal.reason, 96):
         lines.append(reason_line)
     for candidate in proposal.candidates:
@@ -737,6 +763,10 @@ def format_proposal(proposal: Proposal) -> str:
     if proposal.refused:
         lines.append("%d candidate(s) were dropped because this stream already refused them at this "
                      "sampling" % proposal.refused)
+        lines.append("")
+    if proposal.substitutes:
+        lines.append("%d slot(s) went to candidate(s) the cap would otherwise have cut: %s"
+                     % (len(proposal.substitutes), ", ".join(proposal.substitutes)))
         lines.append("")
     if not proposal.candidates:
         lines.append("no candidate was proposed")

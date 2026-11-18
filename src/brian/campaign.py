@@ -59,6 +59,10 @@ class CampaignRow:
     # (round 36). The header line is the ledger's number; the row is what a reader of SMD decides with.
     refusals: int = 0
     refusals_retired: int = 0
+    # Candidate measurements the mechanism never proposed on this stream because the ledger had already
+    # refused them there at this sampling (round 38). A saving is only a saving if it accumulates
+    # somewhere; a round's own log line is not that place.
+    skipped: int = 0
 
     @property
     def accepted(self) -> int:
@@ -88,6 +92,7 @@ class CampaignRow:
             "re_measured_as": list(self.successors),
             "refusals_carried": self.refusals,
             "refusals_from_retired": self.refusals_retired,
+            "measurements_not_repeated": self.skipped,
         }
 
 
@@ -125,6 +130,10 @@ class Campaign:
     # them.
     refusals: int = 0
     refusals_retired: int = 0
+    # Candidate measurements the mechanism never proposed because the ledger had already refused them on
+    # that stream at that sampling (round 38). Reported as a count, never as tokens: what it saves is a
+    # slot in a capped proposal, not a run.
+    skipped: int = 0
 
     @property
     def domains(self) -> List[str]:
@@ -150,6 +159,7 @@ class Campaign:
             "rounds_retired": self.retired,
             "refusals_carried": self.refusals,
             "refusals_from_retired": self.refusals_retired,
+            "measurements_not_repeated": self.skipped,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -202,6 +212,12 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
                 row.rejections[rule] = row.rejections.get(rule, 0) + 1
         if record.get("applied"):
             result.applied += 1
+        # Round 38: the mechanism's own count of candidates it did not propose. A round is one measurement
+        # record; the saving is only visible once the records are added up, which is what this page is for.
+        skipped = int((record.get("proposal") or {}).get("refused_skipped") or 0)
+        if skipped:
+            row.skipped += skipped
+            result.skipped += skipped
 
     # Retired rounds are attributed to their stream too (round 35). They carry no trials in the counts
     # above — the successor measured those questions again — but a domain page that said nothing about
@@ -355,6 +371,12 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
         if result.refusals_retired:
             line += ", %d of them on retired record(s)" % result.refusals_retired
         lines.append(line)
+    if result.skipped:
+        # What the refusals bought, accumulated (round 38). Counted in measurements, not tokens: a dropped
+        # candidate frees a slot in a capped proposal, and the slot is refilled — so this number says how
+        # many questions were never asked twice, not how much compute the loop saved.
+        lines.append("saving            %d candidate measurement(s) the mechanism never proposed: a stream "
+                     "had already refused them" % result.skipped)
     if result.unsourced:
         lines.append("unattributed      %d round(s) predate the stream field" % result.unsourced)
     lines.append("")
@@ -397,6 +419,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
             if row.refusals_retired:
                 bits += ", %d inherited from a retired record" % row.refusals_retired
             lines.append("  refusals          %s" % bits)
+        if row.skipped:
+            # Per domain, because the header's number is the ledger's and a reader of this row wants to
+            # know what this stream's own refusals have been buying (round 38).
+            lines.append("  saving            %d candidate measurement(s) not repeated"
+                         % row.skipped)
         if row.in_force:
             lines.append("  in force          %s  (%s)"
                          % (" ".join("%s=%s" % item for item in sorted(row.env.items()))
