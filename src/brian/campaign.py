@@ -501,6 +501,10 @@ def budget_text(budget: Mapping[str, Any]) -> str:
     The page and the command print the same sentence from the same function, so the recommendation and the
     thing the command then does cannot drift apart — round 60 printed them from two expressions and the page
     argued with itself (it budgeted "all ready" while recommending one round).
+
+    Round 62 prices the budget per domain where the records allow it: a queue that pays two domains whose
+    rounds take four and eight minutes is not "about six minutes each", and a reader deciding whether to wait
+    is deciding about the sum, not about an average that no single round ever took.
     """
     rounds = int(budget.get("rounds") or 0)
     total = int(budget.get("rounds_total") or 0)
@@ -512,9 +516,14 @@ def budget_text(budget: Mapping[str, Any]) -> str:
             % (budget.get("command"), rounds, domains,
                100.0 * float(budget.get("share_now") or 0.0),
                100.0 * float(budget.get("share_after") or 0.0), total))
-    minutes = budget.get("estimated_minutes")
+    by_domain = {str(name): float(value) for name, value in (budget.get("minutes_by_domain") or {}).items()}
+    minutes = budget.get("estimated_minutes_by_domain")
+    if minutes is None:
+        minutes = budget.get("estimated_minutes")
     if minutes is not None:
         line += ", about %.0f minute(s)" % float(minutes)
+    if len(by_domain) > 1:
+        line += " (%s)" % ", ".join("%s %g" % (name, value) for name, value in by_domain.items())
     return line
 
 

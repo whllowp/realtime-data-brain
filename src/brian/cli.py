@@ -257,7 +257,9 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  trend_tolerance: float = 0.5, max_rise: Optional[float] = None,
                  worst: Optional[Mapping[str, Any]] = None,
                  payable: Optional[Mapping[str, Any]] = None,
-                 max_debt: Optional[float] = None) -> int:
+                 max_debt: Optional[float] = None,
+                 budget_minutes: Optional[float] = None,
+                 max_minutes: Optional[float] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -366,11 +368,22 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         else:
             _print("no recorded round on it can be re-run (its candidates or its file are not in the record), "
                    "so --strict does not charge it: a gate that can never be cleared is a gate nobody runs.")
+    # Round 62: a queue command the reader is told to run is a wait, and a wait can be too long. This charge is
+    # narrower than the others in one way and wider in another: it fails only when the *recommended* budget
+    # already exceeds the limit (so fewer rounds clear it, which is a command the reader has), and it fails on
+    # a budget derived from measurements their own records took, not on an assumption about how long a round is.
+    minutes_capped = (max_minutes is not None and budget_minutes is not None
+                      and budget_minutes > max_minutes)
+    if max_minutes is not None and budget_minutes is not None and budget_minutes > max_minutes:
+        _print("")
+        _print("the next queue run would spend about %.1f minute(s), above the %.1f asked for:"
+               % (budget_minutes, max_minutes))
+        _print("lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.")
     # A check must not fail for something it does not print: the rise is only chargeable when it is large
     # enough to be printed at all, or the reader would get exit 1 with no paragraph explaining it.
     rose = max_rise is not None and trend_rise > max_rise and trend_rise > trend_tolerance
     capped = max_unrecorded is not None and unrecorded_share > max_unrecorded
-    return 1 if (moved or due or capped or rose or debt_capped) else 0
+    return 1 if (moved or due or capped or rose or debt_capped or minutes_capped) else 0
 
 
 def _withheld_debt(root: Path, horizon: float) -> Tuple[int, Optional[float]]:
@@ -660,6 +673,20 @@ def _round_minutes(root: Path) -> Optional[float]:
     contribute nothing rather than a guess; a median is used because one slow round should not price the queue.
     """
     lengths: List[float] = []
+    for values in _timed_lengths(root).values():
+        lengths.extend(values)
+    if not lengths:
+        return None
+    return _median(lengths)
+
+
+def _timed_lengths(root: Path) -> Dict[str, List[float]]:
+    """Wall-clock minutes of every recorded round that timed itself, grouped by domain (round 62).
+
+    One parse for both rates: the queue-wide median and the per-domain medians must be built from the same
+    records, or a page could price one domain with a round another rate was derived from.
+    """
+    lengths: Dict[str, List[float]] = {}
     for record in history(root):
         started, finished = record.get("started_at"), record.get("finished_at")
         if not started or not finished:
@@ -670,15 +697,30 @@ def _round_minutes(root: Path) -> Optional[float]:
         except ValueError:
             continue
         seconds = (end - begin).total_seconds()
-        if seconds > 0:
-            lengths.append(seconds / 60.0)
-    if not lengths:
-        return None
-    lengths.sort()
-    middle = len(lengths) // 2
-    if len(lengths) % 2:
-        return lengths[middle]
-    return (lengths[middle - 1] + lengths[middle]) / 2.0
+        if seconds <= 0:
+            continue
+        domain = str((record.get("stream") or {}).get("source") or "(unattributed)")
+        lengths.setdefault(domain, []).append(seconds / 60.0)
+    return lengths
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _round_minutes_by_domain(root: Path) -> Dict[str, float]:
+    """The median wall-clock minutes each domain's recorded rounds took (round 62).
+
+    One queue can span two domains whose rounds cost different amounts of time — SMD's rounds measure two
+    hosts over a long recording, an RCAEval round measures fifteen cases — so a single queue-wide rate prices
+    one of them wrongly. A domain with no timed round is simply absent, and `_queue_budget` falls back to the
+    queue-wide median for it rather than inventing a rate.
+    """
+    return {domain: _median(values) for domain, values in _timed_lengths(root).items()}
 
 
 def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
@@ -705,15 +747,25 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
     without = int(progress.get("without_file") or 0)
     total = int(progress.get("rounds") or 0)
     paid: List[str] = []
+    paid_by_domain: Dict[str, int] = {}
     left = rounds
     for row in plan:
         take = min(left, int(row.get("ready") or 0))
-        paid.extend([str(row.get("domain"))] * take)
+        domain = str(row.get("domain"))
+        paid.extend([domain] * take)
+        paid_by_domain[domain] = paid_by_domain.get(domain, 0) + take
         left -= take
         if left <= 0:
             break
     share_after = ((without - min(rounds, without)) / total) if total else 0.0
     each = _round_minutes(root)
+    rates = _round_minutes_by_domain(root)
+    minutes_by_domain: Dict[str, float] = {}
+    for domain, count in paid_by_domain.items():
+        rate = rates.get(domain, each)
+        if rate is not None:
+            minutes_by_domain[domain] = rate * count
+    estimated = sum(minutes_by_domain.values()) if minutes_by_domain else None
     return {
         "command": "brian evolve --rerun-unrecorded --rerun-limit %d" % requested,
         "rounds": rounds,
@@ -724,6 +776,8 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
         "rounds_total": total,
         "minutes_each": each,
         "estimated_minutes": (each * rounds) if (each is not None and rounds) else None,
+        "minutes_by_domain": minutes_by_domain,
+        "estimated_minutes_by_domain": estimated,
     }
 
 
@@ -1311,17 +1365,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         budget_limit = _rerun_limit(args, int(_rerun_progress(root).get("ready") or 0))
+        # Round 62: one budget, computed once. The page, the JSON payload and the minutes cap must describe the
+        # same invocation; computing `_queue_budget` three times would be three chances for the price to differ
+        # from the sentence that quotes it.
+        budget = _queue_budget(root, limit=budget_limit)
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
-                               budget=_queue_budget(root, limit=budget_limit)))
+                               budget=budget))
         worst, payable = _debt_view(root)
         if args.json_out:
             # Round 60: the page's next-step lines are derived facts, so the machine-readable form carries the
             # same ones rather than making every caller parse the text (or worse, recompute them differently).
             payload = result.to_dict()
             payload["debt_plan"] = _debt_plan(root)
-            payload["budget"] = _queue_budget(root, limit=budget_limit)
+            payload["budget"] = budget
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
@@ -1337,7 +1395,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             trend_paid=int(trend["paid"]), trend_arrived=int(trend["arrived"]),
                             max_rise=getattr(args, "max_share_rise", None),
                             worst=worst, payable=payable,
-                            max_debt=getattr(args, "max_debt_share", None))
+                            max_debt=getattr(args, "max_debt_share", None),
+                            budget_minutes=(None if budget.get("estimated_minutes_by_domain") is None
+                                            else float(budget["estimated_minutes_by_domain"])),
+                            max_minutes=getattr(args, "max_minutes", None))
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -1401,6 +1462,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         except OSError:
             trend = {"points": 0.0, "days": 0.0, "paid": 0, "arrived": 0}
         worst, payable = _debt_view(root)
+        # Round 62: the check reads the same budget the page would print, computed by the same function, or a
+        # reader could pass `--max-minutes` in one mode and fail it in the other without changing anything.
+        try:
+            audit_budget = _queue_budget(
+                root, limit=_rerun_limit(args, int(_rerun_progress(root).get("ready") or 0)))
+        except OSError:
+            audit_budget = {}
         return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
                             due=due, oldest_days=oldest, horizon=horizon,
                             unrecorded=missing, legacy_unrecorded=legacy, unrecorded_share=share,
@@ -1410,7 +1478,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             trend_paid=int(trend["paid"]), trend_arrived=int(trend["arrived"]),
                             max_rise=getattr(args, "max_share_rise", None),
                             worst=worst, payable=payable,
-                            max_debt=getattr(args, "max_debt_share", None))
+                            max_debt=getattr(args, "max_debt_share", None),
+                            budget_minutes=(None if audit_budget.get("estimated_minutes_by_domain") is None
+                                            else float(audit_budget["estimated_minutes_by_domain"])),
+                            max_minutes=getattr(args, "max_minutes", None))
 
     if args.grade:
         try:
@@ -2925,6 +2996,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --strict: fail when the worst domain's unrecorded share is above this "
                              "fraction (0.5 = half its rounds cannot be placed), provided a re-run can lower "
                              "it; a share no command can pay is printed but never charged")
+    evolve.add_argument("--max-minutes", type=float, default=None, metavar="MINUTES",
+                        help="with --strict: fail when the next queue run would spend more than this many "
+                             "minutes (estimated per domain from the median duration of the recorded rounds, "
+                             "so it is a wait the ledger can prove, not a guess)")
     evolve.add_argument("--rerun-unrecorded", action="store_true",
                         help="re-run the rounds whose stream file can be named by geometry, then retire them "
                              "naming the new record; skips a round whose file cannot be chosen")

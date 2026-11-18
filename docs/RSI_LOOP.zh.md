@@ -3439,6 +3439,59 @@ stops             at the first round that cannot be re-run; the rest keep their 
 **边界 133：页面推荐的句子与命令打印的句子必须由同一个函数产出；各自拼接时，改一处就会让读者
 照着建议运行、却看到另一句话。**
 
+### 3.69 同一队里两个域的轮不是一个价：把等待按域算，并让它能被拒绝
+
+第 61 轮给整队加了一个时间预算，但那是一个**全域中位数**：一条同时付 SMD（两台主机、一段长录制）
+和 RCAEval（十五个用例）的队，不是"每轮大约六分钟"。读者在决定要不要等，等的是**总和**；
+总和只有在每个域按自己的轮定价时才成立。而"等"本身也应该能被部署拒绝——一个二十三分钟的
+重跑队列不该只能靠读者自己心里说一句"太久了"。
+
+三处改动：
+
+| 位置 | 改了什么 |
+| --- | --- |
+| `_timed_lengths` / `_round_minutes_by_domain` | 一次解析，两个速率：全域中位数仍在，另按 `stream.source` 分组给每个域自己的中位数 |
+| `_queue_budget` | 走队时同时累加每个域的轮数 → `minutes_by_domain`；代价是**和**而不是"单价 × 轮数"；某个域没有计时的轮就退回全域中位数，而不是编一个 |
+| `budget_text` / `_strict_exit` | 句子里写总和（`%g` 分钟），并且**只有付两个以上域时**才在括号里给明细；`--max-minutes` 让它进闸门 |
+
+页面（`var/budget61`，SMD 的轮 4 / 5 分钟、RCAEval 的轮 6 分钟）：
+
+```
+queue             2 round(s) can be re-run from the record; 0 already re-measured; all of them would take the share 67% -> 0%
+measure next      brian evolve --rerun-unrecorded --rerun-limit 1 pays RCAEval RE1-OB by one round; the command prints the balance at the end
+budget            brian evolve --rerun-unrecorded --rerun-limit 2 pays 2 round(s) (RCAEval RE1-OB, SMD); the queue falls 67% -> 0% of 3 round(s), about 10 minute(s) (RCAEval RE1-OB 6, SMD 4.5)
+```
+
+闸门（`--campaign --strict --max-minutes 5`）：
+
+```
+the next queue run would spend about 10.5 minute(s), above the 5.0 asked for:
+lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.
+```
+
+三条读法：
+
+1. **总和是唯一对读者成立的数字。** 明细放括号里，是因为读者要决定的是"我要不要现在等"，
+   不是"哪个域更慢"；后者只是前者的解释。
+2. **这个电荷是可付的。** 少跑几轮就清了，所以它可以让 `--strict` 变红；第 126 条的按域欠账
+   不是——没有人能付的账只能印，不能收。
+3. **不会发生的等待永远不收费。** 队里没有可付的轮时，`budget` 说"没有可花的"，闸门即使在
+   `--max-minutes 1` 下也退出 0：收一个不会发生的等待的钱，只会训练读者忽略这条规则。
+
+**边界 134：一条队的代价是它所付各域之和，不是一个单价乘以轮数。** 每个域按自己的轮定价；
+只有从没给自己计过时的域，才退回全队中位数——退回要说清楚，而不是让一个域悄悄借用别人的速度。
+
+**边界 135：一个被要求接受的等待必须能被拒绝，而且用来拒绝的必须读者有的命令。**
+`--max-minutes` 给出的解法只能是"少跑几轮"或"等一个更短的窗口"；如果它给出的解法是改一条
+读者改不了的东西，那它就成了又一个永远红的闸门。
+
+演示根的坑（第六十一轮已经踩过一次）：两个演示流文件的几何完全一样时，每条记录都会同时匹配两个，
+于是 `ready 0`、"没有可付的"——看起来像产品缺陷，其实是自己造的并列。另外，一条写下
+`"stream_path": null` 却没有 `versions/vNNN.json` 的记录，既不算"有文件"也不算"还在决定什么"
+（写了仍在页面上的版本，或还背着一个拒绝），`_unrecorded_matters` 不会列它：演示记录要按
+`persist` 真正写出的形状来造。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3694,3 +3747,6 @@ missing for the next level
 49. **（3.68 已完成）预算带上时间，页面与命令共用一句。** 剩下的：把 `minutes_each` 按域分开
     （SMD 与 RCAEval 的轮耗时不是一个量级），并让 `--campaign --strict --max-minutes` 能拒绝
     "这一条命令要跑二十分钟"的预算。
+
+50. **（3.69 已完成）按域给等待定价，并让它能被 `--max-minutes` 拒绝。** 剩下的：页面还要
+    给**排空**的队算一次价，让"现在全付"和"分几次付"可比；`--max-minutes` 应能按域配一个默认上限。
