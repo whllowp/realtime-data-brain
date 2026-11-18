@@ -187,3 +187,84 @@ def test_a_flag_that_overrides_a_recorded_ceiling_is_reported_as_a_flag(tmp_path
     limits = json.loads(target.read_text(encoding="utf-8"))["limits"]
     assert limits["max_drain_by_domain"] == {SLUG: 3.0}
     assert limits["max_drain_origin"] == {SLUG: "flag"}
+
+
+# --- round 66: the page says what it was judged against, and a ceiling can be withdrawn ---------------------
+
+
+def test_the_page_names_the_ceilings_it_judged_by(tmp_path, monkeypatch, capsys):
+    _root_with_queue(tmp_path)
+    set_state_budget(tmp_path, DATASET, 10.0)
+    set_state_budget(tmp_path, DATASET, drain_minutes=3.0)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--campaign", "--rerun-limit", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "limits            one run 10.0 minute(s) on rcaeval-re1-ob (state)" in out
+    assert "a drain of 3.0 minute(s) on rcaeval-re1-ob (state)" in out
+
+
+def test_the_page_says_nothing_when_nothing_is_capped(tmp_path, monkeypatch, capsys):
+    """No line at all, not a line saying zero: an uncapped run and a capped run must not look alike."""
+    _root_with_queue(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--campaign", "--rerun-limit", "0"]) == 0
+    assert "limits            " not in capsys.readouterr().out
+
+
+def test_a_command_line_ceiling_is_named_as_such_on_the_page(tmp_path, monkeypatch, capsys):
+    _root_with_queue(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--campaign", "--rerun-limit", "0", "--max-minutes", "20"]) == 0
+    assert "one run 20.0 minute(s) for every domain (command line)" in capsys.readouterr().out
+
+
+def test_a_ceiling_can_be_withdrawn(tmp_path, monkeypatch, capsys):
+    _root_with_queue(tmp_path)
+    set_state_budget(tmp_path, DATASET, 10.0)
+    set_state_budget(tmp_path, DATASET, drain_minutes=20.0)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--set-domain-drain", "rcaeval-re1-ob=none"]) == 0
+    assert "cleared           rcaeval-re1-ob: no drain ceiling" in capsys.readouterr().out
+    assert state_drains(tmp_path) == {}
+    assert state_budgets(tmp_path) == {SLUG: 10.0}
+
+
+def test_withdrawing_the_last_ceiling_removes_the_block_and_stays_gone(tmp_path, monkeypatch):
+    """The round-66 defect: `_write_state` preserved a block it did not receive, so a clear was undone at once."""
+    _root_with_queue(tmp_path)
+    set_state_budget(tmp_path, DATASET, 10.0)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--set-domain-limit", "rcaeval-re1-ob=none"]) == 0
+    assert state_budgets(tmp_path) == {}
+    document = json.loads((tmp_path / "var" / "evolve" / "domains" / SLUG / "current.json")
+                          .read_text(encoding="utf-8"))
+    assert "budget" not in document
+    # A later promotion write must not bring the withdrawn policy back either.
+    from brian.promote import apply_promotion
+
+    apply_promotion(tmp_path, load_promotions(tmp_path)[0], domain=DATASET)
+    assert state_budgets(tmp_path) == {}
+
+
+def test_an_unparseable_ceiling_never_clears_by_accident(tmp_path, monkeypatch, capsys):
+    _root_with_queue(tmp_path)
+    set_state_budget(tmp_path, DATASET, 10.0)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--set-domain-limit", "rcaeval-re1-ob=soon"]) == 2
+    assert "wants domain=minutes (or domain=none)" in capsys.readouterr().out
+    assert state_budgets(tmp_path) == {SLUG: 10.0}
+
+
+def test_a_write_with_nothing_to_write_is_refused(tmp_path):
+    with pytest.raises(ValueError):
+        set_state_budget(tmp_path, DATASET)
+    assert state_budgets(tmp_path) == {}
+
+
+def test_clearing_a_ceiling_that_is_not_there_writes_nothing(tmp_path):
+    set_state_budget(tmp_path, DATASET, clear_run=True, clear_drain=True)
+    assert state_budgets(tmp_path) == {}
+    document = json.loads((tmp_path / "var" / "evolve" / "domains" / SLUG / "current.json")
+                          .read_text(encoding="utf-8"))
+    assert "budget" not in document
+

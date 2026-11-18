@@ -330,8 +330,12 @@ def _write_state(root: Path, state: Mapping[str, Any], domain: Optional[str] = N
     # Round 64: the domain's wait ceiling lives in the same file as its configuration, and every writer here
     # (apply, revert, and the ceiling itself) goes through this function. A promotion must not delete a policy
     # that happens to share the file, so the block is preserved when the caller did not pass one.
+    #
+    # Round 66: "did not pass one" is not the same as "passed an empty one". Clearing the last ceiling must
+    # remove the block, so the disk copy is only consulted when the caller left the key out entirely -- an
+    # explicit `{}` means the policy was withdrawn, and reading the file back would resurrect it.
     budget = dict(state.get("budget") or {})
-    if not budget:
+    if not budget and "budget" not in state:
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -395,8 +399,9 @@ def _state_budget_field(root: Path, field: str) -> Dict[str, float]:
 
 
 def set_state_budget(root: Path, domain: str, minutes: Optional[float] = None, *,
-                     drain_minutes: Optional[float] = None) -> Path:
-    """Record how long `domain` will let a queue run wait, and how long emptying it may take (rounds 64-65).
+                     drain_minutes: Optional[float] = None, clear_run: bool = False,
+                     clear_drain: bool = False) -> Path:
+    """Record how long `domain` will let a queue run wait, and how long emptying it may take (rounds 64-66).
 
     Only the budget block changes: the variables in force and the versions that own them are copied through,
     because writing a policy is not a reason to touch a deployment. The timestamp does move, so a reader
@@ -405,11 +410,19 @@ def set_state_budget(root: Path, domain: str, minutes: Optional[float] = None, *
 
     Two ceilings, merged rather than replaced: setting the drain ceiling must not silently erase the per-run one
     that a reader recorded yesterday (boundary 139, in a smaller place).
+
+    Round 66: a policy that can only be added is a policy that cannot be withdrawn. `clear_run`/`clear_drain`
+    remove their key, and the block disappears from the file when it ends up empty — a `"budget": {}` left behind
+    would read as "this domain has a budget" on any page that only checks for the key.
     """
-    if minutes is None and drain_minutes is None:
-        raise ValueError("set_state_budget wants a run ceiling, a drain ceiling, or both")
+    if not (minutes is not None or drain_minutes is not None or clear_run or clear_drain):
+        raise ValueError("set_state_budget wants a run ceiling, a drain ceiling, or something to clear")
     state = current_state(root, domain)
     budget = dict(state.get("budget") or {})
+    if clear_run:
+        budget.pop("max_minutes", None)
+    if clear_drain:
+        budget.pop("drain_minutes", None)
     if minutes is not None:
         budget["max_minutes"] = float(minutes)
     if drain_minutes is not None:

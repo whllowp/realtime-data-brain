@@ -462,6 +462,59 @@ def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
     }
 
 
+def _ceiling_entry(entry: Any, flag: str) -> Tuple[str, Optional[float], bool]:
+    """Parse one `domain=minutes` ceiling entry, including the word that withdraws it (round 66).
+
+    A policy that can only be added is a policy that cannot be withdrawn: before this, removing a ceiling meant
+    editing `current.json` by hand and hoping the next writer preserved it. `none` (also `-` and `off`) clears
+    the value, and everything else must parse as a non-negative number -- a typo that silently cleared a limit
+    would be worse than one that stops the command.
+    """
+    name, _, number = str(entry).partition("=")
+    text = number.strip().lower()
+    if not name.strip() or not text:
+        raise ValueError("%s wants domain=minutes (or domain=none), got %r" % (flag, entry))
+    if text in ("none", "-", "off"):
+        return name.strip(), None, True
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError("%s wants domain=minutes (or domain=none), got %r" % (flag, entry))
+    if value < 0.0:
+        raise ValueError("%s wants a non-negative number of minutes, got %r" % (flag, entry))
+    return name.strip(), value, False
+
+
+def _limits_text(limits: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """One sentence naming the ceilings a page was judged against, or None when there are none (round 66).
+
+    Round 65 put this in the JSON so a report could be reviewed later; the page that a reader actually reads
+    still printed no ceiling at all, so "nothing was capped" and "several things were capped" looked the same.
+    Only ceilings in force are named, each with its origin, because a number whose origin is missing cannot be
+    argued with.
+    """
+    if not limits:
+        return None
+    pieces: List[str] = []
+    run_all = limits.get("max_minutes")
+    if run_all is not None:
+        pieces.append("one run %.1f minute(s) for every domain (command line)" % float(run_all))
+    for name, value in sorted((limits.get("max_minutes_by_domain") or {}).items()):
+        origin = (limits.get("max_minutes_origin") or {}).get(name, "state")
+        pieces.append("one run %.1f minute(s) on %s (%s)" % (float(value), name,
+                                                            "command line" if origin == "flag" else "state"))
+    drain_all = limits.get("max_drain_minutes")
+    if drain_all is not None:
+        pieces.append("a drain of %.1f minute(s) for every domain (command line)" % float(drain_all))
+    for name, value in sorted((limits.get("max_drain_by_domain") or {}).items()):
+        origin = (limits.get("max_drain_origin") or {}).get(name, "state")
+        pieces.append("a drain of %.1f minute(s) on %s (%s)" % (float(value), name,
+                                                                "command line" if origin == "flag" else "state"))
+    if not pieces:
+        return None
+    return "; ".join(pieces)
+
+
 def _domain_name(root: Path, typed: str) -> str:
     """The dataset name a slug refers to, so the state records the name and not the spelling (round 64).
 
@@ -1215,36 +1268,34 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     drain_ceilings = {**state_drain_ceilings, **drain_ceilings}
 
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
-        written: List[Tuple[str, Optional[float], Optional[float]]] = []
-        for entry in getattr(args, "set_domain_limit", None) or []:
-            name, _, number = str(entry).partition("=")
+        written: List[Tuple[str, Optional[float], Optional[float], bool, bool]] = []
+        for entry, flag in [(item, "--set-domain-limit") for item in
+                            getattr(args, "set_domain_limit", None) or []] + \
+                           [(item, "--set-domain-drain") for item in
+                            getattr(args, "set_domain_drain", None) or []]:
             try:
-                limit = float(number.strip())
-            except ValueError:
-                limit = -1.0
-            if not name.strip() or limit < 0.0:
-                _print("--set-domain-limit wants domain=minutes, got %r" % entry)
+                name, value, clear = _ceiling_entry(entry, flag)
+            except ValueError as error:
+                _print(str(error))
                 return 2
-            written.append((name.strip(), limit, None))
-        for entry in getattr(args, "set_domain_drain", None) or []:
-            name, _, number = str(entry).partition("=")
-            try:
-                limit = float(number.strip())
-            except ValueError:
-                limit = -1.0
-            if not name.strip() or limit < 0.0:
-                _print("--set-domain-drain wants domain=minutes, got %r" % entry)
-                return 2
-            written.append((name.strip(), None, limit))
-        for name, run_limit, drain_limit in written:
+            if flag == "--set-domain-limit":
+                written.append((name, value, None, clear, False))
+            else:
+                written.append((name, None, value, False, clear))
+        for name, run_limit, drain_limit, clear_run, clear_drain in written:
             domain = _domain_name(root, name)
-            path = set_state_budget(root, domain, run_limit, drain_minutes=drain_limit)
+            path = set_state_budget(root, domain, run_limit, drain_minutes=drain_limit,
+                                    clear_run=clear_run, clear_drain=clear_drain)
             if run_limit is not None:
                 _print("recorded          %s: at most %g minute(s) for one queue run" % (domain_slug(domain),
                                                                                         run_limit))
+            if clear_run:
+                _print("cleared           %s: no queue-run ceiling" % domain_slug(domain))
             if drain_limit is not None:
                 _print("recorded          %s: at most %g minute(s) to empty the queue" % (domain_slug(domain),
                                                                                          drain_limit))
+            if clear_drain:
+                _print("cleared           %s: no drain ceiling" % domain_slug(domain))
             _print("                  %s" % path)
         return 0
 
@@ -1571,10 +1622,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # same invocation; computing `_queue_budget` three times would be three chances for the price to differ
         # from the sentence that quotes it.
         budget = _queue_budget(root, limit=budget_limit)
+        # Round 66: one view of the ceilings, built once and used by both the page and the JSON, so the sentence
+        # a reader reads and the object a script reads cannot disagree about what was capped or where it came
+        # from. Round 65 only wrote the JSON half.
+        limits_view = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
+                                   drain_ceiling, drain_ceilings, flag_drain_ceilings)
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
-                               budget=budget))
+                               budget=budget, limits=_limits_text(limits_view)))
         worst, payable = _debt_view(root)
         if args.json_out:
             # Round 60: the page's next-step lines are derived facts, so the machine-readable form carries the
@@ -1585,8 +1641,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 65: a report that can be judged must say what it was judged against. Every ceiling that was
             # in force while this page was printed appears here with where it came from, because a number whose
             # origin is unknown cannot be reviewed -- and the state and the command line can disagree.
-            payload["limits"] = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
-                                             drain_ceiling, drain_ceilings, flag_drain_ceilings)
+            payload["limits"] = limits_view
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)

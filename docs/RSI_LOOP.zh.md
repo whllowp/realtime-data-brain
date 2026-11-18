@@ -3684,6 +3684,71 @@ drain            at most 3 minute(s) to empty the queue (from the deployment sta
 没人覆盖，出处只能由"这次有没有传旗标"回答。**
 
 
+### 3.73 页面要念出它按什么上限判定，上限也要能被撤销
+
+3.72 把两个上限（一轮、整队）写进了部署状态，并把它们送进了 `--json-out`。但一个人读的是正文：
+一页没有任何"上限"字样的报告，读起来和"根本没设上限"一模一样——而这两件事的结论不同
+（前者是被判过了，后者是没人判）。同一轮里还有一个更笨的缺口：`--set-domain-limit` /
+`--set-domain-drain` 只能写入，不能撤销。一条只能加不能减的政策，迟早会变成一条没人记得为什么存在的政策。
+
+于是正文多了一行，写法与数字一起来源：
+
+```
+$ brian evolve --campaign --rerun-limit 0
+budget            brian evolve --rerun-unrecorded --rerun-limit 2 pays 2 round(s) (RCAEval RE1-OB, SMD); the queue falls 67% -> 0% of 3 round(s), about 10 minute(s) (RCAEval RE1-OB 6, SMD 4.5)
+limits            one run 10.0 minute(s) on rcaeval-re1-ob (state); a drain of 3.0 minute(s) on rcaeval-re1-ob (state)
+```
+
+来源要跟着数字走，因为同样的数字有两种来路。用命令行盖过一次，同一行就读出 `(command line)`：
+
+```
+$ brian evolve --campaign --rerun-limit 0 --max-drain-minutes "rcaeval-re1-ob=100"
+limits            one run 10.0 minute(s) on rcaeval-re1-ob (state); a drain of 100.0 minute(s) on rcaeval-re1-ob (command line)
+```
+
+这一点是 3.72 那个缺陷的延续：3.72 的 `limits` 视图按"这个域在状态里有没有数字"来判断来源，
+于是命令行把一个记录在案的 3 覆盖成 100 时，它仍然写 `state`——一个碰巧等于政策的命令行决定，
+被报告成了"没人覆盖"。现在只要某个域上给了旗标，来源就是 `flag`，数值相等也不例外。
+
+撤销走同一个语法，把分钟数换成 `none`：
+
+```
+$ brian evolve --set-domain-drain "rcaeval-re1-ob=none"
+cleared           rcaeval-re1-ob: no drain ceiling
+$ brian evolve --set-domain-limit "rcaeval-re1-ob=none"
+cleared           rcaeval-re1-ob: no queue-run ceiling
+```
+
+撤掉最后一个上限之后，`current.json` 里的 `budget` 块整个消失，正文也不再打印 `limits` 行——
+"没有上限"和"有上限"在页面上必须长得不一样，否则读者无法判断自己读到的结论是被判过的。
+
+**这一轮真正跑出来的缺陷**：第一次撤销时命令打印了 `cleared`，文件里的值却还在。原因正是 3.71 的
+那个"保护"——`_write_state` 在调用方没有传 `budget` 时去磁盘把它读回来，以免一次版本写入抹掉同一份
+文件里的政策。但它用"传进来的块是空的"来判断"调用方没说"，而撤销恰好就是"传进来一个空块"。于是
+撤销被立刻还原：页面说撤了，下次读还是 10 分钟。修法是把两种沉默分开：
+
+```python
+budget = dict(state.get("budget") or {})
+if not budget and "budget" not in state:   # 只有"键都没传"才去磁盘读
+    ...                                     # 显式的 {} 是撤销，读回来等于复活
+```
+
+三个读数：
+
+1. **判定过就必须念出来。** 一页报告的价值取决于读者能重建它的判定条件；上限只存在于 JSON 里，
+   等于要求读者先猜有没有、再去查。
+2. **来源不是装饰。** `(state)` 与 `(command line)` 的区别决定了下次该改哪里：一个是改政策，
+   一个是改这条命令。相等的数值不能证明没被覆盖过。
+3. **能写就要能撤，而且撤销要能和"没说话"区分开。** 缺键、空字典、显式清除在代码里是三种状态，
+   一个用"空不空"判断"说没说话"的实现会把第三种当成第一种。
+
+**边界 142：一页按上限判过的报告必须念出那个上限；"没有上限"与"上限在别处"不能长得一样。**
+一份不念上限的报告让读者无法知道结论是被判过还是没人判——而这恰好是读者最需要知道的事。
+
+**边界 143：能写入的政策必须能撤销，撤销必须能与"写者无话可说"区分开；空的那一种就是区分本身。**
+一条只能加不能减的政策会累积成没人记得来由的规则；而一个用"空"表示两种含义的写者，
+会在撤销时把政策复活。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3947,9 +4012,11 @@ missing for the next level
     部署状态（`var/evolve/domains/<slug>/current.json`），让它跟着域走而不是跟着命令行走；
     `--rerun-unrecorded` 自己也要在开头打印同一句预算（现在它在第一次测量后才有数字）。
 
-52. 让 `--set-domain-limit` 也能写"整队上限"和"每轮上限"两个值（现在只有一个总量），并让
-`--campaign --json-out` 把记录里的上限一起输出，这样一份报告能自己说明它按什么标准判的。
+52. **（3.72 已完成）上限两个值都能写，`--json-out` 也带 `limits`。** 剩下的：正文也念一句、
+    上限能撤销（下一项）。
 
-53. 让 `--campaign` 的正文也念一句"按什么上限判定"（现在只在 JSON 里的 `limits` 块），
-并让 `--set-domain-limit`/`--set-domain-drain` 支持删除一个上限（现在只能写入，不能撤销）。
+53. **（3.73 已完成）正文念出判定的上限，上限也能撤销。** 剩下的：正文里的 `limits` 句子还只有
+    机器可读的那一版；下一项让"撤销"也出现在 JSON 的 `limits` 里，并让 `--audit` 报告它读到的上限。
 
+54. 让撤销也出现在 `--json-out` 的 `limits` 里（现在撤销只在正文与文件里可见），并让 `--audit`
+报告它读到的上限与来源——一份门禁报告应当说明自己按什么判定，而不是把这件事留给另一条命令。

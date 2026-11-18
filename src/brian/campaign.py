@@ -540,7 +540,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     trend: Optional[Mapping[str, Any]] = None,
                     debt: Optional[Mapping[str, Any]] = None,
                     plan: Optional[Sequence[Mapping[str, Any]]] = None,
-                    budget: Optional[Mapping[str, Any]] = None) -> str:
+                    budget: Optional[Mapping[str, Any]] = None,
+                    limits: Optional[str] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -671,6 +672,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # not make. The JSON output carries the same fields, so a script never has to parse this line. Round 61
         # moved the sentence into `budget_text` so the command prints the identical line before it measures.
         lines.append("budget            %s" % budget_text(budget))
+    if limits:
+        # Round 66: round 65 sent the ceilings to the JSON so a report could be reviewed later, but the page a
+        # reader actually reads printed none, so "nothing was capped" and "three things were capped" looked the
+        # same. The sentence names only ceilings in force, each with where it came from.
+        lines.append("limits            %s" % limits)
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")
