@@ -1496,6 +1496,48 @@ BRIAN_DIGEST_ROLLING_WINDOW=286 (200 windows of 948 is the same share of the rec
 
 **顺带修掉一个记录卫生缺陷。** 调试拒绝时把同一条 `--verify` 跑了三遍，`checks` 于是攒出三个一模一样的 `unmeasurable`，表格读作 `(4 earlier checks)`。`write_verification()` 现在只在判决、理由或 `shape` 发生变化时才把上一条存进 `checks`：重复的复印件不是历史。
 
+### 3.36 复核会过期：一份判不出来的承诺不能永远悬着
+
+`--verify` 只挑 `pending` 的版本复核，而 `pending` 的定义是 `verification is None and not reverted_at`。这留下一个洞：**`unmeasurable` 不是 pending**——它有一份判词，只是判词说"这两个数不可比"；一份半年前的 `holds` 也不是 pending。两者都不会再被挑中，于是"我们知道我们不知道"在记录里只真实了一天，之后就冻结成一张永久证书。战役表把今早的 `unmeasurable` 和一年后的 `unmeasurable` 记成同一行，读者无从分辨。
+
+修法分三处，少一处这个洞就还在：
+
+1. **算年龄**：`verification_age_days(verification, now=None)`。没有时间戳或时间戳读不出来就返回 `None`（不知道年龄就按"未复核"处理，不按"新鲜"处理）；**没有时区的时间戳按 UTC 读，不按"现在"读**——把旧时间当成刚发生，正是让过期判词看起来新鲜的机制。
+2. **判到期**：`Promotion.due(now, days)` = 没被回滚，并且（从未复核 **或** 判词超过 `CLAIM_EXPIRY_DAYS = 14` 天）。`--verify` 的选择条件从 `item.pending` 换成 `item.due(days=args.expiry_days)`，被重新挑中时先打印原因：
+
+```
+verifying 1 promotion(s) from smd on SMD
+  v020  re-checking: its last check is less than a day old (expiry 0 day(s))
+  v020  ...  unmeasurable: the re-check measured 1235 scored windows against the 828 ...
+        hint  a comparable re-check on this stream would use BRIAN_DIGEST_ROLLING_WINDOW=286 ...
+        shape  the same version at rolling_window=286 recalls 0.427 on this stream, 84% of the promised 0.507
+```
+
+3. **报出来**：`format_promotions()` 在版本行后面加 `(checked 3 days ago)`，过期时加 `, overdue`；`--campaign` 多一行计数，且在役行标 `(holds (overdue))` / `(not comparable (overdue))`。`--expiry-days` 让这条口径可以被显式收紧（演示用 0.001 天，即 86 秒）：
+
+```
+$ brian evolve --campaign
+verification      1 holding, 1 not comparable, 0 never re-checked          (没有过期行)
+
+$ brian evolve --campaign --expiry-days 0.001
+verification      1 holding, 1 not comparable, 0 never re-checked
+expired           2 of them are older than 0 day(s): the record stands, the evidence does not
+  in force  BRIAN_DIGEST_ROLLING_WINDOW=200 ...  (not comparable (overdue), 2 earlier checks)
+  in force  BRIAN_DIGEST_SCORING=deviation ...   (holds (overdue))
+```
+
+**演示时又抓到一个缺陷：一次普通复核会删掉 shape。** 只有 `--at-hint` 会测第二形状，所以不带这个开关重跑一次，`verification.shape` 被写成 `null`，战役表上那行 `shape` 就消失了——**一个真被测出来的数字，因为后来的一次复核没重复测它而消失**。这和本轮的主题是同一件事：数字是真的，只是它比判词旧。修法是"携带并标注"：新判词没有 shape 而旧判词有时，把旧 shape 带过来并记 `shape_from`，打印成
+
+```
+        shape  the same version at rolling_window=286 recalls 0.427 on this stream, 84% of the promised 0.507 (measured 2026-11-18 01:08)
+```
+
+新判词自己测到 shape 时不带 `shape_from`（那才是"刚刚测的"）。注意这里的取舍：不是把旧数字当成新数字，而是让它以**自己的日期**留在页面上，判词与测量各自带上时间。
+
+**边界 63：判词的时效属于判词，不属于版本。** 一份 `holds` 说"那天我去看过，它还在"，不说"它永远在"。版本继续在役是正确的（回滚一次健康的配置代价更高），但"证据有效"必须有一个期限，否则战役表就在替一份 2024 年的检查背书。
+
+**边界 64：重新复核不等于重新裁决。** 到期的 `holds` 被重新挑中，仍然走同一条 `claim_check`：过就继续在役、不过才回滚、量不了就只刷新记录。到期只改变"多久看一次"，不改变"看到什么算通过"——否则"过期"就变成了一个新的、偷偷降低门槛的判定条件。
+
 ---
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
@@ -1636,3 +1678,5 @@ missing for the next level
 16. **（3.34 已完成）把采样密度写进承诺，把"拒绝"变成数字。** `summarise()` 记录 `cadence_s`/`span_s`，`_geometry_mismatch` 多一道密度比较，`rescale_hint` 在判不出来时给出等价窗口数（200 → 286），`--campaign` 分开计数 holding / not comparable / never re-checked。实测两条 SMD 流总时长几乎相同（788.3 h 对 789.2 h）而密度差 1.49 倍，`v020` 的 0.297 因此有机械解释。剩下的路：**让 `--verify` 支持按 hint 重测**（用等价窗口数跑一次，把结果记成"同一承诺的另一形状"，而不是新版本），以及**给 `unmeasurable` 设到期**——一份永远判不出来的承诺，与一份没复核过的承诺，区别只在于我们知道自己不知道。
 
 17. **（3.35 已完成）解释被测了一遍：窗口几何解释了 62% 的缺口。** `--verify --at-hint` 用等价窗口数重新测量被拒绝的版本，把结果记成 `verification.shape`（判决仍是 `unmeasurable`，不应用也不回滚），`format_promotions` 与 `--campaign` 会重打这一行。`v020` 在复核流上 0.297 → 0.427（承诺 0.507）：剩下的 0.080 归因于"200 这个窗口数是在承诺流上选出来的"（边界 61）；而等价值在承诺流上反而更差（0.507 → 0.396），说明它是可比性工具而非最优值（边界 62）。顺带修掉记录卫生缺陷：同一份拒绝重复复核三遍时，`checks` 不再堆出三份复印件。剩下的路：**给 `unmeasurable` 设到期**（现在一份判不出来的承诺可以无限期悬着，与"从未复核"只在记录里差一个词），以及**让提议器学会"按另一条流的密度折算"这种提出方式**——hint 能算出 286，但循环还不会主动提出它。
+
+18. **（3.36 已完成）判词会过期，`--verify` 因此会回头再挑一次。** `verification_age_days` + `Promotion.due` + `--expiry-days`（默认 `CLAIM_EXPIRY_DAYS = 14`）把"从未复核"与"复核过期"合到同一条选择条件里，`format_promotions`/`--campaign` 打印年龄与 `expired N of them are older than X day(s)`。演示时发现并修掉第二个缺陷：不带 `--at-hint` 的普通复核会把 `shape` 写成 `null`，于是战役表上真被测出来的数字消失——现在携带旧 shape 并标 `shape_from`。边界 63（时效属于判词不属于版本）、64（复核不等于重新裁决）留下两条口径。剩下的路：**让提议器主动提出"按另一条流的密度折算"的形状**——`rescale_hint` 已经能算出 286，但循环还只会等人用 `--at-hint` 去问；以及**把到期做成一轮的输入**（到期版本自动进入下一轮候选，而不是等一次手动 `--verify`）。

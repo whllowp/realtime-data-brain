@@ -12,11 +12,13 @@ round that measured it, so the report cannot flatter the loop with a fresh measu
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .evolve import EvolveRules, audit, history
-from .promote import UNMEASURABLE, VERIFIED, current_state, load_promotions, shape_note
+from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state,
+                      load_promotions, shape_note)
 
 __all__ = ["Campaign", "CampaignRow", "campaign", "format_campaign"]
 
@@ -40,6 +42,8 @@ class CampaignRow:
     # How the claim's re-checks ended: the verdict of the last one, and how many came before it.
     verdict: Optional[str] = None
     checks: int = 0
+    # A verdict older than the expiry is still the record but no longer the evidence (round 29).
+    overdue: bool = False
 
     @property
     def accepted(self) -> int:
@@ -61,6 +65,7 @@ class CampaignRow:
             "reverted": self.reverted,
             "verdict": self.verdict,
             "checks": self.checks,
+            "overdue": self.overdue,
         }
 
 
@@ -81,6 +86,8 @@ class Campaign:
     holding: int = 0
     not_comparable: int = 0
     never_checked: int = 0
+    # Of the verdicts above, the ones older than the expiry: still recorded, no longer evidence.
+    overdue: int = 0
 
     @property
     def domains(self) -> List[str]:
@@ -100,6 +107,7 @@ class Campaign:
             "versions_holding": self.holding,
             "versions_not_comparable": self.not_comparable,
             "versions_never_checked": self.never_checked,
+            "versions_overdue": self.overdue,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -110,7 +118,8 @@ def _source(record: Dict[str, Any]) -> Optional[str]:
     return None if source in (None, "") else str(source)
 
 
-def campaign(root: Path, rules: Optional[EvolveRules] = None) -> Campaign:
+def campaign(root: Path, rules: Optional[EvolveRules] = None,
+             expiry_days: float = CLAIM_EXPIRY_DAYS, now: Optional[datetime] = None) -> Campaign:
     """Summarise every recorded round, grouped by the stream each one measured.
 
     A round that does not say which stream it measured cannot be attributed to a domain, and is counted
@@ -169,6 +178,9 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None) -> Campaign:
             row.reverted = bool(promotion.reverted_at)
             row.verdict = str((promotion.verification or {}).get("verdict") or "") or None
             row.checks = len(promotion.checks)
+            row.overdue = promotion.overdue(now, expiry_days)
+            if row.overdue:
+                result.overdue += 1
             if row.verdict == VERIFIED:
                 result.holding += 1
             elif row.verdict == UNMEASURABLE:
@@ -208,12 +220,14 @@ def _verdict_line(row: CampaignRow) -> str:
         note = row.verdict
     else:
         note = "unverified"
+    if row.overdue:
+        note = "%s (overdue)" % note
     if row.checks:
         note = "%s, %d earlier check%s" % (note, row.checks, "" if row.checks == 1 else "s")
     return note
 
 
-def format_campaign(result: Campaign) -> str:
+def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) -> str:
     lines: List[str] = []
     lines.append("=" * 96)
     lines.append("brian evolve - the campaign, not the round")
@@ -226,6 +240,11 @@ def format_campaign(result: Campaign) -> str:
                  % (result.moved, result.relabelled))
     lines.append("verification      %d holding, %d not comparable, %d never re-checked"
                  % (result.holding, result.not_comparable, result.never_checked))
+    if result.overdue:
+        # A verdict from before the horizon is a record of what was true then. Saying the number out loud
+        # is the difference between "we checked" and "we checked once".
+        lines.append("expired           %d of them are older than %.0f day(s): the record stands, the "
+                     "evidence does not" % (result.overdue, expiry_days))
     if result.unsourced:
         lines.append("unattributed      %d round(s) predate the stream field" % result.unsourced)
     lines.append("")

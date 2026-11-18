@@ -44,6 +44,13 @@ from .config import ENV_VARS, Settings
 from .deploy import overrides_from_state
 from .evolve import Candidate, EvolveRules, Measurement
 
+GEOMETRY_TOLERANCE = 0.25
+# How long a recorded verdict speaks for the claim. A check is evidence about the day it ran: a `holds`
+# from a year ago and an `unmeasurable` from last March are both statements nobody has tested since, and
+# `--verify` selected neither of them again. 14 days is deliberately short -- the measurement costs a few
+# seconds, and the campaign is supposed to be read as a picture of *now*, not of whenever someone looked.
+CLAIM_EXPIRY_DAYS = 14.0
+
 CURRENT = "current.json"
 DOMAINS = "domains"
 VERSIONS = "versions"
@@ -126,6 +133,31 @@ class Claim:
         )
 
 
+def verification_age_days(verification: Optional[Mapping[str, Any]],
+                          now: Optional[datetime] = None) -> Optional[float]:
+    """How many days ago a verdict was recorded, or None when it carries no readable stamp.
+
+    Timestamps are written by `_stamp()` as ISO-8601 with an offset, so they are timezone-aware; a record
+    without one is treated as UTC rather than as "today", because guessing a date is how a stale check
+    starts looking fresh.
+    """
+    if not verification:
+        return None
+    stamp = str(verification.get("checked_at") or "")
+    if not stamp:
+        return None
+    try:
+        then = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (moment - then).total_seconds() / 86400.0
+
+
 @dataclass
 class Promotion:
     """One version file, as the thing in force rather than the record of a measurement."""
@@ -147,6 +179,21 @@ class Promotion:
     @property
     def pending(self) -> bool:
         return self.verification is None and not self.reverted_at
+
+    @property
+    def verdict(self) -> Optional[str]:
+        """The last verdict recorded for this version, or None when it was never checked."""
+        return str((self.verification or {}).get("verdict") or "") or None
+
+    def overdue(self, now: Optional[datetime] = None,
+                days: float = CLAIM_EXPIRY_DAYS) -> bool:
+        """True when the last verdict is older than `days`: still the record, no longer the evidence."""
+        age = verification_age_days(self.verification, now)
+        return age is not None and age > days
+
+    def due(self, now: Optional[datetime] = None, days: float = CLAIM_EXPIRY_DAYS) -> bool:
+        """Whether `--verify` should pick this version: never checked, or checked too long ago."""
+        return not self.reverted_at and (self.pending or self.overdue(now, days))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -223,6 +270,12 @@ def write_verification(root: Path, promotion: Promotion, payload: Mapping[str, A
     document = json.loads(promotion.path.read_text(encoding="utf-8"))
     checks = list(document.get("checks") or [])
     previous = document.get("verification") or {}
+    if payload.get("shape") is None and previous.get("shape"):
+        # Only `--at-hint` takes the second measurement, so a plain re-check would otherwise drop a number
+        # an earlier check really measured. Carry it, and say which check measured it (round 29).
+        payload = dict(payload)
+        payload["shape"] = dict(previous["shape"])
+        payload["shape_from"] = previous.get("shape_from") or previous.get("checked_at") or ""
     # An identical re-run adds no information, and a re-check repeated while debugging a refusal would
     # otherwise outnumber the checks that actually moved the verdict (round 28 saw "4 earlier checks" for
     # three copies of one refusal). A run that differs in verdict, reason or recorded shape is kept.
@@ -592,12 +645,16 @@ def shape_note(payload: Optional[Mapping[str, Any]]) -> str:
     claimed = shape.get("claimed_recall")
     if recall is None:
         return ""
+    # A carried-over shape names the check that measured it: the number is real, and it is older than the
+    # verdict line above it.
+    measured = (payload or {}).get("shape_from") or ""
+    stamp = (" (measured %s)" % measured[:16].replace("T", " ")) if measured else ""
     if claimed:
         return ("        shape  the same version at rolling_window=%d recalls %.3f on this stream, "
-                "%.0f%% of the promised %.3f"
-                % (shape.get("window") or 0, recall, 100.0 * recall / claimed, claimed))
-    return ("        shape  the same version at rolling_window=%d recalls %.3f on this stream"
-            % (shape.get("window") or 0, recall))
+                "%.0f%% of the promised %.3f%s"
+                % (shape.get("window") or 0, recall, 100.0 * recall / claimed, claimed, stamp))
+    return ("        shape  the same version at rolling_window=%d recalls %.3f on this stream%s"
+            % (shape.get("window") or 0, recall, stamp))
 
 
 def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules,
@@ -637,7 +694,8 @@ def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules,
 
 
 def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, Any]] = None,
-                      domain: Optional[str] = None) -> str:
+                      domain: Optional[str] = None, expiry_days: float = CLAIM_EXPIRY_DAYS,
+                      now: Optional[datetime] = None) -> str:
     lines: List[str] = []
     lines.append("=" * 96)
     lines.append("brian evolve - versions in force and whether their claims still hold")
@@ -672,6 +730,11 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
         elif promotion.verification:
             note = "%s: %s" % (promotion.verification.get("verdict", "?"),
                                _first_line(promotion.verification.get("reason", "")))
+            age = verification_age_days(promotion.verification, now)
+            if age is not None:
+                # The verdict's age belongs next to it: "holds" written a year ago reads as consent.
+                note = "%s  (%s%s)" % (note, _age_text(age),
+                                       ", overdue" if promotion.overdue(now, expiry_days) else "")
         elif promotion.pending:
             note = "unverified"
         else:
@@ -719,6 +782,15 @@ def combined_versions(state: Optional[Mapping[str, Any]]) -> List[str]:
         if version not in seen:
             seen.append(version)
     return seen
+
+
+def _age_text(days: float) -> str:
+    """`checked 3 days ago` / `checked today`, in the unit a reader can act on."""
+    if days < 1.0:
+        return "checked today"
+    if days < 2.0:
+        return "checked 1 day ago"
+    return "checked %d days ago" % int(days)
 
 
 def _first_line(text: str) -> str:

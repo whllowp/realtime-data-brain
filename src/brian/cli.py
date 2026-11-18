@@ -75,9 +75,11 @@ from .promote import (
     promotions_for_domain,
     revert_promotion,
     version_label,
+    CLAIM_EXPIRY_DAYS,
     rescale_hint,
     rescaled_candidate,
     shape_note,
+    verification_age_days,
     write_verification,
 )
 from .pipeline import Pipeline
@@ -285,11 +287,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     if args.campaign:
         rules = EvolveRules(min_gain=args.min_gain)
         try:
-            result = campaign_result(root, rules)
+            result = campaign_result(root, rules, expiry_days=args.expiry_days)
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
-        _print(format_campaign(result))
+        _print(format_campaign(result, expiry_days=args.expiry_days))
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")
@@ -426,8 +428,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # A promise is a statement about one dataset (boundary 33), so a stream only re-checks the
         # versions recorded on it: re-measuring another domain's patch here would grade a claim against
         # data it never described.
+        # Round 29: `pending` used to mean "never checked", so a version whose check came back
+        # `unmeasurable` -- or whose verdict is older than the horizon -- was never selected again. A
+        # verdict is evidence about the day it ran, so an expired one is due again.
         promotions = [item for item in promotions_for_domain(load_promotions(root), domain)
-                      if item.version == wanted or (not wanted and item.pending)]
+                      if item.version == wanted or (not wanted and item.due(days=args.expiry_days))]
         if not promotions:
             _print("no unverified promotions for %s: every version recorded on it has been re-checked."
                    % domain_slug(domain))
@@ -438,6 +443,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("verifying %d promotion(s) from %s on %s"
                % (len(promotions), domain_slug(domain), source))
         for promotion in promotions:
+            if not promotion.pending:
+                age = verification_age_days(promotion.verification)
+                _print("  v%03d  re-checking: its last check is %s old (expiry %.0f day(s))"
+                       % (promotion.version,
+                          "less than a day" if (age or 0) < 1.0 else "%.0f day(s)" % age,
+                          args.expiry_days))
             if promotion.candidate is None:
                 write_verification(root, promotion, {
                     "checked_at": _stamp(), "stream": source, "verdict": UNMEASURABLE,
@@ -491,7 +502,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 if note:
                     _print(note)
         _print("")
-        _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain))
+        _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain,
+                                 expiry_days=args.expiry_days))
         return 0
 
     settings, streams, source, base_overrides = _evolve_streams(args, settings)
@@ -1588,6 +1600,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-decide every recorded round under today's rules and exit")
     evolve.add_argument("--campaign", action="store_true",
                         help="summarise every recorded round per stream, then exit (no Laya)")
+    evolve.add_argument("--expiry-days", type=float, default=CLAIM_EXPIRY_DAYS,
+                        help="how long a recorded verdict speaks for its claim (days); overdue versions "
+                             "are re-checked by --verify and marked in --campaign")
     evolve.add_argument("--at-hint", action="store_true",
                         help="with --verify: also measure the version at the window count that covers "
                              "the same span, and record it as another shape of the same promise")
