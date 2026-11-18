@@ -3915,6 +3915,58 @@ with the ceilings in force now, or the cap is raised.
 
 **边界 149：默认闸门只在它能被清掉的时候才亮；在历史让任何命令都清不掉的时候，同一条发现只能是警告。**
 
+### 3.77 账本的每一行都要说出它按什么条件判定
+
+`--audit` 与 `--campaign` 已经会回答"有多少轮是在另一套上限下判的"，但它们都没有回答一个更小的问题：
+**这一轮当时被允许等多久？** `--history` 列出了每一轮的承诺、文件和判决，唯独没有列出判定条件，于是两段
+中间改过策略的账读起来像一次连续的实验。
+
+```
+$ brian evolve --history
+ceilings          1 of 2 round(s) record the wait ceilings they were judged under; 1 do not
+ 1  …  [no file recorded]
+      ceilings  one run 10.0 minute(s) on smd  (differs from today's)
+ 2  …  [no file recorded]
+```
+
+三处细节是有意的：
+
+- **没记录的轮不印行，但表头必须报数量。** 一列通常为空时必须自己说明这一点，否则它的沉默会被读成"没有
+  设过上限"（边界 142），而这个列表看上去会比实际更统一。真实账本上是 `0 of 74 round(s)`——全部写在上限
+  字段存在之前。
+- **每行的旁注用的是与 `--campaign` 表头同一个比较**（`limit_drift([record], today)`），所以两页不可能
+  互相矛盾（边界 108 的同一条要求）。
+- **"全局上限"与"某个域的上限"不是同一个承诺。** 前者同时约束这一轮没碰过的域，所以即使数值相同也报
+  `differs`；这一点有专门的测试固定，免得以后有人按"数值相等"把它们合并。
+
+## 默认闸门什么时候才敢亮
+
+默认值（不给 `--max-limit-drift`）只在**所有存活记录都写了上限**时才是 0，否则只是警告（第 69 轮）。
+`limit_drift` 本来就只看存活记录，所以退役/重跑之后它会自己回到 0——这是可以现场演示的：
+
+```
+$ brian evolve --campaign --strict --rerun-limit 0      # 一轮没写上限
+exit=0
+$ brian evolve --retire round-before-limits.json --re-measured-as round-old-limit.json
+retired           round-before-limits.json  (re-measured as round-old-limit.json)
+$ brian evolve --campaign --strict --rerun-limit 0
+exit=1
+ceilings          1 round(s) were judged under ceilings that differ from today's: the rules did not change,
+                  the limits did
+1 recorded round(s) were judged under ceilings that differ from today's, above the 0 asked for:
+```
+
+不放旗标，退出码自己从 0 变成 1。但这也暴露了另一个事实：**这本账（74 轮）上默认闸门永远亮不起来**，因为
+没有任何命令能给旧记录补写上限于事后——重跑会写一条新记录并退役旧的，而队列里 37 轮连候选定义都没有。所以
+诚实的报告是 `0 of 74` 加一条警告，而不是一句"检查通过"。
+
+**边界 150：** 账本列出每一轮的承诺、文件与判决时，也必须列出它的判定条件；否则两段中间改过策略的账会被当作
+一次连续的实验来读。
+
+**边界 151：** 一个默认闸门若依赖账本当前并不满足的前提，页面必须说出这一点；否则"检查通过"实际意味着
+"检查根本没开"。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4192,5 +4244,7 @@ missing for the next level
 56. **（3.76 已完成）页面每行报"按什么上限判的"，默认闸门只在记录够新时才亮。** 剩下的：
     `--history` 每行也报一次；`--max-limit-drift` 从"整本账"改成"只比还活着的那部分"。
 
-57. 让 `--history` 每行也报"这一轮按什么上限判的"，并把 `--max-limit-drift` 从"整本账"改成
-"只比这份记录活着的那部分"——退役与重跑之后的默认值应当自己回到 0，而不是等人手改。
+57. **（3.77 已完成）`--history` 也报上限，并且默认闸门只看存活记录。** 剩下的部分：按域统计缺上限的
+    轮数，让读者看见"重跑多少轮能让默认闸门亮起来"。
+58. 按域统计缺上限的轮数（`--history`/`--campaign` 共用一列），并在 `--unrecorded` 的队列里把"重跑后会写上
+    上限"标出来，让默认闸门从"永远警告"变成"付得起就亮"。

@@ -3222,6 +3222,37 @@ def format_limit_drift(drift: Mapping[str, Any]) -> str:
     return "".join(parts)
 
 
+def round_limits_text(limits: Optional[Mapping[str, Any]]) -> str:
+    """The wait ceilings one recorded round was judged under, as one phrase (round 70).
+
+    `--audit` and `--campaign` compare recorded ceilings against today's and report how many rounds moved;
+    neither answers the smaller question a reader has when looking at one line of `--history`: what was this
+    round allowed to wait for? A ledger that lists a round's promises, its file and its verdict but not the
+    limits it was judged under reads as one continuous experiment, when a tightening in between can be the
+    whole difference between two rows (boundary 146).
+
+    Origins (`state` / `flag`) are deliberately not printed here: a round records what limited it, and which
+    of the two wrote the number is a fact about the command that ran, already answered by the page's `limits`
+    line. Printing it per round would repeat that line fifty times.
+    """
+    if not limits:
+        return "no ceilings recorded"
+    parts: List[str] = []
+    blank = limits.get("max_minutes")
+    if blank is not None:
+        parts.append("one run %.1f minute(s) for every domain" % float(blank))
+    for name, value in sorted((limits.get("max_minutes_by_domain") or {}).items()):
+        parts.append("one run %.1f minute(s) on %s" % (float(value), name))
+    drain_all = limits.get("max_drain_minutes")
+    if drain_all is not None:
+        parts.append("a drain of %.1f minute(s) for every domain" % float(drain_all))
+    for name, value in sorted((limits.get("max_drain_by_domain") or {}).items()):
+        parts.append("a drain of %.1f minute(s) on %s" % (float(value), name))
+    if not parts:
+        return "no ceilings recorded"
+    return "; ".join(parts)
+
+
 def format_audit(result: Audit) -> str:
     lines: List[str] = []
     lines.append("=" * 96)

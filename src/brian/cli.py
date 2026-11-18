@@ -62,6 +62,7 @@ from .evolve import (
     record_withheld_check,
     rejudge,
     retire,
+    round_limits_text,
     run_round,
     Withheld,
     withheld_check,
@@ -1364,6 +1365,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("=" * 78)
         _print("brian evolve - recorded rounds (oldest first)")
         _print("=" * 78)
+        # Round 70: the ceilings each round was judged under live in the record, but nothing printed them, so a
+        # reader deciding whether two rows are comparable had to open the JSON. The count of rounds that do not
+        # say is printed too: a column that is usually absent should announce that it is usually absent, or its
+        # silence reads as "nothing was capped" (boundary 142) and the list looks more uniform than it is.
+        today_limits = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
+                                    drain_ceiling, drain_ceilings, flag_drain_ceilings)
+        recorded_limits = [record for record in rounds if record.get("limits")]
+        _print("ceilings          %d of %d round(s) record the wait ceilings they were judged under; %d do not"
+               % (len(recorded_limits), len(rounds), len(rounds) - len(recorded_limits)))
         for index, record in enumerate(rounds, start=1):
             baseline_row = record.get("baseline") or {}
             measured = baseline_row.get("tokens_per_report")
@@ -1398,6 +1408,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
+            # Round 70: only the rounds that recorded ceilings get a line, and each says whether today's
+            # ceilings are still the ones it was judged under. A retired round is compared as well: its record
+            # stands as written, and a reader who sees "differs from today's" on a retired row learns that the
+            # round was superseded, not that the ledger is inconsistent.
+            recorded = record.get("limits")
+            if recorded:
+                drift = limit_drift([record], today_limits)
+                note = "  (differs from today's)" if drift.get("differ") else "  (as in force now)"
+                _print("      ceilings  %s%s" % (round_limits_text(recorded), note))
         return 0
 
     if args.rerun_unrecorded:
