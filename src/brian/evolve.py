@@ -1646,6 +1646,15 @@ class RoundResult:
     printed summary lives only in the terminal that happened to run it.
     """
 
+    limits: Dict[str, Any] = field(default_factory=dict)
+    """The wait ceilings this round was judged under, and where each came from (round 68).
+
+    A ceiling does not live in `EvolveRules`, so `rules_hash` cannot see it change: the same rulebook, the
+    same measurements, and a different verdict, because somebody tightened a wait in a deployment state. A
+    record that cannot say which ceilings it was judged under leaves that difference invisible to `--audit`
+    — which is the one place built to notice that a stored verdict no longer matches the rules.
+    """
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "started_at": self.started_at,
@@ -1678,6 +1687,9 @@ class RoundResult:
             # conclude about them.
             "proposal": self.proposal or None,
             "queue": dict(self.queue) or None,
+            # Absent in rounds written before ceilings were recorded; `None` there means "this round did not
+            # say", which is what a reader should conclude about them (boundary 147).
+            "limits": dict(self.limits) or None,
         }
 
 
@@ -3142,6 +3154,72 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
             })
     return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials,
                  entries=entries, retired=retired)
+
+
+def _limit_terms(limits: Optional[Mapping[str, Any]]) -> Optional[Tuple[Optional[float],
+                                                                       Tuple[Tuple[str, float], ...],
+                                                                       Tuple[Tuple[str, float], ...]]]:
+    """The part of a ceilings payload that decides a verdict, as one comparable value (round 68).
+
+    Origins are deliberately left out: `(state)` and `(command line)` answer "who decided", not "what was the
+    limit", and a round judged under ten minutes is judged under ten minutes whichever route recorded it.
+    """
+    if not limits:
+        return None
+    return (
+        None if limits.get("max_minutes") is None else float(limits["max_minutes"]),
+        tuple(sorted((str(name), float(value))
+                     for name, value in (limits.get("max_minutes_by_domain") or {}).items())),
+        tuple(sorted((str(name), float(value))
+                     for name, value in (limits.get("max_drain_by_domain") or {}).items())),
+    )
+
+
+def limit_drift(rounds: Sequence[Mapping[str, Any]],
+                limits: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Which recorded rounds were judged under ceilings that differ from today's (round 68).
+
+    A ceiling is not part of `EvolveRules`, so `rules_hash` cannot notice it moving: the same rulebook
+    re-decides the same measurements and gets a different answer purely because somebody tightened a wait in
+    a deployment state. This is the comparison that makes that visible, and it is a *count of rounds*, not a
+    diff of numbers, because the gate has to decide whether to fail.
+
+    A round written before ceilings were recorded is counted separately and never guessed into either
+    column: saying "unknown" is the only honest report, and treating it as equal would silently claim that
+    history was judged under today's limits (boundary 147).
+    """
+    today = _limit_terms(limits)
+    differ: List[str] = []
+    unrecorded = 0
+    live = [record for record in rounds if not record.get("retired")]
+    for record in live:
+        recorded = _limit_terms(record.get("limits"))
+        if recorded is None:
+            unrecorded += 1
+            continue
+        if recorded != today:
+            differ.append(str(record.get("round") or "?"))
+    return {"rounds": len(live), "differ": differ, "unrecorded": unrecorded}
+
+
+def format_limit_drift(drift: Mapping[str, Any]) -> str:
+    """One sentence about how many rounds were judged under other ceilings (round 68)."""
+    differ = len(drift.get("differ") or [])
+    unrecorded = int(drift.get("unrecorded") or 0)
+    rounds = int(drift.get("rounds") or 0)
+    if not rounds:
+        return "ceilings          no recorded round yet, so there is nothing whose ceilings could differ"
+    parts = ["ceilings          "]
+    if differ:
+        names = ", ".join(str(name) for name in (drift.get("differ") or [])[:4])
+        more = "" if differ <= 4 else ", ..."
+        parts.append("%d of %d round(s) were judged under ceilings that differ from today's (%s%s); "
+                     "the rules did not change, the limits did" % (differ, rounds, names, more))
+    else:
+        parts.append("every recorded round was judged under today's ceilings")
+    if unrecorded:
+        parts.append("; %d round(s) do not say which ceilings they were judged under" % unrecorded)
+    return "".join(parts)
 
 
 def format_audit(result: Audit) -> str:

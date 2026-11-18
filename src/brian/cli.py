@@ -44,6 +44,7 @@ from .evolve import (
     catalogue,
     debt_history,
     format_audit,
+    format_limit_drift,
     format_rejudge,
     format_round,
     format_sensitivity,
@@ -51,6 +52,7 @@ from .evolve import (
     grade,
     history,
     label_free_cut,
+    limit_drift,
     measure,
     persist,
     refusal_plan,
@@ -268,7 +270,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  drain_minutes: Optional[float] = None,
                  max_drain: Optional[float] = None,
                  drain_by_domain: Optional[Mapping[str, Any]] = None,
-                 drain_ceilings: Optional[Mapping[str, Any]] = None) -> int:
+                 drain_ceilings: Optional[Mapping[str, Any]] = None,
+                 limit_drift: int = 0, max_limit_drift: Optional[float] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -431,7 +434,17 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     # enough to be printed at all, or the reader would get exit 1 with no paragraph explaining it.
     rose = max_rise is not None and trend_rise > max_rise and trend_rise > trend_tolerance
     capped = max_unrecorded is not None and unrecorded_share > max_unrecorded
-    return 1 if (moved or due or capped or rose or debt_capped or minutes_capped) else 0
+    # Round 68: a recorded round judged under other ceilings is not a wrong record -- the limits really were
+    # those -- so this is chargeable only when asked for, the same way a debt that history created is
+    # (boundary 123). The flag names a *count*, because the reader is deciding whether to re-decide rounds.
+    drift_capped = (max_limit_drift is not None and limit_drift > float(max_limit_drift))
+    if drift_capped:
+        _print("")
+        _print("%d recorded round(s) were judged under ceilings that differ from today's, above the %d "
+               "asked for:" % (limit_drift, int(max_limit_drift)))
+        _print("their verdicts were reached under other limits, so --strict exits 1 until they are re-decided")
+        _print("with the ceilings in force now, or the cap is raised.")
+    return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped) else 0
 
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
@@ -1267,6 +1280,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     flag_drain_ceilings: Dict[str, float] = dict(drain_ceilings)
     drain_ceilings = {**state_drain_ceilings, **drain_ceilings}
 
+    if getattr(args, "max_limit_drift", None) is not None and not args.audit:
+        # Round 68: a flag that only one mode reads must say so, otherwise it is inert in every other mode and
+        # the reader believes a check ran (round 40's lesson, in a new place).
+        _print("--max-limit-drift reads the ceilings recorded in each round, which only --audit compares; "
+               "pass --audit too, or drop the flag")
+        return 2
+
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
         written: List[Tuple[str, Optional[float], Optional[float], bool, bool]] = []
         for entry, flag in [(item, "--set-domain-limit") for item in
@@ -1394,6 +1414,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         limit = _rerun_limit(args, len(ready))
         budget = _queue_budget(root, limit=limit)
         _print("budget            %s" % budget_text(budget))
+        # Round 68: the queue judges every round it pays, so it names the ceilings it judges by -- the same
+        # sentence the page and `--audit` print, from the same function, so the three cannot drift apart.
+        queue_limits_text = _limits_text(_limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
+                                                      drain_ceiling, drain_ceilings, flag_drain_ceilings))
+        if queue_limits_text:
+            _print("limits            %s" % queue_limits_text)
         if limit == len(ready) and len(ready) > 1:
             # A drain still has to say *before the first measurement* that one broken round stops the rest: a
             # reader who asked for ten rounds should learn that at the top, not from a stack trace halfway down.
@@ -1432,6 +1458,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             result = run_round(run_settings, streams, selected=recorded, rules=rules, source=source,
                                claim=record.get("claim") or {})
             result.stream_path = target_file
+            # Round 68: a re-run is judged under the same ceilings as any other round, so it records them.
+            result.limits = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
+                                         drain_ceiling, drain_ceilings, flag_drain_ceilings)
             # Round 58: the record of what this entry of the queue paid belongs in the round it paid, not in
             # the terminal that ran it. `largest_at_start` is the domain a reader would have expected this
             # command to aim at, so a later reader can tell an aimed payment from an incidental one.
@@ -1738,6 +1767,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         audit_text = _limits_text(audit_limits)
         if audit_text:
             _print("limits            %s" % audit_text)
+        # Round 68: a ceiling is not in `EvolveRules`, so a re-decision can move without the rules moving.
+        # The gate says how many recorded rounds were judged under different limits, and never guesses a
+        # round that predates the field (boundary 147).
+        try:
+            drift = limit_drift(history(root, include_retired=False), audit_limits)
+        except OSError:
+            drift = {"rounds": 0, "differ": [], "unrecorded": 0}
+        _print(format_limit_drift(drift))
         # Round 45: the refusals are records too (boundary 91), so the ledger-wide gate counts a refusal
         # nobody re-tested as debt. Computed from the same horizon `--campaign` uses, or the two modes
         # would disagree about the same ledger and a reader could pass the check by picking one.
@@ -1772,6 +1809,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # boundary 131 already makes that a rule for the campaign page.
         if args.json_out:
             payload = {"limits": audit_limits, "limits_text": audit_text,
+                       "ceiling_drift": drift,
                        "rules_hash": result.fingerprint, "rounds": result.rounds,
                        "trials": result.trials, "retired": result.retired,
                        "moved": result.moved, "relabelled": result.relabelled,
@@ -1799,7 +1837,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                            else float(audit_budget["drain_minutes"])),
                             drain_by_domain=audit_budget.get("drain_by_domain") or {},
                             max_drain=drain_ceiling,
-                            drain_ceilings=drain_ceilings)
+                            drain_ceilings=drain_ceilings,
+                            limit_drift=len(drift.get("differ") or []),
+                            max_limit_drift=getattr(args, "max_limit_drift", None))
 
     if args.grade:
         try:
@@ -2272,6 +2312,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # without an operator remembering the path. Two files can carry the same dataset sampled differently,
     # and a re-check on the other one measures a different quantity (rounds 26 and 44).
     result.stream_path = str(args.stream_file or "")
+    # Round 68: the round records the ceilings it was judged under. A ceiling is not in `EvolveRules`, so it
+    # can move without moving the rules hash -- the same rulebook would then re-decide the same measurements
+    # and reach another answer, and nothing in the record would explain why.
+    result.limits = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
+                                 drain_ceiling, drain_ceilings, flag_drain_ceilings)
     if owner is not None:
         verdict, reason = claim_check(owner.claim, result.baseline, rules,
                                       recorded_stream=owner.stream, checked_stream=stream_shape)
@@ -3314,6 +3359,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --strict: fail when the worst domain's unrecorded share is above this "
                              "fraction (0.5 = half its rounds cannot be placed), provided a re-run can lower "
                              "it; a share no command can pay is printed but never charged")
+    evolve.add_argument("--max-limit-drift", type=float, default=None, metavar="ROUNDS",
+                        help="with --audit --strict: fail when more than this many recorded rounds were "
+                             "judged under wait ceilings that differ from today's (a ceiling is not in the "
+                             "rulebook, so a rules audit cannot otherwise see it move)")
     evolve.add_argument("--max-minutes", action="append", default=None, metavar="MINUTES|DOMAIN=MINUTES",
                         help="with --strict: fail when the next queue run would spend more than this many "
                              "minutes (estimated per domain from the median duration of the recorded rounds, "

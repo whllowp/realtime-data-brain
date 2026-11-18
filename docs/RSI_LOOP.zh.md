@@ -3803,6 +3803,64 @@ cleared           rcaeval-re1-ob: no drain ceiling
 **边界 145：撤销必须由做出撤销的那条命令记录，而不是由状态文件的空缺推断——
 空政策既表示"从没设过"也表示"撤过了"，两者不能靠猜。**
 
+### 3.75 上限不在规则书里，所以规则审计看不见它移动
+
+3.74 让门禁念出了它读到的上限。可是**每一轮记录**里没有上限：`EvolveRules` 决定"什么叫更好"，
+等待上限决定"这一队今天能不能跑"，后者存在部署状态里，于是它可以在一条规则都不改的情况下被收紧——
+同样的测量、同样的规则指纹、不同的判决，而 `--audit`（唯一被造出来发现"存档判决与今天的规则不一致"的地方）
+对它一无所知。
+
+这一轮把上限写进记录，并让门禁做一次比较：
+
+```
+$ brian evolve --audit --rerun-limit 0
+recorded rounds   2  (0 candidate measurements re-decided, no re-run)
+every recorded verdict survives today's rules.
+limits            one run 4.0 minute(s) on smd (state)
+ceilings          1 of 2 round(s) were judged under ceilings that differ from today's (round-old-limit.json); the rules did not change, the limits did; 1 round(s) do not say which ceilings they were judged under
+```
+
+比较**只比数字，不比来源**：`(state)` 与 `(command line)` 回答的是"谁决定的"，不是"限制是多少"——
+按十分钟判过的一轮，无论十分钟是从政策还是从命令行来，判的都是十分钟。有测试把这一点单独钉住。
+
+"没说"单独计数，绝不并入任何一边：把没有上限字段的旧记录算成"一致"，等于宣称历史是在今天的上限下判的；
+算成"不一致"，等于给每条旧记录记一笔它没犯的错。这正是边界 123 在另一个位置的同一条规矩。
+
+`--rerun-unrecorded` 的开头也念同一句（它此前只念 `budget`）：
+
+```
+candidates        2 of 2 round(s) have exactly one file; 0 cannot be placed
+progress          0 round(s) already re-measured into a named successor; 2 still to do
+budget            brian evolve --rerun-unrecorded --rerun-limit 2 pays 2 round(s) (RCAEval RE1-OB, SMD); …
+limits            one run 10.0 minute(s) on rcaeval-re1-ob (state); a drain of 20.0 minute(s) on rcaeval-re1-ob (state)
+stops             at the first round that cannot be re-run; the rest keep their place
+```
+
+"该在变化时失败"落成一个可选的闸门，而不是默认失败：
+
+```
+$ brian evolve --audit --strict --rerun-limit 0 --max-limit-drift 0
+1 recorded round(s) were judged under ceilings that differ from today's, above the 0 asked for:
+their verdicts were reached under other limits, so --strict exits 1 until they are re-decided
+with the ceilings in force now, or the cap is raised.
+```
+
+默认只是警告，理由与 3.63 相同：这个仓库里所有旧记录都写在上限字段存在之前，默认失败会让门禁永久变红——
+一条永远清不掉的检查等于没有检查。把 `--max-limit-drift` 用在别的模式上会被拒绝并说明原因，而不是静默失效
+（第 40 轮"某个模式里悄悄不生效的旗标"那条教训，换了个位置）。
+
+三个读数：
+
+1. **判定条件也是判定的一部分。** 规则指纹能证明"按什么规则判的"，证明不了"按什么代价判的"；
+   后者住在部署状态里，所以必须被记录，否则一条状态改动会伪装成一次规则变化。
+2. **比较要比该比的东西。** 来源不参与比较，因为来源解释决定，不解释数额。
+3. **"没说"是第三种状态。** 把它并进任何一边都是在替历史回答一个它没回答的问题。
+
+**边界 146：判决所依据的等待上限必须写进那一轮的记录；否则收紧一次上限，会被读成规则变了。**
+
+**边界 147：比较"记录"与"今天"时，"没说"必须单独计数，不能并入一致或不一致——
+把沉默算成任何一边，都是在替历史回答它没回答的问题。**
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4075,5 +4133,8 @@ missing for the next level
 54. **（3.74 已完成）门禁念出它读到的上限，撤销跟着它自己的命令走。** 剩下的：`--rerun-unrecorded`
     自己开头也要念同一句（现在它只念 `budget`），并让 `--audit --json-out` 的 `limits_text` 进入 CI 比较。
 
-55. 让 `--rerun-unrecorded` 开头也念同一句 `limits`（现在它只念 `budget`），并把
-`--audit --json-out` 的 `limits_text` 接进 CI（一句判据一旦被比较，就该在变化时失败）。
+55. **（3.75 已完成）整队命令开头念同一句上限，门禁比较"这一轮按什么上限判的"。** 剩下的：
+    `--max-limit-drift` 目前只认 `--audit`，让 `--campaign` 也报同一列（现在它只念 `limits` 句子）。
+
+56. 让 `--campaign` 也报同一列"按什么上限判的"（现在它只念 `limits` 句子），并把
+`--max-limit-drift` 放进 `--strict` 的默认集合——只有当记录足够新时，默认才是可清的。
