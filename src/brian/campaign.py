@@ -55,6 +55,10 @@ class CampaignRow:
     # the retirement concerned SMD.
     retired: int = 0
     successors: List[str] = field(default_factory=list)
+    # This domain's share of the refusals the loop still holds, and how many of them nobody re-checked
+    # (round 36). The header line is the ledger's number; the row is what a reader of SMD decides with.
+    refusals: int = 0
+    refusals_retired: int = 0
 
     @property
     def accepted(self) -> int:
@@ -82,6 +86,8 @@ class CampaignRow:
             "audit_unreconstructable": self.audit_unreconstructable,
             "rounds_retired": self.retired,
             "re_measured_as": list(self.successors),
+            "refusals_carried": self.refusals,
+            "refusals_from_retired": self.refusals_retired,
         }
 
 
@@ -268,6 +274,18 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.refusals = sum(1 for verdict in provenance.values() if not verdict["accepted"])
     result.refusals_retired = sum(1 for verdict in provenance.values()
                                   if not verdict["accepted"] and verdict["retired"])
+    # Attributed to the stream that made the refusal, for the same reason the audit is: the header's
+    # number is the ledger's, and a domain page that showed none of it would read as "nothing settled
+    # here" (round 36).
+    for verdict in provenance.values():
+        if verdict["accepted"]:
+            continue
+        row = rows.get(str(verdict.get("source") or "?"))
+        if row is None:
+            continue
+        row.refusals += 1
+        if verdict["retired"]:
+            row.refusals_retired += 1
     return result
 
 
@@ -357,7 +375,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
             lines.append("  accepted by       %s" % accepts)
         rejects = ", ".join("%s x%d" % (rule, count) for rule, count in sorted(row.rejections.items()))
         if rejects:
-            lines.append("  rejected by       %s" % rejects)
+            # "As recorded" is not decoration (round 36): this column counts the verdicts the rounds wrote,
+            # while the `refusals` line below counts what today's rules still reject. Re-deciding moves
+            # candidates between the two, and a page that printed them as the same number would let a
+            # reader believe the loop still holds refusals it has since reversed.
+            lines.append("  rejected by       %s (as recorded)" % rejects)
         if row.audit_moved or row.audit_relabelled or row.audit_unreconstructable:
             bits = ["%d moved" % row.audit_moved, "%d relabelled" % row.audit_relabelled]
             if row.audit_unreconstructable:
@@ -370,6 +392,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
             if row.successors:
                 note += ": re-measured as %s" % ", ".join(row.successors)
             lines.append(note)
+        if row.refusals:
+            bits = "%d held" % row.refusals
+            if row.refusals_retired:
+                bits += ", %d inherited from a retired record" % row.refusals_retired
+            lines.append("  refusals          %s" % bits)
         if row.in_force:
             lines.append("  in force          %s  (%s)"
                          % (" ".join("%s=%s" % item for item in sorted(row.env.items()))

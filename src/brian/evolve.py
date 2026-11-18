@@ -1851,7 +1851,8 @@ def _trial_names(path: Path) -> List[str]:
             for trial in payload.get("trials") or []]
 
 
-def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict[str, str]:
+def previously_rejected(root: Path, rules: Optional[EvolveRules] = None,
+                        source: Optional[str] = None) -> Dict[str, str]:
     """candidate name -> the rule that rejects it, from the *latest* round that judged it.
 
     A loop that re-proposes its own rejected ideas has not accumulated anything; the survey calls the
@@ -1863,6 +1864,11 @@ def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict
     keeping the first rejection forever would present a settled question that was later answered the
     other way, which is amnesia with extra paperwork.
 
+    `source` narrows the answer to one stream (round 36). Without it the caller sees every stream's
+    refusals mixed together, which is fine for a listing and wrong for a decision: a candidate refused
+    on the synthetic suite has not been measured on SMD, and treating the two as the same refusal is
+    the cross-stream transfer this loop keeps finding does not work.
+
     Passing `rules` re-decides each stored measurement under the rules in force *now*, which is what
     makes the ledger self-healing: a rule change (round 6 made the deploy floor one) can invalidate a
     stored rejection without anyone remembering to clear it, and a ledger that keeps poisoning the next
@@ -1872,6 +1878,8 @@ def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict
     rejected: Dict[str, str] = {}
     for name, verdict in rejection_provenance(root, rules).items():
         if verdict["accepted"]:
+            continue
+        if source is not None and verdict["source"] not in ("?", str(source)):
             continue
         rejected[name] = "on %s: %s" % (verdict["source"], verdict["reason"])
     return rejected
@@ -1915,8 +1923,83 @@ def rejection_provenance(root: Path, rules: Optional[EvolveRules] = None) -> Dic
                 "round": row.get("round"),
                 "retired": retired,
                 "re_measured_as": (retirement or {}).get("re_measured_as") if retired else None,
+                "stream": dict(row.get("stream") or {}),
             }
     return latest
+
+
+def refusal_plan(provenance: Mapping[str, Mapping[str, Any]], *, source: Optional[str] = None,
+                 shape: Optional[Mapping[str, Any]] = None) -> Dict[str, List[str]]:
+    """Split the refusals that still stand into what this round may skip and what it must measure again.
+
+    A refusal is not a fact about a candidate in the abstract: it was measured on a stream, at a sampling
+    density, under rules that may since have changed (and `provenance` already re-decided it under today's
+    rules when the caller asked). Round 36 therefore splits four ways:
+
+    * `skip` — refused on *this* stream at *this* sampling and not retired: measuring it again would buy a
+      number the ledger already holds;
+    * `elsewhere` — refused, but on another stream (or by a round that did not say which): the candidate
+      has not been measured here, so this round's measurement is the first one;
+    * `inherited` — refused by a retired record: nobody re-checked that verdict, so re-opening it is the
+      point of measuring rather than a repeat (boundary 76 says the question was dropped, not answered);
+    * `reopened` — refused here, but at a geometry this round cannot match (the record predates the
+      cadence field, or a window covers different traffic): the old refusal does not apply to these
+      windows (boundary 72).
+
+    Only `skip` is a decision to save the measurement. The other three are reasons the loop must spend it
+    again, and the caller is expected to print which is which rather than a single count.
+    """
+    groups: Dict[str, List[str]] = {"skip": [], "elsewhere": [], "inherited": [], "reopened": []}
+    for name, verdict in provenance.items():
+        if verdict.get("accepted"):
+            continue
+        if source is not None and verdict.get("source") not in ("?", str(source)):
+            groups["elsewhere"].append(name)
+            continue
+        if verdict.get("retired"):
+            groups["inherited"].append(name)
+            continue
+        if shape is not None and _sampling_differs(verdict.get("stream"), shape):
+            groups["reopened"].append(name)
+            continue
+        groups["skip"].append(name)
+    for group in groups.values():
+        group.sort()
+    return groups
+
+
+# How far two samplings may differ and still be called the same geometry for a *refusal*. The seed rule
+# lives in `propose.SHAPE_TOLERANCE` with the same value; duplicated so this module does not import back
+# into the generator that imports it (round 36).
+SHAPE_TOLERANCE = 0.25
+
+
+def _recorded_shape(stream: Optional[Mapping[str, Any]]) -> bool:
+    """Whether a recorded stream says enough to compare its sampling with another (`_same_shape` treats
+    silence as agreement, which is right for seeds and wrong for refusals)."""
+    if not stream:
+        return False
+    return stream.get("cadence_s") is not None or stream.get("windows") is not None
+
+
+def _sampling_differs(recorded: Optional[Mapping[str, Any]],
+                      shape: Optional[Mapping[str, Any]]) -> bool:
+    """Whether a recorded stream and the current one cover different amounts of traffic per window.
+
+    The same rule `propose._same_shape` applies to seeds, written here because `propose` imports this
+    module (round 36 needed the comparison on the refusal path, and importing back would be a cycle).
+    Unknown on either side counts as *different* here, the opposite of the seed rule: a refusal whose
+    geometry nobody recorded is not evidence that it applies to these windows.
+    """
+    if not _recorded_shape(recorded) or not shape:
+        return True
+    for key in ("cadence_s", "windows"):
+        left = recorded.get(key)
+        right = shape.get(key)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)) and left and right:
+            if abs(float(right) / float(left) - 1.0) > SHAPE_TOLERANCE:
+                return True
+    return False
 
 
 # --------------------------------------------------------------------------------------

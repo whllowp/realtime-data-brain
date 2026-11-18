@@ -25,7 +25,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .bus import JournalBus, MemoryBus, open_bus
 from .config import ENV_VARS, Settings, load_settings
@@ -48,7 +48,8 @@ from .evolve import (
     label_free_cut,
     measure,
     persist,
-    previously_rejected,
+    refusal_plan,
+    rejection_provenance,
     reader_scores,
     rejudge,
     retire,
@@ -284,6 +285,42 @@ def _retire_names(values: List[str]) -> List[str]:
     return names
 
 
+def _skip_refused(selected: Sequence[Any], refused: Sequence[str],
+                  *, named: bool) -> Tuple[List[Any], List[Any]]:
+    """Split a round's candidates into the ones to measure and the ones a refusal already covers.
+
+    `named` says the caller wrote `--candidates`: an explicit list is an instruction to measure those
+    candidates, and quietly dropping one would make the flag silent about the only thing it was asked to
+    do. The saving applies to what the *mechanism* proposed (round 36).
+    """
+    refused_set = set(refused)
+    skipped = [candidate for candidate in selected if candidate.name in refused_set]
+    if named or not skipped:
+        return list(selected), skipped
+    return [candidate for candidate in selected if candidate.name not in refused_set], skipped
+
+
+def _print_refusal_plan(plan: Mapping[str, List[str]]) -> None:
+    """Print the standing refusals as the four different answers they are (round 36).
+
+    Round 35 counted them (`35 held, 14 inherited`) and that number was the defect in miniature: three of
+    the four reasons to hold a refusal are reasons to measure the candidate *again*, and one is a reason to
+    save the measurement. A single count let a reader take the four for the same thing.
+    """
+    if not any(plan.values()):
+        return
+    _print("Previously rejected (re-judged under today's rules, so a retired rule cannot poison this):")
+    for key, label in (("skip", "refused on this stream at this sampling: not measured again"),
+                       ("elsewhere", "refused on another stream only: measured here for the first time"),
+                       ("inherited", "refused by a retired record nobody re-checked: re-opened"),
+                       ("reopened", "refused at a different sampling: re-measured on these windows")):
+        if not plan.get(key):
+            continue
+        _print("  %-11s %2d candidate(s)  %s" % (key, len(plan[key]), ", ".join(plan[key])))
+        _print("              %s" % label)
+    _print("")
+
+
 def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     """Run the improvement mechanism: propose, measure, select, and (only with --apply) integrate."""
     root = Path(".")
@@ -480,6 +517,28 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 "forced by --catalogue: the fixed list, so the rule selection was not consulted",
                 list(catalogue()), proposal.space, proposal.source)
         _print(format_proposal(proposal))
+        # Round 36: the dry run reports what the real round would *not* measure, because a proposal the
+        # round will skip is not part of what it costs or answers. The shape comes from the stream file
+        # when there is one, so a refusal made at another sampling is re-opened here exactly as it would
+        # be in the round.
+        shape = None
+        if args.stream_file:
+            try:
+                shape = summarise(load_stream_file(Path(args.stream_file)).streams)
+            except (OSError, ValueError):
+                shape = None
+        plan = refusal_plan(rejection_provenance(root, EvolveRules(min_gain=args.min_gain)),
+                            source=source, shape=shape)
+        _print_refusal_plan(plan)
+        skipped = set(plan["skip"])
+        proposed = {candidate.name for candidate in proposal.candidates}
+        # Printed even when the answer is zero: a saving that never fires on the current ledger is a guard,
+        # and a reader who is not told that cannot tell this round from one that saved nothing because the
+        # plan was never consulted (round 36).
+        _print("would skip        %d of %d proposal(s) refused on this stream at this sampling%s"
+               % (len(proposed & skipped), len(proposed),
+                  ": " + ", ".join(sorted(proposed & skipped)) if proposed & skipped else ""))
+        _print("")
         return 0
 
     if args.calibrate_bar:
@@ -704,12 +763,27 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print(line)
             _print("")
 
-    prior = previously_rejected(root, rules)
-    if prior:
-        _print("Previously rejected (re-judged under today's rules, so a retired rule cannot poison this):")
-        for name, reason in sorted(prior.items()):
-            _print("  %-22s %s" % (name, reason))
+    # Round 36: a refusal is a statement about a stream and a sampling, so the two questions "may this
+    # round skip a candidate" and "is this a new measurement" have different answers. The plan splits the
+    # refusals that still stand into the ones this round may skip and the three kinds it must spend a
+    # measurement on again; printing a single count let a reader take all four for the same thing.
+    plan = refusal_plan(rejection_provenance(root, rules), source=source, shape=stream_shape)
+    _print_refusal_plan(plan)
+    kept, not_measured = _skip_refused(selected, plan["skip"], named=bool(args.candidates))
+    if args.candidates and not_measured:
+        _print("named anyway      %d candidate(s) were refused on this stream and are measured because the "
+               "caller named them: %s" % (len(not_measured),
+                                           ", ".join(candidate.name for candidate in not_measured)))
         _print("")
+    elif not_measured:
+        _print("not measured      %d candidate(s) the proposal includes, already refused on this stream: %s"
+               % (len(not_measured), ", ".join(candidate.name for candidate in not_measured)))
+        _print("")
+    selected = kept
+    if not selected:
+        _print("nothing to measure: every candidate this round would measure has already been refused on "
+               "this stream at this sampling. Name them with --candidates to measure them anyway.")
+        return 0
 
     totals = summarise(streams)
     for section, values in base_overrides.items():

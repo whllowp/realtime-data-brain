@@ -1926,6 +1926,51 @@ SMD                    24    128     48 20        recall 0.507 at the 10% budget
 就是一次不存在的验证。**
 
 
+### 3.43 拒绝是一句关于数据和采样的话：四种拒绝，只有一种是节省
+
+第 35 轮把"35 条仍被判为拒绝、其中 14 条来自已退役的记录"报了出来。这个数字本身还是漏掉了一件事：
+**四条里有三条是"应该再测一次"的理由**，只有一条真正省下一次测量。
+
+- 同一数据流、同一采样密度、未被退役 —— 这条拒绝已经测过，再测是重复付费；
+- 拒绝来自**另一条数据流** —— 该候选在本地从未被测过，这一次测量才是第一次；
+- 拒绝来自**已退役的记录** —— 没人复核过那个判决，重新打开它正是测量的意义（边界 76：问题是被丢掉的，不是被回答的）；
+- 拒绝是在**另一种采样密度**下做出的 —— 那些窗口不描述这里的流量（边界 72），旧拒绝不适用。
+
+于是在 `src/brian/evolve.py` 里加了 `refusal_plan(provenance, source=..., shape=...)`，把仍然成立的拒绝
+拆成 `skip` / `elsewhere` / `inherited` / `reopened` 四组；`previously_rejected` 也接受 `source` 参数，
+因为"一个候选在合成数据流上被拒"和"它在 SMD 上被拒"不是同一个陈述。实测（`data/smd/stream-check.json`）：
+
+```
+  skip        14 candidate(s)  events-18, events-32, host-rolling-rank-0-85-100, ...
+              refused on this stream at this sampling: not measured again
+  inherited   14 candidate(s)  analyze-pages-only, anomaly-p-40, confidence-auto-85, ...
+              refused by a retired record nobody re-checked: re-opened
+  reopened     7 candidate(s)  host-rolling-rank-0-75, host-rolling-rank-0-8, ...
+              refused at a different sampling: re-measured on these windows
+```
+
+**这一轮省下了几次测量？零次。** 干跑打印 `would skip 0 of 8 proposal(s) refused on this stream at this
+sampling`，条目化运行（`--catalogue`，14 个候选）里也没有一个落在 `skip` 组：`skip` 里的名字是机制现在
+不会再生成的那些（它们的种子早被拒了，邻居链断了）。所以这一轮交付的是一个**守卫**，不是一次节省——
+而且它必须把"没有命中"也打印出来，否则读者无法区分"守卫查过了、没命中"和"守卫根本没接上"（边界 79）。
+
+**第二个发现由按域拆分带出来**：`--campaign` 页面上 `SMD  refusals  35 held, 5 inherited`，而 demo 和
+RCAEval 两行的 `refusals` 行消失了——因为按今天的规则重判之后，它们记录的拒绝全部翻成了接受。
+同一页面上另一行 `rejected by  gain x10` 仍然是"写下来时的判决"，两个数不是一回事。于是给后一行加了
+`(as recorded)` 后缀（边界 80）：一个页面上的两个"拒绝"列，如果数的是不同的东西，就必须各自说明数的是什么。
+这正是第 35 轮"谁还在替这个拒绝负责"的下一层：**拒绝的归属不仅是"哪条流"，还是"哪一天"**。
+
+`--candidates` 命名的候选不受守卫影响：显式点名是一条指令，不是一次提案，悄悄跳过它会让这个开关对唯一
+被要求的事情保持沉默。实测 `--candidates events-18` 报 `unknown candidates: events-18`（它不在目录里，
+是生成出来的邻居），所以这条路径目前只有单元测试覆盖。
+
+**边界 79：一个在当前账本上从不命中的节省，必须被报成守卫而不是节省。** 否则"这一轮省了多少"就成了
+无法证伪的句子——省下的次数没法与"根本没接上"区分开。
+
+**边界 80：同一页面上数不同东西的两列，必须各自说明数的是什么。** `rejected by`（写下来时的判决）与
+`refusals`（今天仍然成立的拒绝）在一次重判之后会不一致；不标注就等于让读者以为自己在看同一个数。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
