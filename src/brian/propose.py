@@ -310,6 +310,8 @@ class Proposal:
     space: Optional[ProposalSpace] = None
     source: str = ""
     """Which stream the seeds were drawn from. Empty means "any stream", which is the old behaviour."""
+    deployed: int = 0
+    """How many neighbours were dropped because they describe the configuration already in force."""
 
     @property
     def space_fingerprint(self) -> Optional[str]:
@@ -322,8 +324,26 @@ class Proposal:
             "source": self.source,
             "space": None if self.space is None else self.space.describe(),
             "space_fingerprint": self.space_fingerprint,
+            "deployed": self.deployed,
             "candidates": [candidate.name for candidate in self.candidates],
         }
+
+
+def _is_deployed(candidate: Candidate,
+                 deployed: Optional[Mapping[str, Mapping[str, Any]]]) -> bool:
+    """Whether every setting this candidate names is already the value in force.
+
+    Round 22 found the mechanism proposing its own baseline: once a round's acceptance is the deployment,
+    the same patch is a neighbour of itself, and measuring it again spends a round to learn that a
+    configuration is not better than itself. Only a *full* match counts — a candidate that changes one of
+    two deployed values is still a new configuration.
+    """
+    if not deployed:
+        return False
+    changes = candidate.changes()
+    if not changes:
+        return False
+    return all((deployed.get(section) or {}).get(field) == value for section, field, value in changes)
 
 
 def _from_stream(record: Mapping[str, Any], source: Optional[str]) -> bool:
@@ -410,8 +430,14 @@ def mode_from_history(rounds: Sequence[Mapping[str, Any]], *, source: Optional[s
 
 def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[Candidate]] = None,
             space: Optional[ProposalSpace] = None, mode: Optional[Mode] = None,
-            max_proposals: Optional[int] = None, source: Optional[str] = None) -> Proposal:
-    """The proposals this round should measure, given what the ledger already says about `source`."""
+            max_proposals: Optional[int] = None, source: Optional[str] = None,
+            deployed: Optional[Mapping[str, Mapping[str, Any]]] = None) -> Proposal:
+    """The proposals this round should measure, given the ledger and the configuration in force.
+
+    `deployed` is the same shape `apply_overrides` takes (`{section: {field: value}}`) and is used for one
+    thing only: a neighbour whose every setting already holds is the baseline, and measuring it again
+    answers a question nobody asked. Those are counted and dropped, not silently forgotten.
+    """
     catalogue_entries = list(entries if entries is not None else catalogue())
     active_space = space if space is not None else space_from_catalogue(catalogue_entries)
     chosen = mode if mode is not None else mode_from_history(rounds, source=source)
@@ -419,35 +445,62 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
     label = "" if not source else " on %s" % source
 
     if chosen.name != "expand":
-        return Proposal(chosen.name, chosen.reason, catalogue_entries, active_space, source or "")
+        return _from_catalogue(chosen.name, chosen.reason, catalogue_entries, active_space,
+                               source or "", deployed)
 
     seeds = _accepted_measurements(rounds, source=source)
     if not seeds:
         # Nothing has ever been accepted, so there is no measured point to search around; the catalogue
         # is still the only source of claims. Saying so is better than generating neighbours of values
         # that have never moved anything.
-        return Proposal(
+        return _from_catalogue(
             "catalogue",
             "%s — but no change has ever been accepted%s, so there is no measured magnitude to search "
             "around and the catalogue stays the source" % (chosen.reason, label),
-            catalogue_entries, active_space, source or "",
-        )
+            catalogue_entries, active_space, source or "", deployed)
 
     known = {tuple(candidate.changes()) for candidate in catalogue_entries}
     generated: List[Candidate] = []
+    already = 0
     for seed in seeds:
         for candidate in neighbours(seed, active_space):
             if tuple(candidate.changes()) in known:
                 continue
             known.add(tuple(candidate.changes()))
+            if _is_deployed(candidate, deployed):
+                already += 1
+                continue
             generated.append(candidate)
     if not generated:
-        return Proposal(
-            "catalogue",
+        exhausted = (
+            "%s — but every neighbour describes the configuration already in force (%d of them), so "
+            "measuring them would compare the baseline with itself" % (chosen.reason, already)
+            if already else
             "%s — but the space around the accepted values is exhausted (no neighbour inside the "
-            "declared intervals), so the catalogue stays the source" % chosen.reason,
-            catalogue_entries, active_space, source or "")
-    return Proposal(chosen.name, chosen.reason, generated[:cap], active_space, source or "")
+            "declared intervals), so the catalogue stays the source" % chosen.reason
+        )
+        fallback = _from_catalogue("catalogue", exhausted, catalogue_entries, active_space,
+                                   source or "", deployed)
+        fallback.deployed += already
+        return fallback
+    return Proposal(chosen.name, chosen.reason, generated[:cap], active_space, source or "",
+                    deployed=already)
+
+
+def _from_catalogue(mode: str, reason: str, entries: Sequence[Candidate], space: ProposalSpace,
+                    source: str, deployed: Optional[Mapping[str, Mapping[str, Any]]]) -> Proposal:
+    """The catalogue, minus the entries that already describe what is running.
+
+    A catalogue entry can be the deployment too — once `reuse-300` is accepted it is both a hand-written
+    hypothesis and the configuration in force, and measuring it again would compare the baseline with
+    itself. The count is reported so a round that proposes nothing says why.
+    """
+    kept = [candidate for candidate in entries if not _is_deployed(candidate, deployed)]
+    dropped = len(entries) - len(kept)
+    if not kept and dropped:
+        reason = ("%s — but every catalogue entry describes the configuration already in force (%d of "
+                  "them), so this round has nothing to measure" % (reason, dropped))
+    return Proposal(mode, reason, kept, space, source, deployed=dropped)
 
 
 def _wrap(text: str, width: int) -> List[str]:
@@ -473,6 +526,9 @@ def describe_proposal(proposal: Proposal) -> List[str]:
         "proposal        mode=%s  space=%s  %d candidate(s)"
         % (proposal.mode, proposal.space_fingerprint, len(proposal.candidates)),
     ]
+    if proposal.deployed:
+        lines.append("                %d neighbour(s) dropped: they describe the configuration already in "
+                     "force" % proposal.deployed)
     for reason_line in _wrap("why             " + proposal.reason, 96):
         lines.append(reason_line)
     for candidate in proposal.candidates:
@@ -491,6 +547,10 @@ def format_proposal(proposal: Proposal) -> str:
         "reason %s" % proposal.reason,
         "",
     ]
+    if proposal.deployed:
+        lines.append("%d neighbour(s) were dropped because they describe the configuration already in force"
+                     % proposal.deployed)
+        lines.append("")
     if not proposal.candidates:
         lines.append("no candidate was proposed")
         return "\n".join(lines)

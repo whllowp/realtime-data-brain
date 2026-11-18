@@ -65,9 +65,12 @@ from .promote import (
     apply_promotion,
     claim_check,
     current_state,
+    domain_slug,
     format_promotions,
     in_force_overrides,
+    legacy_state_note,
     load_promotions,
+    promotions_for_domain,
     revert_promotion,
     version_label,
     write_verification,
@@ -341,7 +344,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 return 2
         else:
             source = "demo"
-        proposal = propose(rounds, mode=mode, source=source)
+        # The dry run reports what the real round would measure, so it needs the same deployment baseline:
+        # a neighbour that describes the configuration in force is a round spent comparing the baseline
+        # with itself, and the dry run is where that is cheapest to notice.
+        try:
+            deployed, _sources, _refused, _unknown = in_force_overrides(root, settings, domain=source)
+        except (OSError, ValueError):
+            deployed = {}
+        proposal = propose(rounds, mode=mode, source=source, deployed=deployed)
         if args.catalogue:
             proposal = Proposal(
                 "catalogue",
@@ -392,15 +402,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
 
     if args.verify:
         wanted = int(getattr(args, "verify_version", 0) or 0)
-        promotions = [item for item in load_promotions(root)
+        settings, streams, source, _overrides = _evolve_streams(args, settings)
+        domain = source
+        # A promise is a statement about one dataset (boundary 33), so a stream only re-checks the
+        # versions recorded on it: re-measuring another domain's patch here would grade a claim against
+        # data it never described.
+        promotions = [item for item in promotions_for_domain(load_promotions(root), domain)
                       if item.pending and (not wanted or item.version == wanted)]
         if not promotions:
-            _print("no unverified promotions: every version file has already been re-checked.")
+            _print("no unverified promotions for %s: every version recorded on it has been re-checked."
+                   % domain_slug(domain))
             return 0
-        settings, streams, source, _overrides = _evolve_streams(args, settings)
         rules = EvolveRules(min_gain=args.min_gain)
         pool = build_pool(settings, streams)
-        _print("verifying %d promotion(s) on %s" % (len(promotions), source))
+        _print("verifying %d promotion(s) from %s on %s"
+               % (len(promotions), domain_slug(domain), source))
         for promotion in promotions:
             if promotion.candidate is None:
                 write_verification(root, promotion, {
@@ -417,16 +433,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             if verdict == FAILED:
                 # The promise stopped paying out, so the configuration stops being the deployed one.
                 # The file is kept, because a retracted claim is part of the record, not a hole in it.
-                revert_promotion(root, promotion)
+                revert_promotion(root, promotion, domain=domain)
                 write_verification(root, promotion, payload, reverted_at=_stamp())
                 _print("  v%03d  %s  FAILED and reverted: %s" % (promotion.version,
                                                                  promotion.change, reason))
             else:
                 write_verification(root, promotion, payload)
-                apply_promotion(root, promotion)
+                apply_promotion(root, promotion, domain=domain)
                 _print("  v%03d  %s  %s" % (promotion.version, promotion.change, verdict))
         _print("")
-        _print(format_promotions(load_promotions(root), current_state(root)))
+        _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain))
         return 0
 
     settings, streams, source, base_overrides = _evolve_streams(args, settings)
@@ -434,15 +450,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # The baseline is the deployment, not the factory default. `load_settings()` is what the code ships
     # with; `current.json` is what is running. Round 20 accepted a patch whose shipped form was worse than
     # the configuration already in force, which is a statement about the baseline, not about the patch.
+    domain = source
+    deployed: Dict[str, Dict[str, Any]] = {}
     if not args.from_default:
-        in_force, sources, refused, unknown = in_force_overrides(root, settings)
+        in_force, sources, refused, unknown = in_force_overrides(root, settings, domain=domain)
+        deployed = in_force
         if in_force:
             settings = apply_overrides(settings, in_force)
             names = sorted(ENV_VARS.get((section, key), "%s.%s" % (section, key))
                            for section, values in in_force.items() for key in values)
-            _print("in force        %s  (%d variable(s) from the deployment state)"
+            _print("in force        %s  (%d variable(s) from the deployment state for %s)"
                    % (", ".join(sorted({version_label(sources.get(name)) for name in names})),
-                      len(names)))
+                      len(names), domain_slug(domain)))
             for name in names:
                 pair = next((pair for pair, env in ENV_VARS.items() if env == name), None)
                 value = in_force[pair[0]][pair[1]] if pair else "?"
@@ -457,7 +476,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("  ! not adopted: refused %s, unknown %s" % (refused or "[]", unknown or "[]"))
             _print("")
         elif args.stream_file:
-            _print("in force        (nothing) the deployment state sets no reloadable setting")
+            _print("in force        (nothing) the deployment state for %s sets no reloadable setting"
+                   % domain_slug(domain))
+            note = legacy_state_note(root, domain)
+            if note:
+                _print("  ! %s" % note)
             _print("")
 
     known = {candidate.name: candidate for candidate in catalogue()}
@@ -481,7 +504,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if args.expand:
             mode = Mode("expand", "forced by --expand, so the bounded space is measured even though the "
                                   "ledger did not ask for it")
-        proposal = propose(history(root), mode=mode, source=source) if not args.catalogue else None
+        proposal = (propose(history(root), mode=mode, source=source, deployed=deployed)
+                    if not args.catalogue else None)
         if proposal is None:
             selected = list(known.values())
             proposal_record = {"mode": "catalogue", "reason": "forced by --catalogue",
@@ -531,9 +555,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         fresh = [promotion for promotion in load_promotions(root)
                  if str(promotion.path) in (written.get("versions") or [])]
         if len(fresh) == 1:
-            applied = apply_promotion(root, fresh[0])
-            _print("in force: %s" % ", ".join("%s=%s" % item for item in
-                                             sorted(current_state(root)["env"].items())))
+            applied = apply_promotion(root, fresh[0], domain=domain)
+            _print("in force (%s): %s" % (domain_slug(domain),
+                                        ", ".join("%s=%s" % item for item in
+                                                  sorted(current_state(root, domain)["env"].items()))))
             for line in applied.get("interactions") or []:
                 _print("  ! %s" % line)
                 _print("    that setting was measured as part of the earlier version, not this one: the")

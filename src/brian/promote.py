@@ -45,6 +45,7 @@ from .deploy import overrides_from_state
 from .evolve import Candidate, EvolveRules, Measurement
 
 CURRENT = "current.json"
+DOMAINS = "domains"
 VERSIONS = "versions"
 VERIFIED = "holds"
 FAILED = "failed"
@@ -57,6 +58,26 @@ def _now() -> str:
 
 def _evolve_dir(root: Path) -> Path:
     return root / "var" / "evolve"
+
+
+def domain_slug(source: str) -> str:
+    """A directory-safe name for a stream source (``RCAEval RE1-OB`` -> ``rcaeval-re1-ob``).
+
+    The deployment state has to be per stream: round 21 adopted the global file on both domains and the
+    RCAEval bar (0.87) arrived on SMD, where the engine's answers sit in 0.33 — one domain's calibration
+    governing another is not a baseline, it is a bug with provenance.
+    """
+    text = "".join(character if character.isalnum() else "-" for character in (source or "")).strip("-")
+    while "--" in text:
+        text = text.replace("--", "-")
+    return text.lower() or "default"
+
+
+def state_path(root: Path, domain: Optional[str] = None) -> Path:
+    """Where the in-force configuration for `domain` lives (``None`` = the pre-round-21 global file)."""
+    if not domain:
+        return _evolve_dir(root) / CURRENT
+    return _evolve_dir(root) / DOMAINS / domain_slug(domain) / CURRENT
 
 
 @dataclass
@@ -204,8 +225,9 @@ def write_verification(root: Path, promotion: Promotion, payload: Mapping[str, A
         promotion.reverted_at = reverted_at
 
 
-def current_state(root: Path) -> Dict[str, Any]:
-    path = _evolve_dir(root) / CURRENT
+def current_state(root: Path, domain: Optional[str] = None) -> Dict[str, Any]:
+    """The configuration in force. `domain` selects a stream's own file; `None` reads the legacy global one."""
+    path = state_path(root, domain)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -219,19 +241,54 @@ def current_state(root: Path) -> Dict[str, Any]:
     }
 
 
-def _write_state(root: Path, state: Mapping[str, Any]) -> Path:
-    directory = _evolve_dir(root)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / CURRENT
+def _write_state(root: Path, state: Mapping[str, Any], domain: Optional[str] = None) -> Path:
+    path = state_path(root, domain)
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"env": dict(state.get("env") or {}),
                "sources": dict(state.get("sources") or {}),
                "updated_at": _now()}
+    if domain:
+        payload["domain"] = domain_slug(domain)
+        payload["source"] = domain
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
 
 
-def in_force_overrides(root: Path, settings: Settings) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str],
-                                                               List[str], List[str]]:
+def promotions_for_domain(promotions: List[Promotion], domain: Optional[str] = None) -> List[Promotion]:
+    """The versions recorded on one stream. A promise is a statement about a dataset (boundary 33)."""
+    if not domain:
+        return list(promotions)
+    slug = domain_slug(domain)
+    return [promotion for promotion in promotions
+            if domain_slug(str(promotion.stream.get("source") or "")) in ("", slug)]
+
+
+def legacy_state_note(root: Path, domain: Optional[str]) -> Optional[str]:
+    """A sentence when a global state exists but is not adopted for `domain`, else None.
+
+    Silence here would be the round-21 bug with a nicer directory layout: the operator would see an empty
+    "in force" line and assume nothing is deployed, while a global file sits one level up claiming to be.
+    """
+    if not domain:
+        return None
+    if current_state(root, domain).get("env"):
+        return None
+    global_state = current_state(root)
+    if not global_state.get("env"):
+        return None
+    known = {version_label(str(promotion.version)): str(promotion.stream.get("source") or "another stream")
+             for promotion in load_promotions(root)}
+    owners = sorted({known.get(version_label(source), "another stream")
+                     for source in global_state.get("sources", {}).values()})
+    versions = ", ".join(combined_versions(global_state))
+    return ("the global state (%s, measured on %s) is not adopted for %s: a setting measured on one "
+            "stream is not a starting point on another" % (versions or "?", ", ".join(owners) or "?",
+                                                           domain_slug(domain)))
+
+
+def in_force_overrides(root: Path, settings: Settings,
+                       domain: Optional[str] = None) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str],
+                                                            List[str], List[str]]:
     """The overrides a round must adopt so its baseline is the deployment, not the factory default.
 
     ``load_settings()`` is what the code ships with; ``var/evolve/current.json`` is what the deployment is
@@ -246,7 +303,7 @@ def in_force_overrides(root: Path, settings: Settings) -> Tuple[Dict[str, Dict[s
     filtered to the variables that were actually adopted, because a refused setting is not in the baseline
     and labelling it would describe a configuration that is not running.
     """
-    state = current_state(root)
+    state = current_state(root, domain)
     overrides, refused, unknown = overrides_from_state(state, settings)
     adopted = {ENV_VARS[(section, field)]
                for section, values in overrides.items()
@@ -256,7 +313,8 @@ def in_force_overrides(root: Path, settings: Settings) -> Tuple[Dict[str, Dict[s
     return overrides, sources, refused, unknown
 
 
-def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = True) -> Dict[str, Any]:
+def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = True,
+                    domain: Optional[str] = None) -> Dict[str, Any]:
     """Merge one version's assignments into the deployment state, recording where each came from.
 
     A lower version never takes a variable away from a higher one. Verifying an old version is a normal
@@ -272,7 +330,7 @@ def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = T
     patches each measured against the baseline is not a configuration anyone measured, and the tool has
     to say so where the operator can see it.
     """
-    state = current_state(root)
+    state = current_state(root, domain)
     env = dict(state["env"])
     sources = dict(state["sources"])
     applied: List[str] = []
@@ -285,7 +343,7 @@ def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = T
         env[name] = value
         sources[name] = str(promotion.version)
         applied.append(name)
-    _write_state(root, {"env": env, "sources": sources})
+    _write_state(root, {"env": env, "sources": sources}, domain)
     return {
         "applied": applied,
         "superseded": superseded,
@@ -346,14 +404,15 @@ def version_label(source: Optional[str]) -> str:
     return _version_label(source)
 
 
-def revert_promotion(root: Path, promotion: Promotion) -> Path:
+def revert_promotion(root: Path, promotion: Promotion,
+                     domain: Optional[str] = None) -> Path:
     """Remove exactly the variables this version put in force, restoring an earlier source if there is one.
 
     The earlier value comes from the version file that *is* still the source of that variable; when the
     source is this same version there is nothing behind it and the variable is simply removed. Neither
     branch invents a value, which is the only property a rollback has to have.
     """
-    state = current_state(root)
+    state = current_state(root, domain)
     env = dict(state["env"])
     sources = dict(state["sources"])
     others = {item.version: item for item in load_promotions(root) if item.version != promotion.version}
@@ -369,7 +428,7 @@ def revert_promotion(root: Path, promotion: Promotion) -> Path:
             sources.pop(name, None)
         else:
             sources[name], env[name] = previous
-    return _write_state(root, {"env": env, "sources": sources})
+    return _write_state(root, {"env": env, "sources": sources}, domain)
 
 
 def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules
@@ -402,12 +461,15 @@ def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules
                          measurement.tokens_per_report or 0.0, claim.tokens_per_report or 0.0))
 
 
-def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, Any]] = None
-                      ) -> str:
+def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, Any]] = None,
+                      domain: Optional[str] = None) -> str:
     lines: List[str] = []
     lines.append("=" * 96)
     lines.append("brian evolve - versions in force and whether their claims still hold")
     lines.append("=" * 96)
+    if domain:
+        lines.append("domain           %s  (%s)" % (domain_slug(domain), domain))
+        lines.append("")
     if not promotions:
         lines.append("no version files yet: run a round with --apply to record one.")
         return "\n".join(lines)

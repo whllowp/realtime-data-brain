@@ -1182,6 +1182,52 @@ deviation-bar-free      0.860   0.000     1703       352     100% reject
 
 ---
 
+### 3.29 每个域一份状态，循环不再测量自己的基线
+
+3.28 节留下一条读数：同一个 `var/evolve/current.json` 里，RCAEval 为服务域选的 `anomaly_probability=0.87` 被原样带到 SMD，而 SMD 的流文件声明 0.33 —— 两条设置不可能同时为真，工具只能把冲突打印出来。这一轮把状态按域拆开：
+
+* `state_path(root, domain)`：`var/evolve/domains/<slug>/current.json`，`domain_slug("RCAEval RE1-OB")` 是 `rcaeval-re1-ob`。老的全局文件保留，但循环不再读它；若某个域没有自己的状态而全局文件有，`legacy_state_note` 会打印一句
+  `the global state (v019, measured on RCAEval RE1-OB) is not adopted for smd: a setting measured on one stream is not a starting point on another`。
+* 播种（`var/seed_domains.py`）：`smd <- v013`（`auto` / 100 / 0.85），`rcaeval-re1-ob <- v019`（`deviation` / 0.87 / 0.87）。每个域用的都是它自己那一轮接受的版本。
+* `--verify` 也按域过滤（`promotions_for_domain`）：一条承诺是关于一个数据集的（边界 33），拿 SMD 的承诺去 RCAEval 上复核，量的是别人的账。
+
+第二个缺陷是本轮自己撞上的。在役状态是 `v013`（`auto` / `window=100` / `rank=0.85`），账本里"已接受的量级"里当然就有 100 和 0.85，于是生成器把 `host-rolling-rank-0-85` 提了出来 —— 那正好就是在役配置。`--propose` 的干跑把它列成一个候选，读起来像"循环认为这个配置还值得再测一次"。
+
+现在的规则是：**提议器知道在役配置，并把描述它的候选丢掉**。
+
+```
+1 neighbour(s) were dropped because they describe the configuration already in force
+```
+
+`propose(..., deployed=...)` 收的是和 `apply_overrides` 同形的 `{section: {field: value}}`；`_is_deployed` 只在**全部**设置都等于在役值时才丢弃（一个只改了两项中一项的候选仍是新配置）。目录条目走同一过滤器：`reuse-300` 一旦被接受，它既是手写假设又是部署，重测它等于拿基线和自己比。
+
+本轮在 SMD 上的表格（948 窗，828 计分，134 异常；9 个候选里 1 个因"已是在役"被丢）：
+
+```
+candidate                    recall@b   fpr@b  tok/rep   tok/inc  verdict
+baseline                        0.224   0.091     3355     17973  -
+host-rolling-rank-25            0.157   0.088     3352     17983  reject
+host-rolling-rank-50-0-95       0.187   0.079     3351      8899  reject
+host-rolling-rank-50-0-85       0.187   0.079     3354     20507  reject
+host-rolling-rank-50-0-8        0.187   0.079     3353     25536  reject
+host-rolling-rank-0-85-200      0.507   0.091     3358      7419  accept
+host-rolling-rank-0-8           0.224   0.091     3354     21875  reject
+host-rolling-rank-0-95          0.224   0.091     3357      7916  reject
+host-rolling-rank-0-75          0.224   0.091     3354     24994  reject
+```
+
+三条读数：
+
+1. **K=200 是这一轮真正的旋钮。** 预算内召回 0.224 → 0.507（2.26 倍），每故障 token 17973 → 7419，无标签召回 0.209 → 0.284 且误报率 0.086 → 0.066。同侧的邻居（K=50，三个门限）全部落在 0.187，说明"更长历史"是方向而不是噪声；K=25 更差（0.157）。
+2. **门限方向不能靠直觉。** `-0-8` 与 `-0-75` 在预算内召回不动（0.224），被判"成本没降、召回没涨"；`-0-95` 反而把告警缩到 shipped 0.127，被 `operational` 挡住（39% 短缺，超过 10% 容差）。三个邻居各自失败在不同的原因上——这正是表格要分开三列的理由。
+3. **第三列的诚实性。** `engine` 一列这轮读到 0.833 / 0.562，而第 11 轮在同一个函数名下读到 0.517 / 0.299。差别不在模型，在配置：`scoring=auto` 已经把主机文本交给确定性读者，所以第三列现在量的是"配置指派的裁决者"。列名是历史包袱，读数必须配着在役配置看（边界 51）。
+
+`v020` 因此写入并自动生效（单接受）：
+
+```
+export BRIAN_DIGEST_SCORING=auto; BRIAN_DIGEST_ROLLING_WINDOW=200; BRIAN_GATE_RANK_P=0.85
+```
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -1266,6 +1312,12 @@ missing for the next level
 
 48. **一份全局部署状态服务不了两个域。** 3.28 节的冲突行是证据：RCAEval 的流文件声明 `anomaly_probability=0.26`（引擎答案落在 0.24–0.28），而在役状态为 SMD 选的 0.87 被原样带进来，两条设置不可能同时为真，工具只能把冲突打印出来。这不是 `--from-default` 能解决的——那只是逃回出厂默认。真正的解法是让状态按域（或按 `stream.source`）分文件，`--verify` 也要相应地只复核它所属域的承诺；本仓库还没有这一步，所以现在**跨域跑循环得到的是"某个域的配置在另一个域上怎样"，不是"这个域应当配置成什么"**。
 
+49. **"在役"现在带一个限定词：哪个域。** 状态按 `stream.source` 分文件之后，`--verify` 不给流文件就无从复核，`current_state(root)` 的默认值仍是老的全局文件、只是没人读它。因此"这个配置在役"这句话，必须能回答"在哪个域上"；跨域引用一条版本号，等价于引用一份别的数据集的承诺。
+
+50. **提议器能生成自己的基线。** 3.29 节的过滤器是"完全匹配"：一个只有一半设置与在役相同的邻居仍会被测一轮，目录里的绝对值也可能正好等于部署。把 `deployed` 传进去只是让循环不重复已知答案，不等于让每一轮都有信息量——后者取决于候选目录本身还剩多少未测的机制。
+
+51. **第三列量的是"配置指派的裁决者"，不是模型。** `scoring=auto` + 主机流时，`state ceiling` 的 `engine` 列读的是确定性读者的输出（3.29 节 0.833），与第 11 轮 `scoring=model` 下的 0.517 不可比。把两轮的这个数字放在一张表里比较，就是在比较两个不同的裁决者；列名没有改，是为了不假装历史读数可以重算。
+
 ---
 
 ## 6. 下一步（按验证强度排序）
@@ -1284,3 +1336,5 @@ missing for the next level
 10. **（3.27 已完成）无标签门限进了表格，也进了判定。** `brian evolve --calibrate-bar` 用读者自己的分数分布给出 2/5/10% 告警率对应的门限；每一轮现在同时打印 `recall@b`（拟合上限）与 `label-free cut`（可部署形态），`Measurement.recall_at_free_cut` 让 `beats_own_cut`/`own_cut_shortfall` 拿可部署的参照去判"是否倒退"。同一批数据上 0.860 → 0.226，说明 12.6 倍里约 74% 是偷看答案。剩下的路：把"告警率预算"与"误报率预算"分开建模（现在 `fpr_budget` 一个数字同时被两种门限使用，边界 45），以及给每条记录单独标定告警率（现在的分位是按记录算的，但预算仍是全局一个）。
 
 11. **（3.28 已完成）循环的基线现在是在役配置，而上一轮的接受因此翻案。** `cmd_evolve` 先读 `var/evolve/current.json`，按 reloadable 字段采纳它、把"进程拿不到/这个版本不认识"的设置分别打成 `refused`/`unknown`，并在与流文件自带的域基线冲突时打印 `!`。结果是第 20 轮接受的 `deviation-bar-free` 在它自己的域上被判为"不改进"——基线已经是同一台读者，预算内召回与可部署召回两边都一样，差别只剩一个在预算列里不可见的门限。这一轮同时修掉 `alerts/1k` 这个标签错误（它算的是每千窗误报，不是告警），并留下边界 47（基线移动使轮次不可比）与 48（一份全局状态服务不了两个域）。剩下的路：**让状态按域分文件**（`current.json` → `<source>/current.json`，`--verify` 只复核所属域的承诺），以及把"每故障 token"从质量路径里放出来，让它在成本路径上也能单独成为接受理由（本轮的 `tok/inc` 1341 → 352 就因为召回没涨而被忽略）。
+
+12. **（3.29 已完成）状态按域分开，提议器不再测量自己的基线。** `var/evolve/domains/<slug>/current.json` + `domain_slug` + `promotions_for_domain` 让"在役"有了域限定词；`--propose` 与真正的轮次都会把"描述在役配置"的候选丢掉并计数。本轮在 SMD 上接受了 `host-rolling-rank-0-85-200`：预算内召回 0.224 → 0.507，每故障 token 17973 → 7419，无标签召回 0.209 → 0.284。剩下的路：**给每个域一份自己的候选目录**（现在目录只服务主机形态，服务域的那四个渲染候选全是"no change"），**把告警率预算与误报率预算分开建模**（边界 45），以及**让每故障 token 在成本路径上也能单独成为接受理由**——本轮的 1341 → 352 就是因为召回没动而被忽略。
