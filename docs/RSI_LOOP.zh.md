@@ -4150,6 +4150,54 @@ were judged under, and none of them can be re-run" 把两件事压成了一件�
 "退役"退进的是错误的证据。**
 
 
+## 3.81 能付的欠账要说出命令：排空时它也自动跟上
+
+第 73 轮让队列够得着"命了文件、没记上限"的那一族，但页面上那句话仍然只是一个诊断：它说"重跑会把欠账清掉"，
+却没说**跑什么**。与此同时 `--with-ceilings` 只有在读文档的人想起来的时候才会被敲 —— 一个要靠记得的开关，
+等于一个默认关闭的开关。
+
+这一轮做两件事：把那句话补成命令，并把"排空"定义成"付掉所有能付的"。
+
+```
+$ brian evolve --campaign --rerun-limit 0
+ceiling debt      2 of 2 round(s) do not record the ceilings they were judged under; re-running 1 of them would
+                  leave 1 without one, so the default --max-limit-drift cap stays a warning; 1 of them name their
+                  file, so --with-ceilings can re-measure them; measure them with brian evolve --rerun-unrecorded
+                  --with-ceilings --rerun-limit 0
+
+$ brian evolve --rerun-unrecorded --rerun-limit 0            （排空，不带任何 --with-ceilings）
+ceilings          1 round(s) name their file and never recorded their ceilings; re-measuring them here (a drain pays this family too)
+---- re-running round-payable.json on data/smd/stream-one.json
+recorded round var\evolve\round-20261118T062253Z.json
+retired round-payable.json (re-measured as round-20261118T062253Z.json)
+---- re-running round-named.json on data/smd/stream-one.json
+recorded round var\evolve\round-20261118T062253Z-2.json
+retired round-named.json (re-measured as round-20261118T062253Z-2.json)
+  ceilings         the successor records the ceilings it was judged under
+ceilings          1 of 1 re-measured with their ceilings; 0 still without
+drained           2 round(s) retired in this invocation; 0 still in the queue; the unrecorded share 50% -> 0%
+paid              SMD x2
+```
+
+规则是一句话：**排空（`--rerun-limit 0`）付掉所有能付的；单步（默认 1 轮）只付一族。** 单步不自动跟上，
+是因为默认值一旦悄悄把自己花的时间翻倍，第 114 条边界（"花钱的命令默认只花一次"）就成了空话；
+`--with-ceilings` 可以显式打开它，`--without-ceilings` 可以显式关掉它（排空时）。
+
+### 运行才暴露的两个缺陷
+
+**一、两个数被加成了一个数。** 第 73 轮把 `ceiling_named` 加进了 `ceiling_payable`（闸门需要一个"总共能付多少"），
+然后又把这两个数分别传给页面 —— 而格式化函数里 `named = min(named, missing - payable)`，`payable` 已经含了它，
+于是 `named` 被夹成 0：页面永远说不出"其中 N 条命了文件"。两个含义不同的数不能交给同一个参数。修法是分开：
+`ceiling_file_payable` 给页面，`ceiling_payable`（并集）给闸门。
+
+**二、排空总结少算了一条。** 第一次排空实际退役了 2 条轮，却打印 `drained 1 round(s) retired` 和 `paid SMD x1`
+—— 计数只在"文件族"循环里加。同一份输出里"清掉了什么"和"还剩什么"必须回答同一个问题（边界 98 在一行之下）。
+
+**边界 158：一句"这条欠账能付"必须带上付款命令；读者被告知会被收钱、却没被告知敲什么，拿到的还是诊断。**
+
+**边界 159：排空意味着"付掉所有能付的"，单步意味着"付一族"；默认值的花费不许随着族数悄悄翻倍。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4434,5 +4482,5 @@ missing for the next level
     同形：可付才收）。
 59. （3.79 已完成）把上限欠账做成可收费的一行。
 
-61. 把 `--campaign` 的 `ceiling debt` 行也做成命令形状的句子（像 `measure next`、`budget` 那样），
-并让 `--with-ceilings` 在"每个命了文件的轮都记了上限"之后成为默认。
+62. 让 `--history` 的 `ceiling debt` 行也带上命令（现在只有 `--campaign` 带），并把"排空会开出两族"
+写进 `budget` 那句话里 —— 预算说的是钱，族数说的是另一个维度。

@@ -3287,13 +3287,17 @@ def ceiling_shortfall(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
 
 
 def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0,
-                             named: int = 0) -> Optional[str]:
+                             named: int = 0, command: Optional[str] = None) -> Optional[str]:
     """One sentence about the rounds that do not record their ceilings, and whether a command could change it.
 
     The number is only worth printing when it can move: `payable` is how many of the missing rounds the re-run
     queue could measure again, and each such round writes a new record that carries its ceilings. When the
     remainder is zero the default `--max-limit-drift` cap would arm by itself, which is the sentence a reader
     needs to decide whether to start the queue at all (item 57's leftover, boundary 151).
+
+    Round 74: when a command can lower the debt the sentence ends by naming it. A reader told "this would arm
+    the gate" and not told what to type has a diagnosis instead of a next step (round 59's lesson, applied to
+    the part of the debt that is still missing rather than to the queue's order).
     """
     missing = sum(int(row.get("missing") or 0) for row in rows)
     total = sum(int(row.get("rounds") or 0) for row in rows)
@@ -3303,19 +3307,25 @@ def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0
     payable = max(0, min(int(payable), missing))
     named = max(0, min(int(named), missing - payable))
     # Round 73: a round that named its file is one the queue could not reach before (`_unrecorded_matters` lists
-    # only rounds whose *file* is unknown), so it was counted as unparyable and the sentence said so. The queue
+    # only rounds whose *file* is unknown), so it was counted as unpayable and the sentence said so. The queue
     # now has a path for it, and the sentence names how many of the remainder became reachable.
     reachable = "; %d of them name their file, so --with-ceilings can re-measure them" % named if named else ""
     if not payable:
         if named:
-            return text + ", and none of them can be re-run from the record as it stands" + reachable
-        return text + ", and none of them can be re-run, so the default --max-limit-drift cap stays a warning"
-    left = missing - payable
-    if not left:
-        return (text + "; re-running %d of them would leave none, so the default --max-limit-drift cap "
-                        "would arm%s" % (payable, reachable))
-    return (text + "; re-running %d of them would leave %d without one, so the default --max-limit-drift cap "
-                    "stays a warning%s" % (payable, left, reachable))
+            body = text + ", and none of them can be re-run from the record as it stands" + reachable
+        else:
+            body = text + ", and none of them can be re-run, so the default --max-limit-drift cap stays a warning"
+    else:
+        left = missing - payable
+        if not left:
+            body = (text + "; re-running %d of them would leave none, so the default --max-limit-drift cap "
+                           "would arm%s" % (payable, reachable))
+        else:
+            body = (text + "; re-running %d of them would leave %d without one, so the default --max-limit-drift "
+                           "cap stays a warning%s" % (payable, left, reachable))
+    if command and (payable or named):
+        body += "; measure them with %s" % command
+    return body
 
 
 def format_audit(result: Audit) -> str:

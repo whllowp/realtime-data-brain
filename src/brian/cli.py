@@ -1003,6 +1003,35 @@ def _round_minutes_by_domain(root: Path) -> Dict[str, float]:
     return {domain: _median(values) for domain, values in _timed_lengths(root).items()}
 
 
+def _wants_ceilings(args) -> bool:
+    """Whether this queue run re-measures the named ceiling debt (round 74).
+
+    A drain (`--rerun-limit 0`) pays everything payable, so it pays this family too; a single step measures one
+    round of one family, because a step that silently doubled its own cost would break the promise boundary 114
+    makes about the default. `--with-ceilings` overrides the step rule, `--without-ceilings` the drain rule.
+    """
+    if getattr(args, "without_ceilings", False):
+        return False
+    if getattr(args, "with_ceilings", False):
+        return True
+    return int(getattr(args, "rerun_limit", 1) or 0) <= 0
+
+
+def _ceiling_command(payable: int, named: int) -> Optional[str]:
+    """The command that lowers the ceiling debt, or None when no command can (round 74).
+
+    Two families, two commands: a round whose *file* is unknown is paid by the plain queue, a round that named
+    its file needs `--with-ceilings`. The sentence on the page names one command, so it names the one that pays
+    the family which actually owes something -- and names nothing when both counts are zero, because a command
+    that would measure nothing is not a next step (round 59's lesson about true next steps).
+    """
+    if int(named) > 0:
+        return "brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0"
+    if int(payable) > 0:
+        return "brian evolve --rerun-unrecorded --rerun-limit 0"
+    return None
+
+
 def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
     """What one invocation of the queue would spend and what it would leave behind (round 60, cost in round 61).
 
@@ -1402,6 +1431,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         ceiling_named = len(_ceiling_matters(root))
     except OSError:
         ceiling_named = 0
+    # Round 74: two numbers that mean different things must not be handed to the same parameter. `ceiling_payable`
+    # is the gate's count (both families, because both can now be paid), while the page's sentence distinguishes
+    # "the queue reaches it as it stands" from "it needs --with-ceilings"; adding them first made the second
+    # clause vanish (named was clamped to missing - payable == 0).
+    ceiling_file_payable = ceiling_payable
     ceiling_payable += ceiling_named
 
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
@@ -1584,7 +1618,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # re-measured it -- the gate's payable count said so correctly and the debt was unpayable. The file in
         # the record is all the queue needs.
         named_pending = _ceiling_matters(root)
-        ceiling_ready = named_pending if getattr(args, "with_ceilings", False) else []
+        drain = int(getattr(args, "rerun_limit", 1) or 0) <= 0
+        ceiling_ready = named_pending if _wants_ceilings(args) else []
         ceiling_limit = _rerun_limit(args, len(ceiling_ready))
         budget = _queue_budget(root, limit=limit)
         _print("budget            %s" % budget_text(budget))
@@ -1600,7 +1635,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("stops             at the first round that cannot be re-run; the rest keep their place")
         if ceiling_ready:
             _print("ceilings          %d round(s) name their file and never recorded their ceilings; "
-                   "re-measuring them here" % len(ceiling_ready))
+                   "re-measuring them here%s" % (len(ceiling_ready),
+                                                 " (a drain pays this family too)" if drain else ""))
         elif named_pending:
             _print("ceilings          %d round(s) name their file and never recorded their ceilings; "
                    "add --with-ceilings to re-measure them" % len(named_pending))
@@ -1715,6 +1751,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 break
             if paid:
                 paid_ceilings += 1
+                # Round 74: the drain summary below counts what this command spent. A family it pays silently
+                # would make "1 round(s) retired" describe a two-round drain -- the same defect boundary 98
+                # names, one line lower.
+                paid_now += 1
+                paid_domains[domain] = paid_domains.get(domain, 0) + 1
         if ceiling_ready:
             still = len(_ceiling_matters(root))
             _print("")
@@ -1903,8 +1944,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         budget = _queue_budget(root, limit=budget_limit)
         # Round 71/72: the shortfall and the queue's reach were computed once before the branches, so the page
         # and the gate cannot disagree about how many rounds lack ceilings or how many of them a re-run pays.
-        ceiling_note = format_ceiling_shortfall(ceiling_rows, payable=ceiling_payable,
-                                                named=ceiling_named)
+        # Round 74: the sentence names the command that lowers the debt, and it keeps the two families apart.
+        ceiling_note = format_ceiling_shortfall(ceiling_rows, payable=ceiling_file_payable,
+                                                named=ceiling_named,
+                                                command=_ceiling_command(ceiling_file_payable, ceiling_named))
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
@@ -3634,7 +3677,11 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--with-ceilings", action="store_true",
                         help="with --rerun-unrecorded: also re-measure the rounds that named their stream file "
                              "but never recorded the wait ceilings they were judged under, so the ceiling debt "
-                             "those rounds represent can actually be paid")
+                             "those rounds represent can actually be paid "
+                             "(default: on for a drain, off for a single step)")
+    evolve.add_argument("--without-ceilings", action="store_true",
+                        help="with --rerun-unrecorded: do not re-measure the named ceiling debt even when "
+                             "draining, so a drain pays only the rounds whose stream file is unknown")
     evolve.add_argument("--apply", action="store_true",
                         help="also write a version file per accepted change "
                              "(the round itself is always recorded)")

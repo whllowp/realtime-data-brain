@@ -125,12 +125,69 @@ def test_two_rounds_in_one_second_are_two_records(tmp_path):
     assert json.loads((directory / second_name).read_text(encoding="utf-8"))["finished_at"] == second.finished_at
 
 
-def test_without_the_flag_the_queue_only_mentions_the_named_family(tmp_path, monkeypatch, capsys):
+def test_a_single_step_run_mentions_the_named_family_without_paying_it(tmp_path, monkeypatch, capsys):
+    """Round 74: a step measures one round of one family; the default must not double its own cost."""
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--rerun-unrecorded", "--rerun-limit", "1"]) == 0
+    text = capsys.readouterr().out
+    assert "1 round(s) name their file and never recorded their ceilings; add --with-ceilings" in text
+    assert not list((tmp_path / "var" / "evolve").glob("round-2026*.json"))
+
+
+def test_a_drain_pays_the_named_family_by_default(tmp_path, monkeypatch, capsys):
+    """A drain means "pay everything payable", so the second family comes with it -- and says so."""
     shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
     _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
                  stream_path="data/smd/stream-one.json")
     monkeypatch.chdir(tmp_path)
     assert cli.main(["evolve", "--rerun-unrecorded", "--rerun-limit", "0"]) == 0
     text = capsys.readouterr().out
-    assert "1 round(s) name their file and never recorded their ceilings; add --with-ceilings" in text
+    assert "re-measuring them here (a drain pays this family too)" in text
+    # The fixture keeps no candidate definitions, so the round cannot be measured here; what this test pins is
+    # that the drain reached for it at all, which is the decision the round shipped.
+    assert "---- re-running round-named.json on data/smd/stream-one.json" in text
+
+
+def test_the_drain_rule_itself():
+    from argparse import Namespace
+
+    assert cli._wants_ceilings(Namespace(rerun_limit=0)) is True
+    assert cli._wants_ceilings(Namespace(rerun_limit=1)) is False
+    assert cli._wants_ceilings(Namespace(rerun_limit=3, with_ceilings=True)) is True
+    assert cli._wants_ceilings(Namespace(rerun_limit=0, without_ceilings=True)) is False
+
+
+def test_without_ceilings_stops_a_drain_from_paying_that_family(tmp_path, monkeypatch, capsys):
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--rerun-unrecorded", "--rerun-limit", "0", "--without-ceilings"]) == 0
+    text = capsys.readouterr().out
+    assert "add --with-ceilings to re-measure them" in text
     assert not list((tmp_path / "var" / "evolve").glob("round-2026*.json"))
+
+
+def test_the_command_named_on_the_page_pays_the_family_that_owes():
+    assert cli._ceiling_command(0, 2) == "brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0"
+    assert cli._ceiling_command(3, 0) == "brian evolve --rerun-unrecorded --rerun-limit 0"
+    assert cli._ceiling_command(0, 0) is None
+
+
+def test_the_page_sentence_names_the_command_when_one_can_pay():
+    rows = [{"domain": "SMD", "rounds": 2, "missing": 2, "share": 1.0}]
+    text = format_ceiling_shortfall(rows, payable=0, named=2, command=cli._ceiling_command(0, 2))
+    assert text.endswith("measure them with brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0")
+    silent = format_ceiling_shortfall(rows, payable=0, named=0, command=cli._ceiling_command(0, 0))
+    assert "measure them with" not in silent
+
+
+def test_the_two_families_are_counted_separately_on_the_page():
+    """Round 74's defect: adding the families into one parameter made the reachable clause vanish."""
+    rows = [{"domain": "SMD", "rounds": 3, "missing": 3, "share": 1.0}]
+    text = format_ceiling_shortfall(rows, payable=1, named=2)
+    assert "re-running 1 of them would leave 2 without one" in text
+    assert "2 of them name their file" in text
