@@ -144,7 +144,13 @@ def test_numbering_continues_across_rounds(tmp_path):
     persist(tmp_path, _result(verdicts=[(CANDIDATE, _replicate()),
                                         (_candidate("host-features-4", [["digest", "host_features", "cpu_r"]]),
                                          _replicate("host-features-4"))]), write_versions=False)
+    # Round 43: the same candidate measured again is a check on its record, not a third refusal. The number
+    # counts refused candidates, so re-measuring `host-features-3` must not mint `w003`.
     persist(tmp_path, _result(verdicts=[(CANDIDATE, _replicate())]), write_versions=False)
+    assert [record.label for record in withheld_records(tmp_path)] == ["w001", "w002"]
+    # A *different* candidate still gets its own number, from where the family stopped.
+    persist(tmp_path, _result(verdicts=[(_candidate("events-8", [["llm", "context_events", 8]]),
+                                         _replicate("events-8"))]), write_versions=False)
     assert [record.label for record in withheld_records(tmp_path)] == ["w001", "w002", "w003"]
 
 
@@ -190,17 +196,23 @@ def test_an_empty_ledger_does_not_invent_a_refusal():
 
 def test_the_campaign_counts_what_was_measured_and_not_shipped(tmp_path):
     _withheld_file(tmp_path)
+    # Round 43: the second round measures the *same* candidate. It is a re-check on `w001`, so the family
+    # still holds one refusal; a second record would make the campaign count measurements, not candidates.
     persist(tmp_path, _result(verdicts=[(CANDIDATE, _replicate())]), write_versions=False)
     result = campaign(tmp_path)
-    assert result.withheld == 2
-    assert result.withheld_stale == 0
+    assert result.withheld == 1
+    # The fixture's re-measurement has the baseline's split, so no recording fell: the re-check says the
+    # objection no longer holds, and the campaign reports that rather than the old arithmetic.
+    assert result.withheld_stale == 1
+    assert withheld_records(tmp_path)[0].checks  # the re-measurement was written back
     text = format_campaign(result, rules=EvolveRules())
-    assert "withheld          2 candidate(s) were measured and refused for replication" in text
-    assert "  withheld          2 candidate(s) refused for replication" in text
+    assert "withheld          1 candidate(s) were measured and refused for replication, " \
+           "1 no longer hold at today's bar (0.050)" in text
+    assert "  withheld          1 candidate(s) refused for replication, 1 no longer hold at today's bar" in text
 
     looser = campaign(tmp_path, EvolveRules(replication_tolerance=0.20))
-    assert looser.withheld_stale == 2
-    assert "2 no longer hold at today's bar (0.200)" in format_campaign(
+    assert looser.withheld_stale == 1
+    assert "1 no longer hold at today's bar (0.200)" in format_campaign(
         looser, rules=EvolveRules(replication_tolerance=0.20))
 
 

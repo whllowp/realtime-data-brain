@@ -1283,6 +1283,11 @@ def _replication_sentence(detail: Dict[str, Any]) -> str:
                detail["before"] or 0.0, detail["after"] or 0.0))
 
 
+def replication_sentence(detail: Dict[str, Any]) -> str:
+    """Public name for the refusal sentence (round 43): the write-back path builds the same sentence."""
+    return _replication_sentence(detail)
+
+
 def _replication_loss(baseline: Measurement, trial: Measurement,
                       threshold: float) -> Optional[str]:
     """The refusal sentence for `replication_loss`, or None when the gain replicates."""
@@ -1817,9 +1822,14 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
     # Refusals are written whatever `write_versions` says: `--apply` decides whether a *change* is deployed,
     # and a refusal deploys nothing. Leaving them out of the record family would keep "why wasn't this
     # promoted" answerable only by reading one round's file (round 42).
-    refusals = _write_withheld(directory, round_path.name, result)
+    refusals = _write_withheld(root, directory, round_path.name, result)
+    # Round 43: the same call writes the other half of the family — a candidate that already had a record and
+    # was measured again gets a check appended to it. Doing it here rather than in the CLI keeps a scripted
+    # round as well documented as an interactive one.
+    checks = record_withheld_checks(root, result, result.rules, skip_round=round_path.name,
+                                    round_name=round_path.name)
     if not write_versions:
-        return {"round": str(round_path), "versions": written, "withheld": refusals}
+        return {"round": str(round_path), "versions": written, "withheld": refusals, "checks": checks}
     existing = sorted(versions.glob("v*.json"))
     version = 0
     for path in existing:
@@ -1853,7 +1863,7 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
         path = versions / ("v%03d.json" % version)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         written.append(str(path))
-    return {"round": str(round_path), "versions": written, "withheld": refusals}
+    return {"round": str(round_path), "versions": written, "withheld": refusals, "checks": checks}
 
 
 def _next_withheld_number(folder: Path) -> int:
@@ -1866,18 +1876,31 @@ def _next_withheld_number(folder: Path) -> int:
     return number
 
 
-def _write_withheld(directory: Path, round_name: str, result: RoundResult) -> List[str]:
-    """Write one record per `replicate` refusal, numbered `w###` so it cannot be read as a shipped version."""
+def _write_withheld(root: Path, directory: Path, round_name: str,
+                    result: RoundResult) -> List[str]:
+    """Write one record per `replicate` refusal, numbered `w###` so it cannot be read as a shipped version.
+
+    Round 43: a candidate that already has a record is **not** given a second one. Measuring a refused
+    candidate again is a new observation of the same objection, so it belongs in that record's `checks`
+    (written by `record_withheld_checks`); numbering it again would give "why wasn't this promoted" two
+    answers and make the family's count a count of measurements rather than of refused candidates.
+    """
     refusals = [(candidate, measurement, verdict) for candidate, measurement, verdict in result.trials
                 if verdict.rule == "replicate"]
     if not refusals:
         return []
     folder = directory / WITHHELD_DIR
     folder.mkdir(exist_ok=True)
+    # `root` is passed rather than derived: `directory.parent` is `var`, not the workspace root, because
+    # EVOLVE_DIR has two segments — the first version of this fix looked in `var/var/evolve` and found
+    # nothing, so every re-measurement still minted a new number (round 43).
+    already = {record.name for record in withheld_records(root)}
     number = _next_withheld_number(folder)
     bar = result.rules.replication_bar
     written: List[str] = []
     for candidate, measurement, verdict in refusals:
+        if candidate.name in already:
+            continue
         number += 1
         payload = Withheld(
             number=number,
@@ -1895,6 +1918,59 @@ def _write_withheld(directory: Path, round_name: str, result: RoundResult) -> Li
         path = folder / ("w%03d.json" % number)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         written.append(str(path))
+    return written
+
+
+def record_withheld_checks(root: Path, result: RoundResult, rules: EvolveRules,
+                          skip_round: Optional[str] = None,
+                          round_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Append this round's measurement of every already-refused candidate to its record (round 43).
+
+    The write-back is what turns a refusal from a memory into a fact: without it the `w###` record answers
+    "why wasn't this promoted" with a number from a round that predates the question, and the only way to
+    notice that an objection stopped holding is to read a round file nobody opens.
+
+    `skip_round` names the round whose measurements *created* the record, so a refusal is not immediately
+    filed as a re-check of itself.
+    """
+    measured = {candidate.name: (candidate, measurement, verdict)
+                for candidate, measurement, verdict in result.trials}
+    written: List[Dict[str, Any]] = []
+    for record in withheld_records(root):
+        if record.name not in measured:
+            continue
+        if skip_round and record.round == skip_round:
+            continue
+        _candidate, measurement, _verdict = measured[record.name]
+        loss = replication_loss(result.baseline, measurement, rules.replication_bar)
+        # A measurement without per-recording numbers cannot test an objection about one recording. Writing
+        # "no longer" there would claim the refusal died on evidence nobody took (boundary 72 at the level of
+        # a re-check), so the check says what it is.
+        comparable = sum(1 for value in (measurement.recall_by_recording or {}).values()
+                         if value is not None) >= 2
+        if not comparable:
+            verdict_name = "unknown"
+            reason = ("this measurement does not say how each recording did, so it cannot test an objection "
+                      "about one of them")
+        elif loss:
+            verdict_name, reason = "still", replication_sentence(loss)
+        else:
+            verdict_name = "no longer"
+            reason = ("no recording fell by more than %.3f at the %.0f%% budget, so the objection no longer "
+                      "holds" % (rules.replication_bar, 100 * rules.fpr_budget))
+        check = {
+            "checked_at": result.finished_at,
+            "stream": dict(result.stream),
+            "bar": rules.replication_bar,
+            "round": round_name or "",
+            "verdict": verdict_name,
+            "loss": dict(loss or {}),
+            "reason": reason,
+            "recall_at_budget": measurement.recall_at_budget,
+            "tokens_per_report": measurement.tokens_per_report,
+        }
+        if record_withheld_check(root, record.name, check) is not None:
+            written.append({"name": record.name, "label": record.label, "verdict": check["verdict"]})
     return written
 
 
@@ -1927,6 +2003,10 @@ class Withheld:
     measured: Dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     rule: str = "replicate"
+    # Every later measurement of the same candidate, oldest first (round 43). A refusal that is re-measured
+    # must record what the re-measurement said, or the record answers "why wasn't this promoted" with a
+    # number from a round that predates the configuration it is being asked about.
+    checks: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def domain(self) -> str:
@@ -1939,6 +2019,10 @@ class Withheld:
     @property
     def label(self) -> str:
         return "w%03d" % self.number
+
+    @property
+    def last_check(self) -> Optional[Dict[str, Any]]:
+        return dict(self.checks[-1]) if self.checks else None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -1953,6 +2037,7 @@ class Withheld:
             "measured": dict(self.measured),
             "reason": self.reason,
             "rule": self.rule,
+            "checks": [dict(check) for check in self.checks],
         }
 
     @classmethod
@@ -1970,6 +2055,7 @@ class Withheld:
             measured=dict(payload.get("measured") or {}),
             reason=str(payload.get("reason") or ""),
             rule=str(payload.get("rule") or "replicate"),
+            checks=[dict(check) for check in (payload.get("checks") or [])],
         )
 
 
@@ -1991,6 +2077,34 @@ def withheld_records(root: Path) -> List[Withheld]:
     return sorted(records, key=lambda item: item.number)
 
 
+def record_withheld_check(root: Path, name: str, check: Mapping[str, Any]) -> Optional[Path]:
+    """Append a re-measurement of `name` to the `w###` record that refused it (round 43).
+
+    Only appends when the new check differs from the previous one in what it says about the candidate
+    (`verdict`, `reason`, `loss`): re-running the same configuration on the same stream would otherwise pile
+    up identical lines, which is how "4 earlier checks" came to mean three copies (round 28). Returns the
+    path that was written, or None when there is no record for that name.
+    """
+    folder = root / EVOLVE_DIR / WITHHELD_DIR
+    for path in sorted(folder.glob("w*.json")) if folder.is_dir() else []:
+        try:
+            record = Withheld.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+        if record.name != name:
+            continue
+        previous = record.last_check or {}
+        signature = lambda item: (item.get("verdict"), item.get("reason"), json.dumps(item.get("loss") or {},
+                                                                                      sort_keys=True))
+        if previous and signature(previous) == signature(check):
+            return None
+        payload = record.to_dict()
+        payload["checks"] = list(payload.get("checks") or []) + [dict(check)]
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        return path
+    return None
+
+
 def withheld_staleness(record: Withheld, rules: EvolveRules) -> Dict[str, Any]:
     """Does the objection still hold at today's bar? Answers with the recorded numbers, not a re-measure.
 
@@ -2002,6 +2116,22 @@ def withheld_staleness(record: Withheld, rules: EvolveRules) -> Dict[str, Any]:
     """
     drop = (record.loss or {}).get("drop")
     bar = rules.replication_bar
+    # A re-measurement outranks the arithmetic on the record: it is a fresh measurement of the same
+    # candidate at a bar that was recorded with it, and saying otherwise would prefer an old subtraction to
+    # a new observation (round 43).
+    last = record.last_check or {}
+    if last:
+        verdict = str(last.get("verdict") or "")
+        if verdict == "no longer":
+            return {"still": False, "comparable": True,
+                    "note": "re-measured %s: %s" % (str(last.get("checked_at") or "?")[:10],
+                                                    last.get("reason") or "the objection no longer holds")}
+        if verdict == "still":
+            return {"still": True, "comparable": True,
+                    "note": "re-measured %s: %s" % (str(last.get("checked_at") or "?")[:10],
+                                                    last.get("reason") or "the objection still holds")}
+        # `unknown` falls through to the recorded arithmetic: a re-check that could not test the objection
+        # leaves the objection exactly where it was.
     if drop is None:
         return {"still": True, "comparable": False, "note": "the record does not say how much was lost, so "
                                                            "this objection cannot be checked"}
@@ -2035,6 +2165,12 @@ def format_withheld(records: Sequence[Withheld], rules: Optional[EvolveRules] = 
         return "\n".join(lines)
     stale = [record for record in records if not withheld_staleness(record, active)["still"]]
     lines.append("no longer hold    %d of them would not be refused at today's bar" % len(stale))
+    if any(record.checks for record in records):
+        # A refusal that was measured again is the only kind whose sentence is a fact rather than a memory
+        # (round 43). Saying how many of them have been re-measured keeps the rest from borrowing their
+        # credibility.
+        lines.append("re-measured       %d of them have been measured again since the refusal"
+                     % sum(1 for record in records if record.checks))
     lines.append("")
     header = "%-6s %-24s %-22s %8s %8s %s" % ("id", "candidate", "domain", "bar", "loss", "whose gain it was")
     lines.append(header)
@@ -2254,6 +2390,9 @@ def rejection_provenance(root: Path, rules: Optional[EvolveRules] = None) -> Dic
                 "reason": reason,
                 "source": source,
                 "round": row.get("round"),
+                # When the refusal was made (round 43). A refusal is evidence about a moment, and the plan
+                # cannot tell a refusal measured this morning from one measured in another campaign without it.
+                "when": str(row.get("finished_at") or row.get("started_at") or ""),
                 "retired": retired,
                 "re_measured_as": (retirement or {}).get("re_measured_as") if retired else None,
                 "stream": dict(row.get("stream") or {}),
@@ -2261,8 +2400,18 @@ def rejection_provenance(root: Path, rules: Optional[EvolveRules] = None) -> Dic
     return latest
 
 
+REFUSAL_EXPIRY_DAYS = 14.0
+"""How long a `skip` refusal speaks for itself before this round measures the candidate again (round 43).
+
+Not a judgement about the candidate: a judgement about evidence. The same horizon as a version claim
+(`promote.CLAIM_EXPIRY_DAYS`) because re-testing a refusal is cheaper than re-testing a deployment — one
+candidate slot against a full re-check — so there is no reason to let the weaker claim live longer.
+"""
+
+
 def refusal_plan(provenance: Mapping[str, Mapping[str, Any]], *, source: Optional[str] = None,
-                 shape: Optional[Mapping[str, Any]] = None) -> Dict[str, List[str]]:
+                 shape: Optional[Mapping[str, Any]] = None, now: Optional[datetime] = None,
+                 expiry_days: float = REFUSAL_EXPIRY_DAYS) -> Dict[str, List[str]]:
     """Split the refusals that still stand into what this round may skip and what it must measure again.
 
     A refusal is not a fact about a candidate in the abstract: it was measured on a stream, at a sampling
@@ -2277,12 +2426,17 @@ def refusal_plan(provenance: Mapping[str, Mapping[str, Any]], *, source: Optiona
       point of measuring rather than a repeat (boundary 76 says the question was dropped, not answered);
     * `reopened` — refused here, but at a geometry this round cannot match (the record predates the
       cadence field, or a window covers different traffic): the old refusal does not apply to these
-      windows (boundary 72).
+      windows (boundary 72);
+    * `expired` — refused here, at this sampling, but long enough ago that the evidence has aged (round 43).
+      This is not "the refusal was wrong": it is that a `skip` refusal is otherwise never tested again —
+      the loop stops proposing the candidate, so the verdict can never be falsified. Re-measuring an
+      expired refusal is the only thing that can turn "still refused" into a fact rather than a memory.
 
-    Only `skip` is a decision to save the measurement. The other three are reasons the loop must spend it
+    Only `skip` is a decision to save the measurement. The other four are reasons the loop must spend it
     again, and the caller is expected to print which is which rather than a single count.
     """
-    groups: Dict[str, List[str]] = {"skip": [], "elsewhere": [], "inherited": [], "reopened": []}
+    groups: Dict[str, List[str]] = {"skip": [], "elsewhere": [], "inherited": [], "reopened": [],
+                                    "expired": []}
     for name, verdict in provenance.items():
         if verdict.get("accepted"):
             continue
@@ -2295,10 +2449,30 @@ def refusal_plan(provenance: Mapping[str, Mapping[str, Any]], *, source: Optiona
         if shape is not None and _sampling_differs(verdict.get("stream"), shape):
             groups["reopened"].append(name)
             continue
+        age = _refusal_age_days(verdict.get("when"), now)
+        if age is not None and age > float(expiry_days):
+            groups["expired"].append(name)
+            continue
         groups["skip"].append(name)
     for group in groups.values():
         group.sort()
     return groups
+
+
+def _refusal_age_days(when: Optional[str], now: Optional[datetime] = None) -> Optional[float]:
+    """How old a refusal is, in days. An unreadable stamp is `None`: not reusable as evidence either way."""
+    if not when:
+        return None
+    moment = now if now is not None else datetime.now(timezone.utc)
+    try:
+        then = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        # Same rule as a claim's age: a stamp without a zone is read as UTC rather than as "now", because
+        # guessing a date is how a stale check starts looking fresh (round 29).
+        then = then.replace(tzinfo=timezone.utc)
+    return (moment - then).total_seconds() / 86400.0
 
 
 # How far two samplings may differ and still be called the same geometry for a *refusal*. The seed rule

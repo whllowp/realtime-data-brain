@@ -2351,6 +2351,62 @@ w001   host-features-3          the loss was 0.109 against a bar of 0.050; today
 只打印结论（"不成立"）而不打印两个 bar，是让读者自己猜分歧在哪。复核可以不同意旧假设，但必须先把它说出来。
 
 
+### 3.50 被跳过的拒绝永远不被检验：让拒绝过期
+
+第 37 轮把拒绝过滤器搬进了生成器：一个在这一流、这个采样上被拒绝过的候选，**不会再被提出**。第 42 轮又把拒绝写成了 `w###` 记录。两件事合起来是一个闭环缺陷：
+
+> 被 `skip` 的候选不会被提出 → 不会被测量 → 它的拒绝永远不会被推翻。
+
+第 36 轮把"拒绝"分成四种，只有一种该省测量，其余三种都是"必须重新测量"的理由。但那三种是**关于数据**的理由（换流、换采样、被退役）。第五种理由是关于**时间**的，而且它自己不会出现：一份拒绝只要曾经成立，就永远成立——除非有人手动 `--candidates` 点名它。这不是信念问题，是记账问题：记录里说"这个候选在 smd-machine-1-6 上会掉 0.109"，而这句话从来没被复测过，读者却把它当作事实。
+
+第 29 轮给承诺做过的处置（一份复核会过期）在这里同样适用，而且更该适用：复测一条拒绝只要一个候选名额，比复测一次部署便宜得多，所以没有理由让它活得比承诺更久。
+
+```
+$ brian evolve --propose --stream-file data\smd\stream-check.json
+  skip        25 candidate(s)  analyze-pages-only, anomaly-p-40, …, reuse-300
+              refused on this stream at this sampling: not measured again
+  …
+would drop        10 candidate(s) this stream already refused at this sampling
+
+$ brian evolve --propose --stream-file data\smd\stream-check.json --refusal-expiry-days 0.001
+  reopened     7 candidate(s)  host-rolling-rank-0-75, …, host-rolling-rank-50-0-95
+              refused at a different sampling: re-measured on these windows
+  expired     25 candidate(s)  analyze-pages-only, anomaly-p-40, …, reuse-300
+              refused here, but longer ago than the expiry: the evidence has aged, so it is measured again
+would drop        0 candidate(s) this stream already refused at this sampling
+```
+
+默认期限是 `REFUSAL_EXPIRY_DAYS = 14`，和承诺的期限一样长。过期不是"这个拒绝错了"，而是"这个拒绝的证据到期了"：`skip` 因此变成 `expired`，候选重新进入提案，测完再判。`--refusal-expiry-days` 只是把这个假设摊开，好让读者自己试——0.001 天的运行把所有旧的拒绝一次放回提案池。
+
+**写回。** 复测之后，新数字必须落回**拒绝它自己的那条记录**，否则 `w###` 回答"为什么没发布"时引用的是一个早于问题的测量：
+
+```
+$ brian evolve --candidates host-features-3 --stream-file data\smd\stream-check.json
+…
+x host-features-3        recall at the 10% budget rises 0.297 -> 0.312 pooled, but
+                         smd-machine-1-6 falls 0.491 -> 0.382: the gain belongs to
+                         the recordings that rose, so this is not a replicated one
+  re-check  host-features-3  w001: still
+recorded round var\evolve\round-20261118T025528Z.json
+
+$ brian evolve --withheld
+records           1 refusal(s) recorded
+no longer hold    0 of them would not be refused at today's bar
+re-measured       1 of them have been measured again since the refusal
+…
+w001   host-features-3   re-measured 2026-11-18: recall at the 10% budget rises 0.297 -> 0.312 pooled, …
+```
+
+三件在这一轮里被运行暴露出来、而不是被读代码想出来的事：
+
+1. **复测会给同一个候选发第二个号。** 第一版写回把"根目录"算成了 `directory.parent`，而 `EVOLVE_DIR` 是两段（`var/evolve`），于是它在 `var/var/evolve/withheld` 里找已有记录，找不到，于是每次复测都铸造一个新的 `w###`。当场看到 `w001` 和 `w002` 并列，都是 `host-features-3`——"为什么没发布"于是有两个答案。修法是显式传根目录，并且**一个候选只有一条拒绝记录**：复测是那条记录的 `checks`，不是新记录。编号数的是被拒绝的候选，不是测量次数。
+2. **复测可能根本不测这件事。** 如果新的测量没有逐录音的 recall（旧格式、或只有一个录音），`replication_loss` 返回 `None`，写回的 verdict 会是 `no longer`——那等于用"没人取过的证据"宣布拒绝作废。现在这种情形写 `unknown`，理由直说"这次测量没有说每个录音各自如何，所以它检验不了针对其中一个录音的反对意见"，而 `withheld_staleness` 遇到 `unknown` 回落到记录里的算法，拒绝维持原状。
+3. **写回必须发生在 `persist` 里。** 第一版让 CLI 在 `persist` 之后补写，于是脚本跑的一轮不会留下复核记录，只有交互运行会——同一件事两个入口，只有一个记账。现在 `persist` 返回 `{"round", "versions", "withheld", "checks"}`，CLI 只负责把它打印出来（"没人被告知的写回"正是这一轮要修的缺陷）。
+
+**边界 93：一个被 `skip` 的拒绝必须过期，否则机制拒绝检验自己的结论。** 这不是说 14 天是对的：期限是一个假设，`--refusal-expiry-days` 存在的意义就是让这个假设可以被改、被看见。错的是"永远"，因为它把验证成本定成了零。
+
+**边界 94：复测属于它检验的那条记录，而编号数候选、不数测量。** 给同一个候选第二次拒绝编一个新号，会让"有多少个候选被拒绝"变成"拒绝被写了多少次"，而后者随复测次数增长——一个读者用前者做判断，会得到一个随运行次数漂移的数。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2534,3 +2590,6 @@ missing for the next level
     用同一个数回答。
 30. **（3.49 已完成）拒绝写记录；复核按记录里的 bar 判。** 下一步：让重测一个被拒绝的候选（`--candidates`）把结果
     回写到它自己的 `w###`，并让 `--verify` 认这个家族，这样"已被拒绝"和"已复核过"就不再是两套说法。
+
+31. **（3.50 已完成）让拒绝过期，并把复测写回拒绝记录。** 下一步：`--verify` 应当把 `withheld` 当成一个族来复核——不是等某一轮顺带重新提出候选，而是主动按域列出到期未复测的拒绝，并在必要时复测；同时 `--campaign` 的 `withheld` 行应当显示"最老的一次复测有多老"。
+

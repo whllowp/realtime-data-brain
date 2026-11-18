@@ -36,6 +36,7 @@ from .eval import Evaluator, format_report, gate_recommendation
 from .evolve import (
     EVOLVE_DIR,
     EvolveRules,
+    REFUSAL_EXPIRY_DAYS,
     apply_overrides,
     audit,
     build_pool,
@@ -328,7 +329,9 @@ def _print_refusal_plan(plan: Mapping[str, List[str]]) -> None:
     for key, label in (("skip", "refused on this stream at this sampling: not measured again"),
                        ("elsewhere", "refused on another stream only: measured here for the first time"),
                        ("inherited", "refused by a retired record nobody re-checked: re-opened"),
-                       ("reopened", "refused at a different sampling: re-measured on these windows")):
+                       ("reopened", "refused at a different sampling: re-measured on these windows"),
+                       ("expired", "refused here, but longer ago than the expiry: the evidence has aged, "
+                                   "so it is measured again")):
         if not plan.get(key):
             continue
         _print("  %-11s %2d candidate(s)  %s" % (key, len(plan[key]), ", ".join(plan[key])))
@@ -566,7 +569,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             except (OSError, ValueError):
                 shape = None
         plan = refusal_plan(rejection_provenance(root, _rules_from_args(args)),
-                            source=source, shape=shape)
+                            source=source, shape=shape,
+                            expiry_days=args.refusal_expiry_days)
         # Round 37: the plan is consulted *before* proposing, so the mechanism does not spend a slot on a
         # candidate the ledger already answered — and the dry run shows the proposal the round would really
         # make rather than one it would then filter.
@@ -782,7 +786,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # Round 37: the mechanism must not spend its proposal budget on questions this stream already answered,
     # so the refusal plan is computed before `propose` rather than after it. The plan is also what the round
     # prints below, and the proposal carries the count so the round record says how many it saved.
-    plan = refusal_plan(rejection_provenance(root, rules), source=source, shape=stream_shape)
+    plan = refusal_plan(rejection_provenance(root, rules), source=source, shape=stream_shape,
+                        expiry_days=args.refusal_expiry_days)
     proposal_record: dict = {}
     if args.candidates:
         names = [name.strip() for name in args.candidates.split(",") if name.strip()]
@@ -875,6 +880,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     _print(format_round(result))
 
     written = persist(root, result, write_versions=args.apply)
+    # Round 43: a candidate that was refused before and measured again writes the new number back into the
+    # record that refused it. `persist` does it (so a scripted round documents itself too); this only prints
+    # what happened, because a write-back nobody is told about is the defect the round is about.
+    for check in written.get("checks") or []:
+        _print("  re-check  %s  %s: %s" % (check["name"], check["label"], check["verdict"]))
     _print("")
     _print("recorded round %s" % written.get("round"))
     for version_path in written.get("versions") or []:
@@ -1866,6 +1876,11 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--withheld", action="store_true",
                         help="list the candidates the loop measured and refused for replication, and say "
                              "which refusals no longer hold at today's bar (no Laya)")
+    evolve.add_argument("--refusal-expiry-days", type=float, default=REFUSAL_EXPIRY_DAYS,
+                        metavar="DAYS",
+                        help="how long a refusal speaks for itself before the round measures the candidate "
+                             "again (default: %(default).0f); --expiry-days is the same question for a "
+                             "version's promise")
     evolve.add_argument("--sensitivity", action="store_true",
                         help="for each stream, how many `replicate` refusals would become acceptances at a "
                              "looser replication bar (re-decides stored measurements, no re-run), then exit")
