@@ -3544,6 +3544,80 @@ $ … --max-minutes "5x"
 不是豁免——一个不生效的上限比没有上限更坏。
 
 
+### 3.71 等待上限属于那条流，不属于这个 shell
+
+第 63 轮让 `--max-minutes` 可以按域下：`--max-minutes "rcaeval-re1-ob=4"`。问题是它只活在一次调用里。
+同一个读的人明天要重新敲一遍；更糟的是同一个数字在两天里可能指两件不同的事 —— 今天"SMD 最多等 4 分钟"，
+明天 `default=4` 顺手也管住了 RCAEval。一个上限是关于"这条流可以让我等多久"的陈述，这类陈述该和那条流的
+配置住在一起，而不是住在某个终端的滚动缓冲里。
+
+所以第 64 轮把上限搬进了部署状态本身：
+
+```
+$ brian evolve --set-domain-limit "rcaeval-re1-ob=4"
+recorded          rcaeval-re1-ob: at most 4 minute(s) for one queue run
+                  var\evolve\domains\rcaeval-re1-ob\current.json
+```
+
+写进去的是那个域自己的 `current.json`，和"哪些变量在生效、各自来自哪个版本"同一个文件：
+
+```json
+{
+  "env": {},
+  "sources": {},
+  "updated_at": "2026-11-18T05:28:33+00:00",
+  "budget": {
+    "max_minutes": 4.0
+  },
+  "domain": "rcaeval-re1-ob",
+  "source": "RCAEval RE1-OB"
+}
+```
+
+之后**不带任何参数**的一次检查就会按它收费，只收超出的那一个域：
+
+```
+$ brian evolve --campaign --strict --rerun-limit 0
+the next queue run would spend about 6.0 minute(s) on RCAEval RE1-OB, above the 4.0 asked for:
+lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.
+```
+
+`--ignore-state-limits` 则明确说"今天不按记录收费，只按命令行"，于是同一条命令退出 0。这是有意的：
+记录里的上限是策略，命令行上的上限是今天的决定，两者都可以存在，但必须有一句话说谁赢。
+
+版本页也会把这条策略念出来，否则一个没人看得见的上限就是没人能复核的上限：
+
+```
+domain           rcaeval-re1-ob  (RCAEval RE1-OB)
+budget           at most 4 minute(s) for one queue run (from the deployment state)
+```
+
+写这条策略的过程本身露出两个必须处理的地方：
+
+1. **推进一个版本不能顺手删掉同文件里的策略。** `_write_state` 是所有写入者（`apply_promotion`、
+   `revert_promotion`、`set_state_budget`）的收口，它原本只写 `env`/`sources`/`updated_at`；
+   如果不改，一次 `--verify` 成功之后的推进就会把 `budget` 抹掉，而页面看上去一切正常。
+   现在它在调用方没有给 `budget` 时从磁盘把这一段读回来 —— 同一个文件里的两件事各自负责各自的键。
+2. **写的域要用账本里的名字，不能用拼写。** 第一次运行写进去的是 `"source": "rcaeval-re1-ob"`，
+   而 `promotions_for_domain` 和活动页都拿 `source` 和账本里的名字比；一个 slug 会让这个域看起来像一条
+   没人测过的流。现在 `--set-domain-limit smd=3` 会先在账本里把 slug 解析成数据集名（`SMD`），
+   解析不到才原样记下 —— 宁可记下读者写的名字，也不静默改名。
+
+三条读法：
+
+1. **上限是部署的一部分，所以它要能跟着部署走。** 一次调用的上限只保护那一次；跨天的上限才是一份承诺。
+2. **同一个文件里的两类事实必须互不覆盖。** 配置由版本拥有，预算由读者拥有；写入者只碰自己那几个键，
+   其余的从磁盘读回来。
+3. **能被记录的东西必须能被看见。** 记录里有一条上限，页面就要有一行；否则读者会以为自己在一个
+   没人告诉过他的天花板下面工作。
+
+**边界 138：一条关于"等多久"的策略必须记在它约束的那条流的部署状态里，而不是某一次调用的命令行上 ——
+一次调用的上限只约束那一次，跨天的上限才约束行为。**
+
+**边界 139：同一个文件里的两件事必须各自负责各自的键；一个写入者删掉它不理解的块，是一次看不见的
+破坏 —— 页面照旧，而策略已经没了。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3806,3 +3880,7 @@ missing for the next level
 51. **（3.70 已完成）给"付清"单独定价，并让 `--max-minutes` 支持逐域上限。** 剩下的：把逐域上限写进
     部署状态（`var/evolve/domains/<slug>/current.json`），让它跟着域走而不是跟着命令行走；
     `--rerun-unrecorded` 自己也要在开头打印同一句预算（现在它在第一次测量后才有数字）。
+
+52. 让 `--set-domain-limit` 也能写"整队上限"和"每轮上限"两个值（现在只有一个总量），并让
+`--campaign --json-out` 把记录里的上限一起输出，这样一份报告能自己说明它按什么标准判的。
+

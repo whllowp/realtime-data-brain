@@ -53,6 +53,7 @@ CLAIM_EXPIRY_DAYS = 14.0
 
 CURRENT = "current.json"
 DOMAINS = "domains"
+BUDGET = "budget"
 VERSIONS = "versions"
 VERIFIED = "holds"
 FAILED = "failed"
@@ -316,6 +317,7 @@ def current_state(root: Path, domain: Optional[str] = None) -> Dict[str, Any]:
         "env": dict(payload.get("env") or {}),
         "sources": dict(payload.get("sources") or {}),
         "updated_at": str(payload.get("updated_at") or ""),
+        "budget": dict(payload.get(BUDGET) or {}),
     }
 
 
@@ -325,11 +327,72 @@ def _write_state(root: Path, state: Mapping[str, Any], domain: Optional[str] = N
     payload = {"env": dict(state.get("env") or {}),
                "sources": dict(state.get("sources") or {}),
                "updated_at": _now()}
+    # Round 64: the domain's wait ceiling lives in the same file as its configuration, and every writer here
+    # (apply, revert, and the ceiling itself) goes through this function. A promotion must not delete a policy
+    # that happens to share the file, so the block is preserved when the caller did not pass one.
+    budget = dict(state.get("budget") or {})
+    if not budget:
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if isinstance(existing, Mapping):
+            budget = dict(existing.get(BUDGET) or {})
+    if budget:
+        payload[BUDGET] = budget
     if domain:
         payload["domain"] = domain_slug(domain)
         payload["source"] = domain
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
+
+
+def state_budgets(root: Path) -> Dict[str, float]:
+    """The wait ceiling each domain's own state records, keyed by slug (round 64).
+
+    Round 63 let the operator cap a queue run per domain, but only on the command line: the ceiling lived for
+    one invocation, so the same reader had to retype it, and the same ceiling could mean two different things
+    on two days. A limit belongs to the deployment, not to the shell — it is a statement about how long that
+    stream is allowed to keep the loop waiting, and the deployment state is where such statements live.
+
+    Unreadable files and unparseable numbers are skipped rather than raised: a corrupted budget block must not
+    make the whole state unreadable, and a ceiling that cannot be read is simply absent (the gate then charges
+    nothing for that domain, which is what it did before this existed).
+    """
+    folder = _evolve_dir(root) / DOMAINS
+    ceilings: Dict[str, float] = {}
+    if not folder.is_dir():
+        return ceilings
+    for path in sorted(folder.glob("*/" + CURRENT)):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        value = (payload.get(BUDGET) or {}).get("max_minutes")
+        if value is None:
+            continue
+        try:
+            ceilings[str(path.parent.name)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return ceilings
+
+
+def set_state_budget(root: Path, domain: str, minutes: float) -> Path:
+    """Record how long `domain` will let one queue run wait (round 64).
+
+    Only the budget block changes: the variables in force and the versions that own them are copied through,
+    because writing a policy is not a reason to touch a deployment. The timestamp does move, so a reader
+    comparing two states can see that one of them is newer — and the `sources` map still says which version
+    owns each variable, which a budget never does.
+    """
+    state = current_state(root, domain)
+    budget = dict(state.get("budget") or {})
+    budget["max_minutes"] = float(minutes)
+    _write_state(root, {"env": state["env"], "sources": state["sources"], "budget": budget}, domain)
+    return state_path(root, domain)
 
 
 def promotions_for_domain(promotions: List[Promotion], domain: Optional[str] = None) -> List[Promotion]:
@@ -741,6 +804,12 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
     lines.append("=" * 96)
     if domain:
         lines.append("domain           %s  (%s)" % (domain_slug(domain), domain))
+        # Round 64: a ceiling stored in this file is a policy the operator is trusting, so the page that lists
+        # what is in force has to name it -- a limit nobody can see is a limit nobody can review.
+        ceiling = (state or {}).get(BUDGET) or {}
+        if ceiling.get("max_minutes") is not None:
+            lines.append("budget           at most %g minute(s) for one queue run (from the deployment state)"
+                         % float(ceiling["max_minutes"]))
         lines.append("")
     if not promotions:
         lines.append("no version files yet: run a round with --apply to record one.")

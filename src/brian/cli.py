@@ -89,6 +89,8 @@ from .promote import (
     load_promotions,
     promotions_for_domain,
     revert_promotion,
+    set_state_budget,
+    state_budgets,
     version_label,
     CLAIM_EXPIRY_DAYS,
     rescale_hint,
@@ -403,6 +405,25 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     rose = max_rise is not None and trend_rise > max_rise and trend_rise > trend_tolerance
     capped = max_unrecorded is not None and unrecorded_share > max_unrecorded
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped) else 0
+
+
+def _domain_name(root: Path, typed: str) -> str:
+    """The dataset name a slug refers to, so the state records the name and not the spelling (round 64).
+
+    `--set-domain-limit rcaeval-re1-ob=4` writes into that domain's state, and the file's `source` field is
+    what `promotions_for_domain` and the campaign page compare against. Writing the slug there would make the
+    domain look like a stream nobody measured, so the typed spelling is resolved against the names the ledger
+    actually used; when nothing matches, the typed name is recorded as given rather than silently renamed.
+    """
+    slug = domain_slug(typed)
+    for row in _debt_by_domain(root):
+        if domain_slug(str(row[0])) == slug:
+            return str(row[0])
+    for record in history(root):
+        source = str((record.get("stream") or {}).get("source") or "")
+        if source and domain_slug(source) == slug:
+            return source
+    return typed.strip()
 
 
 def _minute_limits(values: Optional[Sequence[str]]) -> Tuple[Optional[float], Dict[str, float]]:
@@ -1123,6 +1144,26 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     except ValueError as error:
         _print(str(error))
         return 2
+    # Round 64: a ceiling recorded in a domain's own state applies without being retyped; an explicit flag for
+    # the same domain wins, because today's operator is allowed to disagree with yesterday's policy.
+    if not getattr(args, "ignore_state_limits", False):
+        minute_ceilings = {**state_budgets(root), **minute_ceilings}
+
+    if getattr(args, "set_domain_limit", None):
+        for entry in args.set_domain_limit:
+            name, _, number = str(entry).partition("=")
+            try:
+                limit = float(number.strip())
+            except ValueError:
+                limit = -1.0
+            if not name.strip() or limit < 0.0:
+                _print("--set-domain-limit wants domain=minutes, got %r" % entry)
+                return 2
+            path = set_state_budget(root, _domain_name(root, name), limit)
+            _print("recorded          %s: at most %g minute(s) for one queue run"
+                   % (domain_slug(_domain_name(root, name)), limit))
+            _print("                  %s" % path)
+        return 0
 
     if args.history:
         rounds = history(root, include_retired=True)
@@ -3083,6 +3124,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "minutes (estimated per domain from the median duration of the recorded rounds, "
                              "so it is a wait the ledger can prove, not a guess). Repeat as domain=minutes to "
                              "give one domain its own ceiling; a bare number is the global one")
+    evolve.add_argument("--set-domain-limit", action="append", default=None, metavar="DOMAIN=MINUTES",
+                        help="record in that domain's own deployment state how long one queue run may wait for "
+                             "it; later runs charge it without the flag, and --ignore-state-limits opts out")
+    evolve.add_argument("--ignore-state-limits", action="store_true",
+                        help="with --strict: do not read the per-domain wait ceilings recorded in the deployment "
+                             "state, only the ones on this command line")
     evolve.add_argument("--rerun-unrecorded", action="store_true",
                         help="re-run the rounds whose stream file can be named by geometry, then retire them "
                              "naming the new record; skips a round whose file cannot be chosen")
