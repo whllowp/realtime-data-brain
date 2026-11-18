@@ -652,6 +652,46 @@ def _debt_plan(root: Path) -> List[Dict[str, Any]]:
     return [_row_dict(row) for row in _debt_by_domain(root) if row[4]]
 
 
+def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
+    """What one invocation of the queue would spend and what it would leave behind (round 60).
+
+    The page printed the queue's size, the plan's first step, and the projected end of the queue as three
+    separate lines, so a reader who wanted "if I run it once, where do I end up?" had to combine them. This is
+    that combination: the command the reader would type, the rounds it would pay, the domains those rounds
+    belong to, and the share before and after — all derived from the same functions the command uses, so the
+    page cannot promise a movement the command does not make.
+
+    `limit` is what the reader would type, and its default is the command's own default (one round); `0` means
+    "drain the queue", exactly as `_rerun_limit` reads it. Passing the same value to both is the point: a page
+    whose budget line describes a different command than the one it recommends is a page arguing with itself.
+    """
+    plan = _debt_plan(root)
+    progress = _rerun_progress(root)
+    ready = int(progress.get("ready") or 0)
+    requested = int(limit or 0)
+    rounds = ready if requested <= 0 else max(0, min(requested, ready))
+    without = int(progress.get("without_file") or 0)
+    total = int(progress.get("rounds") or 0)
+    paid: List[str] = []
+    left = rounds
+    for row in plan:
+        take = min(left, int(row.get("ready") or 0))
+        paid.extend([str(row.get("domain"))] * take)
+        left -= take
+        if left <= 0:
+            break
+    share_after = ((without - min(rounds, without)) / total) if total else 0.0
+    return {
+        "command": "brian evolve --rerun-unrecorded --rerun-limit %d" % requested,
+        "rounds": rounds,
+        "domains": paid,
+        "ready": ready,
+        "share_now": float(progress.get("share_now") or 0.0),
+        "share_after": share_after,
+        "rounds_total": total,
+    }
+
+
 def _largest_debt(root: Path) -> Optional[Dict[str, Any]]:
     """The domain whose share a round could still pay down, or None when nothing is payable (round 57).
 
@@ -1238,12 +1278,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
+        budget_limit = _rerun_limit(args, int(_rerun_progress(root).get("ready") or 0))
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
-                               trend=trend, debt=_largest_debt(root), plan=_debt_plan(root)))
+                               trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
+                               budget=_queue_budget(root, limit=budget_limit)))
         worst, payable = _debt_view(root)
         if args.json_out:
-            Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
+            # Round 60: the page's next-step lines are derived facts, so the machine-readable form carries the
+            # same ones rather than making every caller parse the text (or worse, recompute them differently).
+            payload = result.to_dict()
+            payload["debt_plan"] = _debt_plan(root)
+            payload["budget"] = _queue_budget(root, limit=budget_limit)
+            Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
         return _strict_exit(args.strict, result.moved, result.unreconstructable,

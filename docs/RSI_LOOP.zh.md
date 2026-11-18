@@ -3329,6 +3329,61 @@ measure next      brian evolve --rerun-unrecorded --rerun-limit 1 pays SMD by on
 **边界 129：页面里的"下一步"必须由命令真正使用的那个顺序生成；页面顺序与命令顺序不一致时，
 "下一步"这句话就是假的，而且它比没有这句话更坏，因为它看起来经过了计算。**
 
+### 3.67 把三句话合成一句预算：这一条命令跑几轮、份额落到多少
+
+3.66 让页面点名"下一条命令"和"之后的那一步"，但读者仍然要自己把三句话拼起来：队列有多大（`queue`）、
+下一步付谁（`measure next`）、全跑完落到多少（`queue` 里的 `share_after`）。**"我跑一次，会到哪？"
+这个问题，页面从来没有一句话回答过。**
+
+修法：`_queue_budget(root, limit)`——用**命令自己的两个函数**（`_rerun_limit` 与 `_rerun_progress`）
+把这一次调用的入口和出口算出来，印成一行：
+
+```
+$ brian evolve --campaign                     # var/steps59，两个可付欠账
+queue             2 round(s) can be re-run from the record; 0 already re-measured; all of them would take the share 100% -> 0%
+debt              the largest payable debt is on RCAEval RE1-OB: 1 of 1 round(s) cannot be placed on a sampling (100%), 1 of them can be re-run from the record
+measure next      brian evolve --rerun-unrecorded --rerun-limit 1 pays RCAEval RE1-OB by one round; the command prints the balance at the end
+then              SMD: 1 of 1 round(s) unrecorded (100%), 1 re-runnable
+budget            brian evolve --rerun-unrecorded --rerun-limit 1 pays 1 round(s) (RCAEval RE1-OB); the queue falls 100% -> 50% of 2 round(s)
+
+$ brian evolve --campaign --rerun-limit 2
+budget            brian evolve --rerun-unrecorded --rerun-limit 2 pays 2 round(s) (RCAEval RE1-OB, SMD); the queue falls 100% -> 0% of 2 round(s)
+
+$ brian evolve --campaign                     # 真实账本：没有可付欠账
+measure next      nothing is payable by re-running: every unrecorded round keeps no candidate definitions or no unique file
+budget            nothing to spend: the queue has no round it can re-run, so the share stays 66%
+```
+
+`measure next` 与 `budget` 不是重复：前者是**一步**（大债务在哪里、先付谁），后者是**这一步的终点**
+（跑几轮、付掉哪些域、份额落到多少）。一个读者想知道的"值不值得跑"只在后一句里。
+
+**跑起来才发现的缺陷（第一版就是这么错的）**：`_queue_budget` 最初把 `limit=None` 解释成"能跑的都跑"，
+于是两个欠账时页面印 `pays 2 round(s)`，而上一行 `measure next` 说 `--rerun-limit 1 pays ... by one round`。
+**页面在跟自己争论。** 修法是把读者会打的那个数传进去：`budget_limit = _rerun_limit(args, ready)`，
+并让 `command` 里写具体轮数而不是 `0`（`0` 是"全排空"的写法，页面上写成具体数字更好读）。
+
+机器可读的那一半：`--campaign --json-out` 现在带 `debt_plan` 与 `budget` 两个派生字段。
+
+```json
+"budget": {"command": "brian evolve --rerun-unrecorded --rerun-limit 1", "domains": ["RCAEval RE1-OB"],
+           "ready": 2, "rounds": 1, "rounds_total": 2, "share_after": 0.5, "share_now": 1.0}
+```
+
+三条设计取舍：
+
+1. **预算与推荐的命令必须同源。** 都从 `_rerun_limit`/`_rerun_progress` 来，所以页面不可能承诺一个
+   命令不会产生的移动（边界 130）。
+2. **`--rerun-limit 0` 是"全排空"的一种写法，页面把它翻译成具体轮数。** 读者看到 `pays 2 round(s)`
+   比看到 `--rerun-limit 0` 更容易判断成本；而 `command` 字段仍写具体数字，因为那才是这一刻的真实效果。
+3. **派生数字必须同时出现在 JSON 里。** 否则脚本要么解析人类可读文本（改版即坏），要么自己重算
+   （第二个真相）——两者都会让"页面说的"和"程序做的"慢慢分叉（边界 131）。
+
+**边界 130：一条"下一步"命令必须附带它的结果预算——跑几轮、份额落到多少；否则读者要用三次阅读拼出
+一次动作，而每一次阅读都是可以放弃的地方。**
+
+**边界 131：页面上任何派生数字都必须同时出现在机器可读输出里；脚本只能解析人类可读文本时，
+它的"真相"会随文案改版悄悄过期。**
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3574,3 +3629,8 @@ missing for the next level
 47. **（3.66 已完成）页面点名下一条命令，并说出第二步。** 剩下的：让 `--campaign` 的 `measure next`
     在可付欠账多于一轮时给出"这一条命令会跑几轮、预计份额落到多少"，即把 `queue` 行与 `plan` 行合成
     一句可执行的预算，并在 `--json-out` 里给出同样的字段，供脚本读取而不必解析文本。
+
+
+48. **（3.67 已完成）下一次调用的一句预算，以及它的 JSON 副本。** 剩下的：让 `--rerun-unrecorded`
+    自己也在开头印同一句预算（现在它印 `projection` 与 `limit` 两行），把"页面推荐的命令"与"命令
+    自己报的预算"合成同一个函数调用，并让 `budget` 带上 `estimated_minutes`（按每轮实测耗时的中位数）。

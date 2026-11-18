@@ -501,7 +501,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     queue: Optional[Mapping[str, Any]] = None,
                     trend: Optional[Mapping[str, Any]] = None,
                     debt: Optional[Mapping[str, Any]] = None,
-                    plan: Optional[Sequence[Mapping[str, Any]]] = None) -> str:
+                    plan: Optional[Sequence[Mapping[str, Any]]] = None,
+                    budget: Optional[Mapping[str, Any]] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -625,6 +626,24 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             # that the page failed to compute one (boundary 100, in the other direction).
             lines.append("measure next      nothing is payable by re-running: every unrecorded round keeps no "
                          "candidate definitions or no unique file")
+    if budget is not None:
+        # Round 60: the queue's size, the plan's first step and the projected end were three lines, so "if I
+        # run it once, where do I end up?" had to be assembled by the reader. This is that sentence, derived
+        # from the same functions the command runs, so the page cannot promise a movement the command will
+        # not make. The JSON output carries the same fields, so a script never has to parse this line.
+        rounds = int(budget.get("rounds") or 0)
+        if rounds:
+            domains = [str(name) for name in (budget.get("domains") or [])]
+            named = ", ".join(dict.fromkeys(domains)) or "the queue"
+            lines.append("budget            %s pays %d round(s) (%s); the queue falls %.0f%% -> %.0f%% of %d "
+                         "round(s)"
+                         % (budget.get("command") or "brian evolve --rerun-unrecorded",
+                            rounds, named, 100.0 * float(budget.get("share_now") or 0.0),
+                            100.0 * float(budget.get("share_after") or 0.0),
+                            int(budget.get("rounds_total") or 0)))
+        else:
+            lines.append("budget            nothing to spend: the queue has no round it can re-run, so the "
+                         "share stays %.0f%%" % (100.0 * float(budget.get("share_now") or 0.0)))
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")
