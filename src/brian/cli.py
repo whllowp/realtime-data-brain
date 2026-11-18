@@ -60,8 +60,10 @@ from .evolve import (
     rejudge,
     retire,
     run_round,
+    Withheld,
     withheld_check,
     withheld_due,
+    withheld_evidence_age,
     withheld_records,
 )
 from .laya.client import LayaClient, LayaError, LayaUnavailable
@@ -244,7 +246,9 @@ def _evolve_streams(args: argparse.Namespace, settings: Settings
     return settings, streams, "demo", {}
 
 
-def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent: int = 0) -> int:
+def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent: int = 0,
+                 due: int = 0, oldest_days: Optional[float] = None,
+                 horizon: float = REFUSAL_EXPIRY_DAYS) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -260,6 +264,12 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     the record was written before the geometry was recorded is history: nothing about it is wrong, and
     re-running that round writes a record that can be. Failing the build on it forever would leave the
     check permanently red, which is how a check stops being run.
+
+    `due` is the other kind of debt (round 45): a refusal older than the horizon that nobody measured
+    again. That is not history — one command retires it — so it exits 1 like a moved verdict, but it
+    prints its own line, because "a rule would decide differently" and "a check has not been run" are
+    different statements and a reader must be able to tell them apart. It exits 1 even when no verdict
+    moved: exit 0 may only mean the check ran on every record and passed (boundary 74).
     """
     if not strict:
         return 0
@@ -275,7 +285,124 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                "writes records that can be." % unreconstructable)
         _print("They do not fail the check (their rules still move the exit code), but --strict has not "
                "verified them.")
-    return 1 if moved else 0
+    if due:
+        _print("")
+        _print("%d refusal(s) are older than the %.0f-day horizon and were not measured again%s:"
+               % (due, horizon,
+                  "" if oldest_days is None else " (oldest evidence %.0f day(s) old)" % oldest_days))
+        _print("a refusal nobody re-tests is an assertion the loop cannot lose, so --strict exits 1.")
+        _print("pass --verify-withheld to re-measure them.")
+    return 1 if (moved or due) else 0
+
+
+def _withheld_debt(root: Path, horizon: float) -> Tuple[int, Optional[float]]:
+    """How many refusals are due for a re-check, and how old the oldest evidence is (round 45).
+
+    The campaign page counts this per domain; `--strict` reads the same numbers, so a ledger whose
+    oldest objection has never been re-tested cannot exit 0 in either mode — and both modes use
+    `--refusal-expiry-days`, because two commands disagreeing about the horizon would let a reader pass
+    a check by picking the mode that measures less.
+    """
+    records = withheld_records(root)
+    due = withheld_due(records, expiry_days=horizon)
+    ages = [withheld_evidence_age(record) for record in records]
+    known = [age for age in ages if age is not None]
+    return len(due), (max(known) if known else None)
+
+
+def _withheld_pairs(values: Sequence[str]) -> List[Tuple[str, Path]]:
+    """`--withheld-stream domain=stream.json`, repeatable, into (domain, path) pairs (round 45).
+
+    One stream re-checks one domain's objections, but the ledger holds objections on several streams and
+    the command that retires them should be one command: an operator who has to remember which refusal
+    lives where is an operator who re-tests the loudest stream and not the oldest objection.
+    """
+    pairs: List[Tuple[str, Path]] = []
+    for value in values:
+        text = str(value or "").strip()
+        if "=" not in text:
+            raise ValueError("--withheld-stream wants domain=stream.json, got %r" % (value,))
+        domain, _, path = text.partition("=")
+        domain = domain.strip()
+        path = path.strip()
+        if not domain or not path:
+            raise ValueError("--withheld-stream wants domain=stream.json, got %r" % (value,))
+        pairs.append((domain, Path(path)))
+    return pairs
+
+
+def _refusals_on(root: Path, domain: str) -> List[Withheld]:
+    """The `w###` records a domain owns, compared by slug (round 45).
+
+    The refusal stores the dataset it was raised on ("SMD", "RCAEval RE1-OB"), while the deployment state and
+    every page use the slug. Comparing raw strings meant `--withheld-stream smd=...` reported "nothing due"
+    for a record that was right there -- a filter that fails silently, which is the worst kind: the command
+    looks like it checked and found nothing.
+    """
+    slug = domain_slug(domain)
+    return [record for record in withheld_records(root)
+            if domain_slug(str((record.stream or {}).get("source") or "")) == slug]
+
+
+def _recheck_withheld(root: Path, domain: str, settings: Any, streams: Any, rules: EvolveRules,
+                      horizon: float, *, from_default: bool) -> int:
+    """Re-measure this domain's overdue refusals and return how many stopped holding (round 44/45).
+
+    The objection was raised by a round, and a round measures on top of the deployment in force —
+    `scoring=auto`, the window count, the bar. Re-measuring on the stream's own base settings answers a
+    different question: the first live run of this block "cleared" `host-features-3` at recall 0.146
+    because the reader was not configured the way the round had it. A re-check must stand where the
+    objection stood. Nothing is promoted here: an objection that stopped holding returns the candidate to
+    the rounds (boundary 95).
+    """
+    records = _refusals_on(root, domain)
+    due = withheld_due(records, expiry_days=horizon)
+    if not due:
+        _print("no refusal recorded on %s is older than the %.0f-day horizon: nothing to re-measure."
+               % (domain_slug(domain), horizon))
+        return 0
+    recheck = settings
+    deployment: Dict[str, Dict[str, Any]] = {}
+    if not from_default:
+        deployment, _sources, _refused_names, _unknown_names = in_force_overrides(
+            root, settings, domain=domain)
+        if deployment:
+            recheck = apply_overrides(settings, deployment)
+    # The coverage denominator must be the configuration the objection was measured in, for the same
+    # reason the measurement is: `build_pool` fixes the event cap, not the rest of the settings.
+    pool = build_pool(recheck, streams)
+    checked_stream = summarise(streams)
+    _print("re-measuring %d refusal(s) recorded on %s%s"
+           % (len(due), domain_slug(domain),
+              " against the deployment in force" if deployment else " on the stream's own settings"))
+    baseline = measure(recheck, None, streams, pool, budget=rules.fpr_budget,
+                       alert_budget=rules.alert_budget)
+    cleared = 0
+    for record in due:
+        candidate = Candidate.from_dict(record.candidate)
+        measurement = measure(recheck, candidate, streams, pool,
+                              budget=rules.fpr_budget, alert_budget=rules.alert_budget)
+        check = withheld_check(baseline, measurement, rules,
+                               checked_at=_stamp(), stream=checked_stream,
+                               round_name="verify")
+        if record_withheld_check(root, record.name, check) is None:
+            _print("  %-5s %-22s %s  (an identical check is already recorded, so this one is "
+                   "not appended)" % (record.label, record.candidate.get("name", "?"),
+                                      check["verdict"]))
+            continue
+        if check["verdict"] == "no longer":
+            cleared += 1
+        _print("  %-5s %-22s %-9s recall %.3f at the %.0f%% budget  (bar %.3f)"
+               % (record.label, record.candidate.get("name", "?"), check["verdict"],
+                  measurement.recall_at_budget, 100 * rules.fpr_budget, rules.replication_bar))
+    _print("")
+    if cleared:
+        _print("%d objection(s) no longer hold at the numbers measured here. A cleared refusal "
+               "goes back to the rounds: nothing is promoted by this command." % cleared)
+    else:
+        _print("every re-measured objection still holds: the numbers that produced it are still "
+               "the numbers today.")
+    return cleared
 
 
 def _rules_from_args(args: Any) -> EvolveRules:
@@ -459,7 +586,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("")
             _print("wrote %s" % args.json_out)
         return _strict_exit(args.strict, result.moved, result.unreconstructable,
-                            result.inconsistent)
+                            result.inconsistent, due=result.withheld_due,
+                            oldest_days=result.withheld_oldest_days, horizon=horizon)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -494,16 +622,25 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
 
     if args.audit:
         rules = _rules_from_args(args)
+        horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
         try:
             result = audit(root, rules)
         except OSError as error:
             _print("cannot audit %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         _print(format_audit(result))
+        # Round 45: the refusals are records too (boundary 91), so the ledger-wide gate counts a refusal
+        # nobody re-tested as debt. Computed from the same horizon `--campaign` uses, or the two modes
+        # would disagree about the same ledger and a reader could pass the check by picking one.
+        try:
+            due, oldest = _withheld_debt(root, horizon)
+        except OSError:
+            due, oldest = 0, None
         # The exit code is the part that makes this a check rather than a report: a rule change that
         # rewrites history should fail the build, or it will be noticed months later by whoever reads the
         # table last.
-        return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent)
+        return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
+                            due=due, oldest_days=oldest, horizon=horizon)
 
     if args.grade:
         try:
@@ -645,6 +782,38 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
 
     if args.verify:
         wanted = int(getattr(args, "verify_version", 0) or 0)
+        horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
+        # Round 45: several domains in one command. `--withheld-stream domain=stream.json` names the stream
+        # each refusal was raised on, so retiring objections does not depend on which stream happens to be
+        # in `--stream-file` — and a promise check is left out of this mode on purpose: one command should
+        # answer one kind of question, and mixing them is how round 44 verified a promise while merging two
+        # patches into a deployment nobody measured.
+        pairs: List[Tuple[str, Path]] = []
+        try:
+            pairs = _withheld_pairs(getattr(args, "withheld_stream", []) or [])
+        except ValueError as error:
+            _print("cannot re-measure refusals: %s" % error)
+            return 2
+        if pairs:
+            if wanted:
+                _print("--withheld-stream re-measures refusals; --verify-version re-checks a promise. "
+                       "Pass one, not both: they answer different questions about different records.")
+                return 2
+            rules = _rules_from_args(args)
+            cleared_total = 0
+            for pair_domain, pair_path in pairs:
+                clone = argparse.Namespace(**vars(args))
+                clone.stream_file = str(pair_path)
+                pair_settings, pair_streams, _pair_source, _pair_overrides = _evolve_streams(clone, settings)
+                _print("")
+                _print("---- %s  <-  %s" % (domain_slug(pair_domain), pair_path))
+                cleared_total += _recheck_withheld(root, pair_domain, pair_settings, pair_streams, rules,
+                                                   horizon, from_default=args.from_default)
+            _print("")
+            _print("%d domain(s) re-checked, %d objection(s) cleared. A cleared refusal is measured by the "
+                   "next round that proposes the candidate; this command promotes nothing."
+                   % (len(pairs), cleared_total))
+            return 0
         settings, streams, source, _overrides = _evolve_streams(args, settings)
         domain = source
         # A promise is a statement about one dataset (boundary 33), so a stream only re-checks the
@@ -743,56 +912,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 if note:
                     _print(note)
         if args.verify_withheld:
-            # The refusal family, re-measured on the same footing as the round that wrote it: the deployment
-            # in force is the baseline, because the objection was raised against it. Nothing is promoted
-            # here -- an objection that stopped holding returns the candidate to the rounds, and promoting
-            # on a verification would be the loop shipping a change nobody proposed (boundary 95).
-            if not due:
-                _print("no refusal recorded on %s is older than the %.0f-day horizon: nothing to re-measure."
-                       % (domain_slug(domain), horizon))
-            else:
-                # The objection was raised by a round, and a round measures on top of the deployment in
-                # force -- `scoring=auto`, the window count, the bar. Re-measuring on the stream's own base
-                # settings answers a different question: the first live run of this block "cleared"
-                # `host-features-3` at recall 0.146 because the reader was not configured the way the round
-                # had it. A re-check must stand where the objection stood (round 44).
-                recheck = settings
-                deployment: Dict[str, Dict[str, Any]] = {}
-                if not args.from_default:
-                    deployment, _sources, _refused_names, _unknown_names = in_force_overrides(
-                        root, settings, domain=domain)
-                    if deployment:
-                        recheck = apply_overrides(settings, deployment)
-                _print("re-measuring %d refusal(s) recorded on %s%s"
-                       % (len(due), domain_slug(domain),
-                          " against the deployment in force" if deployment else " on the stream's own settings"))
-                baseline = measure(recheck, None, streams, pool, budget=rules.fpr_budget,
-                                   alert_budget=rules.alert_budget)
-                cleared = 0
-                for record in due:
-                    candidate = Candidate.from_dict(record.candidate)
-                    measurement = measure(recheck, candidate, streams, pool,
-                                          budget=rules.fpr_budget, alert_budget=rules.alert_budget)
-                    check = withheld_check(baseline, measurement, rules,
-                                           checked_at=_stamp(), stream=checked_stream,
-                                           round_name="verify")
-                    if record_withheld_check(root, record.name, check) is None:
-                        _print("  %-5s %-22s %s  (an identical check is already recorded, so this one is "
-                               "not appended)" % (record.label, record.candidate.get("name", "?"),
-                                                  check["verdict"]))
-                        continue
-                    if check["verdict"] == "no longer":
-                        cleared += 1
-                    _print("  %-5s %-22s %-9s recall %.3f at the %.0f%% budget  (bar %.3f)"
-                           % (record.label, record.candidate.get("name", "?"), check["verdict"],
-                              measurement.recall_at_budget, 100 * rules.fpr_budget, rules.replication_bar))
-                _print("")
-                if cleared:
-                    _print("%d objection(s) no longer hold at the numbers measured here. A cleared refusal "
-                           "goes back to the rounds: nothing is promoted by this command." % cleared)
-                else:
-                    _print("every re-measured objection still holds: the numbers that produced it are still "
-                           "the numbers today.")
+            # Round 44/45: the refusal family, re-measured on the footing the objection was raised on.
+            # Delegated so `--withheld-stream` and this mode share one implementation -- two copies of
+            # "measure the objection where it stood" would drift exactly where the defect was.
+            _recheck_withheld(root, domain, settings, streams, rules, horizon,
+                              from_default=args.from_default)
         _print("")
         _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain,
                                  expiry_days=args.expiry_days))
@@ -2001,6 +2125,10 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--verify-withheld", action="store_true",
                         help="with --verify: also re-measure this stream's refusals whose evidence is older "
                              "than the refusal horizon, and write the result into their record")
+    evolve.add_argument("--withheld-stream", action="append", default=[], metavar="DOMAIN=STREAM",
+                        help="re-measure every due refusal of each domain in one command; repeatable. "
+                             "The stream is the one the refusal was raised on, so this mode checks no "
+                             "promotion (round 45)")
     evolve.add_argument("--strict", action="store_true",
                         help="with --audit or --campaign: exit 1 when a recorded verdict would be decided "
                              "differently today, 2 when part of the ledger cannot be replayed at all")

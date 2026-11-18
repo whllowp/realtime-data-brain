@@ -2474,6 +2474,90 @@ withheld 1 candidate(s) were measured and refused for replication (oldest eviden
 被撤回而不是被删除，否则下一次复测会重复同样的错误，而记录看起来干净；三是"到期"要能主动到达，否则把它做成
 只读的报表，等于把第 43 轮的过期又变成一句永不触发的机制。
 
+## 3.52 退出码要收自己页面上的账：一条没人复核的拒绝，和一个能跑遍多个域的命令
+
+3.51 之前，`--strict` 只读三样东西：变了多少判词、多少比较无法复现、以及"本构建的缺陷"。而 3.51 之后，
+`--campaign` 的页面上多了一行"按域的到期拒绝数"。这一轮的问题是：**页面上的这个数，没有任何退出码读它。**
+一份账本里最老的那条拒绝从没被复测过，`--strict` 仍然退出 0 —— 这正是 3.40 修过的失败（"0 只能表示
+'每个记录都查过并且通过'"）在一个更年轻的家族里重演。同时，跨域复测要一个域敲一次命令，而"记得拒绝
+存在哪里"不该是操作者的工作。
+
+一条命令跑两个域：
+
+```
+$ brian evolve --verify --withheld-stream "smd=data\smd\stream-check.json" \
+      --withheld-stream "rcaeval-re1-ob=data\rcaeval\stream-holdout.json" --refusal-expiry-days 0.001
+---- smd  <-  data\smd\stream-check.json
+re-measuring 1 refusal(s) recorded on smd against the deployment in force
+  w001  host-features-3        still  (an identical check is already recorded, so this one is not appended)
+
+every re-measured objection still holds: the numbers that produced it are still the numbers today.
+
+---- rcaeval-re1-ob  <-  data\rcaeval\stream-holdout.json
+no refusal recorded on rcaeval-re1-ob is older than the 0-day horizon: nothing to re-measure.
+
+2 domain(s) re-checked, 0 objection(s) cleared. A cleared refusal is measured by the next round that
+proposes the candidate; this command promotes nothing.
+```
+
+第二个域什么也没做，但它**说了**它什么也没做。这不是客套：一个只报告"忙着"的域的命令，会让"没有到期"
+和"没看"长得一模一样（边界 100）。同时"一个相同的复核已存在，所以不追加"也是这一轮要证明的性质 ——
+复测是幂等的，连跑十次不会把 `w001` 变厚。
+
+账要收：
+
+```
+$ brian evolve --campaign --strict --refusal-expiry-days 0.001 ; echo $?
+1 refusal(s) are older than the 0-day horizon and were not measured again (oldest evidence 0 day(s) old):
+a refusal nobody re-tests is an assertion the loop cannot lose, so --strict exits 1.
+pass --verify-withheld to re-measure them.
+1
+```
+
+三种失败现在各有各的出口：`2` 是本构建的缺陷（记录带着几何却没有参照，或一个域和一个版本混在一个命令里），
+`1` 是账没结清（有判词会变，或者有人没被复核），`0` 是"每个记录都查过并且通过"。把"没跑过"折进 `2`
+会把一次没做的检查说成一次坏掉的构建；折进 `1` 的"判词变了"又会让读者以为有人不同意 —— 所以它单列一段，
+并且点名下一步命令（边界 98、99）。
+
+守卫也各有话说，而不是抛栈：
+
+```
+$ brian evolve --verify --withheld-stream "smd=data\smd\stream-check.json" --verify-version 20
+--withheld-stream re-measures refusals; --verify-version re-checks a promise. Pass one, not both:
+they answer different questions about different records.                                    (exit 2)
+
+$ brian evolve --verify --withheld-stream "data\smd\stream-check.json"
+cannot re-measure refusals: --withheld-stream wants domain=stream.json, got 'data\smd\stream-check.json'
+```
+
+**跑起来才发现的缺陷：一个静默的过滤器。** 第一版两域跑出来是
+
+```
+---- smd  <-  data\smd\stream-check.json
+no refusal recorded on smd is older than the 0-day horizon: nothing to re-measure.
+```
+
+而 `var/evolve/withheld/w001.json` 就在那里。原因是记录里存的是数据集名 `"SMD"`，命令里敲的是 slug
+`"smd"`，字符串直接比较不相等 —— 过滤器静默地什么都没匹配上，命令看起来"查过了，没有"。静默失败比
+响亮失败糟，因为它连解释的机会都不给；改成按 slug 比较（`smd` / `SMD` / `Smd` 都指同一个域），并且
+给这条规则补了一个测试。顺带修的第二处：复测的覆盖池原来用流的原始设置构，而测量用的是部署 ——
+`build_pool` 只固定事件上限、不固定窗口集合，于是"池子"和"配置"来自两个不同的地方。现在池子也用
+`recheck` 构。
+
+**这个家族有多小，也要说清楚。** 为了找第二条真实拒绝，这轮在 RCAEval 上跑了一次 `--candidates events-4`
+（`var/evolve/round-20261118T034544Z.json`）：基线 `0.857 / 0.023 / 1706 / 1319`，`events-4`
+以成本赢被接受（`0.857 / 0.023 / 1310 / 1013`），**没有触发复制性拒绝**。所以账本里仍然只有一条 `w###`
+记录，两域演示的诚实说法是"一个复测了，一个确实没有到期"——机制已经能铺开，证据只有一条。
+
+**边界 98：一个门禁必须收自己报告上印出来的账。** 页面上的数字如果没有退出码读它，它就只是装饰；
+"最老的证据多旧"既然写进了表，就要有一个退出码因为它而变。
+
+**边界 99：一次没跑的检查，既不是本构建的缺陷，也不是一条变了的判词。** 它要单独一行、挂在退出码 1
+下面，折进任何一边都在对读者说假话。
+
+**边界 100：按域跑的命令必须点出"没有到期的域"，不能沉默。** 沉默让"没有到期"和"没看"无法区分，
+而这两件事对一条拒绝意味着完全不同的未来。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2662,3 +2746,9 @@ missing for the next level
 
 32. **（3.51 已完成）复核接到部署上，验过不等于发布。** 待办：`--verify-withheld` 支持一次给多个域；
 `--campaign --strict` 把"最老的未复核反对"也算成一条债务。
+
+33. **让拒绝记住自己住在哪个流里。** 这一轮的多域命令要求操作者写 `domain=stream.json`，而流是
+    `w###` 记录写下时就该记住的东西：记录里有 `stream` 的摘要（源、窗口、打分窗口数），却没有这个流
+    来自哪个文件的路径。把路径写进记录，`--verify-withheld` 就能不带参数地跑遍所有域 —— "记得拒绝
+    存在哪里"的根源是记录自己没记住，而不是操作者记性不好。
+
