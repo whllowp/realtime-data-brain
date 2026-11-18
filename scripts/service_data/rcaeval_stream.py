@@ -108,6 +108,9 @@ def main() -> int:
     parser.add_argument("--per-fault", type=int, default=0,
                         help="take at most N cases per fault family (balance beats size here: "
                              "sorted order is all one service, so --limit alone samples one family)")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="skip the first N cases of each family before --per-fault, so a holdout "
+                             "run can ask for cases no earlier round has measured")
     parser.add_argument("--fault", default="", help="comma list: cpu,mem,delay,disk,loss")
     parser.add_argument("--window-s", type=int, default=60)
     parser.add_argument("--warmup", type=int, default=10, help="cap on warm-up windows")
@@ -123,9 +126,13 @@ def main() -> int:
         cases = [case for case in cases if fault_type(case.name) in wanted]
     if args.per_fault:
         taken: Dict[str, int] = {}
+        skipped: Dict[str, int] = {}
         balanced = []
         for case in cases:
             family = fault_type(case.name)
+            if skipped.get(family, 0) < args.offset:
+                skipped[family] = skipped.get(family, 0) + 1
+                continue
             if taken.get(family, 0) >= args.per_fault:
                 continue
             taken[family] = taken.get(family, 0) + 1

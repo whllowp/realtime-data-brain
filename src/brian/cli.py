@@ -63,6 +63,7 @@ from .propose import Mode, Proposal, describe_proposal, format_proposal, propose
 from .promote import (
     FAILED,
     UNMEASURABLE,
+    VERIFIED,
     apply_promotion,
     claim_check,
     current_state,
@@ -423,13 +424,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # versions recorded on it: re-measuring another domain's patch here would grade a claim against
         # data it never described.
         promotions = [item for item in promotions_for_domain(load_promotions(root), domain)
-                      if item.pending and (not wanted or item.version == wanted)]
+                      if item.version == wanted or (not wanted and item.pending)]
         if not promotions:
             _print("no unverified promotions for %s: every version recorded on it has been re-checked."
                    % domain_slug(domain))
             return 0
         rules = EvolveRules(min_gain=args.min_gain)
         pool = build_pool(settings, streams)
+        checked_stream = summarise(streams)
         _print("verifying %d promotion(s) from %s on %s"
                % (len(promotions), domain_slug(domain), source))
         for promotion in promotions:
@@ -442,7 +444,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 continue
             measurement = measure(settings, promotion.candidate, streams, pool,
                                   budget=rules.fpr_budget)
-            verdict, reason = claim_check(promotion.claim, measurement, rules)
+            verdict, reason = claim_check(promotion.claim, measurement, rules,
+                                          recorded_stream=promotion.stream,
+                                          checked_stream=checked_stream)
             payload = {"checked_at": _stamp(), "stream": source, "verdict": verdict,
                        "reason": reason, "measurement": measurement.to_dict()}
             if verdict == FAILED:
@@ -452,10 +456,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 write_verification(root, promotion, payload, reverted_at=_stamp())
                 _print("  v%03d  %s  FAILED and reverted: %s" % (promotion.version,
                                                                  promotion.change, reason))
-            else:
+            elif verdict == VERIFIED:
                 write_verification(root, promotion, payload)
                 apply_promotion(root, promotion, domain=domain)
                 _print("  v%03d  %s  %s" % (promotion.version, promotion.change, verdict))
+            else:
+                # Not comparable: this stream is sampled differently from the one the claim was made
+                # on, so the check neither confirms nor retracts. The deployment state is left alone —
+                # applying on an unknown would be as wrong as reverting on one.
+                write_verification(root, promotion, payload)
+                _print("  v%03d  %s  unmeasurable: %s" % (promotion.version, promotion.change, reason))
         _print("")
         _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain))
         return 0

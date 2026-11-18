@@ -140,6 +140,9 @@ class Promotion:
     created_at: str = ""
     verification: Optional[Dict[str, Any]] = None
     reverted_at: str = ""
+    # Earlier checks, oldest first. A version whose claim was retracted and later re-established keeps
+    # both records: the retraction is evidence about how the claim was tested, not a clerical error.
+    checks: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def pending(self) -> bool:
@@ -155,6 +158,7 @@ class Promotion:
             "created_at": self.created_at,
             "verification": self.verification,
             "reverted_at": self.reverted_at,
+            "checks": list(self.checks),
         }
 
 
@@ -202,6 +206,7 @@ def load_promotions(root: Path) -> List[Promotion]:
             created_at=str(payload.get("created_at") or ""),
             verification=payload.get("verification"),
             reverted_at=str(payload.get("reverted_at") or ""),
+            checks=list(payload.get("checks") or []),
         ))
     promotions.sort(key=lambda item: item.version)
     return promotions
@@ -216,13 +221,21 @@ def write_verification(root: Path, promotion: Promotion, payload: Mapping[str, A
     that makes the file useful.
     """
     document = json.loads(promotion.path.read_text(encoding="utf-8"))
+    checks = list(document.get("checks") or [])
+    if document.get("verification"):
+        checks.append(document["verification"])
+    if checks:
+        document["checks"] = checks
     document["verification"] = dict(payload)
     if reverted_at:
         document["reverted_at"] = reverted_at
+    else:
+        # A check that did not fail says the configuration may stay in force; leaving an earlier
+        # retraction in place would print a version the deployment is running as retracted.
+        document.pop("reverted_at", None)
     promotion.path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     promotion.verification = dict(payload)
-    if reverted_at:
-        promotion.reverted_at = reverted_at
+    promotion.reverted_at = reverted_at or None
 
 
 def current_state(root: Path, domain: Optional[str] = None) -> Dict[str, Any]:
@@ -255,12 +268,19 @@ def _write_state(root: Path, state: Mapping[str, Any], domain: Optional[str] = N
 
 
 def promotions_for_domain(promotions: List[Promotion], domain: Optional[str] = None) -> List[Promotion]:
-    """The versions recorded on one stream. A promise is a statement about a dataset (boundary 33)."""
+    """The versions recorded on one stream, plus the ones that predate the stream field.
+
+    A promise is a statement about a dataset (boundary 33). The versions written before `stream` was
+    recorded cannot be attributed to any dataset, so they are kept in every domain's list and marked in
+    the table rather than dropped: dropping them would make a real retraction (v003) disappear from the
+    history of the only domain that re-checked it.
+    """
     if not domain:
         return list(promotions)
     slug = domain_slug(domain)
     return [promotion for promotion in promotions
-            if domain_slug(str(promotion.stream.get("source") or "")) in ("", slug)]
+            if not (promotion.stream or {}).get("source")
+            or domain_slug(str(promotion.stream.get("source"))) == slug]
 
 
 def legacy_state_note(root: Path, domain: Optional[str]) -> Optional[str]:
@@ -431,14 +451,53 @@ def revert_promotion(root: Path, promotion: Promotion,
     return _write_state(root, {"env": env, "sources": sources}, domain)
 
 
-def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules
-                ) -> Tuple[str, str]:
+GEOMETRY_TOLERANCE = 0.25
+
+
+def _geometry_mismatch(recorded: Optional[Mapping[str, Any]],
+                       checked: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """How the re-checked stream differs in shape from the one the claim was measured on.
+
+    Returns `None` when the two are comparable, or a sentence naming the difference. Only the *shape* is
+    compared, never the outcome: a stream that is sampled the same way but scores worse is a failed
+    promise, while one sampled differently measured a different quantity.
+    """
+    if not recorded or not checked:
+        return None
+    recorded_scored = recorded.get("scored")
+    checked_scored = checked.get("scored")
+    if recorded_scored and checked_scored:
+        ratio = float(checked_scored) / float(recorded_scored)
+        if abs(ratio - 1.0) > GEOMETRY_TOLERANCE:
+            return ("the re-check measured %d scored windows against the %d the claim was made on "
+                    "(%.2fx)" % (checked_scored, recorded_scored, ratio))
+    recorded_windows = recorded.get("windows")
+    checked_windows = checked.get("windows")
+    recorded_events = recorded.get("events")
+    checked_events = checked.get("events")
+    if recorded_windows and checked_windows and recorded_events and checked_events:
+        before = float(recorded_events) / float(recorded_windows)
+        after = float(checked_events) / float(checked_windows)
+        if before and abs(after / before - 1.0) > GEOMETRY_TOLERANCE:
+            return ("the re-check saw %.1f events per window against %.1f at the time of the claim"
+                    % (after, before))
+    return None
+
+
+def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules,
+                recorded_stream: Optional[Mapping[str, Any]] = None,
+                checked_stream: Optional[Mapping[str, Any]] = None) -> Tuple[str, str]:
     """Does the re-measured configuration still pay out what the version promised?
 
     The tolerances are the loop's own (`operational_tolerance` for recall, `cost_tolerance` for the bill)
     rather than new constants, because a promise is judged by the standard of the objective that made it —
     introducing a second standard here would let a version pass a check the loop would have rejected.
     """
+    mismatch = _geometry_mismatch(recorded_stream, checked_stream)
+    if mismatch is not None:
+        return UNMEASURABLE, ("%s, so this is a different measurement rather than a worse one: a "
+                              "window means a different amount of traffic when the stream is sampled "
+                              "differently" % mismatch)
     if measurement.recall_at_budget is None or claim.recall_at_budget is None:
         return UNMEASURABLE, ("the claim or the re-measurement has no recall at the budget, so the "
                               "promise cannot be checked either way")
@@ -473,9 +532,23 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
     if not promotions:
         lines.append("no version files yet: run a round with --apply to record one.")
         return "\n".join(lines)
+    if domain:
+        # A version measured on one stream is not a promise about another (boundary 48), so a table
+        # headed with a domain lists that domain's versions plus the ones that predate the stream
+        # field -- and marks the latter, because "recorded before anyone wrote down the dataset" is a
+        # different kind of evidence from "measured on this stream".
+        shown = promotions_for_domain(promotions, domain)
+        others = len(promotions) - len(shown)
+        promotions = shown
+        if others:
+            lines.append("(%d version(s) recorded on other streams are not listed: pass --verify "
+                         "with their stream to re-check them)" % others)
+            lines.append("")
     lines.append("%-8s %-26s %-12s %s" % ("version", "change", "claim", "state"))
     lines.append("-" * 96)
     for promotion in promotions:
+        legacy_mark = "  (no stream recorded)" \
+            if (promotion.stream or {}).get("source") in (None, "") else ""
         claim = promotion.claim
         promise = "n/a" if claim.recall_at_budget is None else "recall %.3f" % claim.recall_at_budget
         if promotion.reverted_at:
@@ -487,8 +560,11 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
             note = "unverified"
         else:
             note = "?"
-        lines.append("%-8s %-26s %-12s %s" % ("v%03d" % promotion.version, promotion.change[:26],
-                                              promise, note))
+        earlier = len(getattr(promotion, "checks", []) or [])
+        if earlier:
+            note = "%s  (%d earlier check%s)" % (note, earlier, "" if earlier == 1 else "s")
+        lines.append("%-8s %-26s %-12s %s%s" % ("v%03d" % promotion.version, promotion.change[:26],
+                                                promise, note, legacy_mark))
     if state is not None:
         lines.append("")
         env = dict(state.get("env") or {})

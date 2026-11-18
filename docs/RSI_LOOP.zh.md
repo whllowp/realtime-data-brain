@@ -1380,6 +1380,46 @@ RCAEval RE1-OB          7     25      6 19        recall 0.860 at the 10% budget
 
 这张表是**已记录主张的索引**，不是"战役改善了系统"的证据。每个数字都由写下它的那一轮测出，唯一今天被重算的是 audit 那一列（7 条会翻、18 条换理由）。想让它变成证据，缺的是同一份配置在固定留出集上跨轮的可比测量——而这正是边界 47（基线移动）与 33（承诺依赖数据集）在挡的东西。
 
+## 3.33 复核要看形状：一次采样不同的复核把健康配置回滚了
+
+第 25 轮的战役报告（3.32）把一张表放在一页上，表里写着：真正在役的只有两份版本，而且两份都是 `unverified`。这一轮去补那次复核。
+
+**RCAEval 拿到的是真留出集。** `scripts/service_data/rcaeval_stream.py` 新增 `--offset N`：每个故障族跳过前 N 个案例，于是 `--per-fault 3 --offset 3` 取的是第 4–6 个案例，早期任何一轮都没测量过。15 条记录、456 个计分窗口、279 个故障窗口。复核结果：
+
+```
+v019  digest.scoring = 'deviation', gate.anomaly_probability = 0.87, gate.notify_probability = 0.87  holds: recall 0.857 at the 10% budget against a promised 0.860, 1706 tokens per report against a promised 1703
+```
+
+召回差 0.4%、成本差 0.2%：确定性读者在它没见过的案例上兑现了承诺。
+
+**SMD 那边则是一次误判。** 为了不重复用同一段数据，`smd_stream.py --stride 7` 生成了 `data/smd/stream-check.json`（1355 个窗口，1235 个计分，192 个故障），然后：
+
+```
+v020  digest.scoring = 'auto', digest.rolling_window = 200, gate.rank_probability = 0.85  FAILED and reverted: promised recall 0.507 at the 10% budget, re-measured 0.297 (below 0.457)
+```
+
+复核器做了它被造出来要做的事——而这个回滚是错的。**原因在机制里**：`v020` 的承诺依赖"最近 200 个窗口"的排名，而一个窗口代表多少真实时间取决于采样方式。声明这条承诺的那一轮用 `--stride 10`（保留窗口相隔 50 分钟），复核用 `--stride 7`（相隔 35 分钟）。同一个数字 `200` 在两个流上不是同一个时间段，于是 0.297 与 0.507 的差别里混进了采样差别，而承诺里没有任何东西记录过它。
+
+**修法是把"形状"变成复核的前置条件。** `src/brian/promote.py` 新增 `GEOMETRY_TOLERANCE = 0.25` 与 `_geometry_mismatch(recorded, checked)`：只比较形状（计分窗口数与每窗事件数），不比较结果；超出 ±25% 就返回一句话，而不是一个判决。`claim_check` 在比较任何召回之前先看它，命中就返回 `unmeasurable`：
+
+```
+v020  …  unmeasurable: the re-check measured 1235 scored windows against the 828 the claim was made on (1.49x), so this is a different measurement rather than a worse one: a window means a different amount of traffic when the stream is sampled differently
+```
+
+在同一形状上复核（`data/smd/stream.json`）则精确复现：
+
+```
+v020  …  holds: recall 0.507 at the 10% budget against a promised 0.507, 3358 tokens per report against a promised 3358
+```
+
+于是 `--verify` 有三种结局，而不是两种：`holds` 写记录并把版本放进状态；`failed` 写记录并回滚；`unmeasurable` **只写记录、不碰部署状态**——"在一个未知上应用"与"在一个未知上回滚"一样错。
+
+**记录本身也有第二个缺陷。** 好的复核把 `holds` 写回去之后，版本文件里仍留着坏复核写的 `reverted_at`，表格就会对着**正在运行**的配置说"已撤回"。`write_verification` 现在把旧的 `verification` 追加进 `checks` 列表（这份承诺被怎么检验过，属于记录的一部分），写新的，并在新记录不是失败时清掉 `reverted_at`；表格给这样的版本加一句 `(N earlier check)`。需要说明的是：`v020` 那次失败的检查发生在 `checks` 存在之前，所以它的历史从这一轮开始——这恰好是"为什么要有历史"的证据，而不是可以补写的空白。
+
+同一处还修了域过滤：没有记录流的早期版本**保留**在每个域的列表里并标上 `(no stream recorded)`（先前被整体丢掉，导致 `v003` 那次真实撤回在唯一复核过它的域里消失）；有域时表格再补一行，说明有多少条记录属于别的流、要用它们的流去复核。
+
+---
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -1476,6 +1516,10 @@ missing for the next level
 
 56. **战役报告是索引，不是证据。** 3.32 节那张表把 35 轮记录按流汇总，但它打印的每个数字都来自写下它的那一轮；今天真正重算的只有 audit 那一列。所以"完成 25 轮"不等于"系统变好了 x%"——要得到后者，需要同一份配置在固定留出集上跨轮重复测量，而边界 47（基线随部署移动）与边界 33（承诺依赖数据集）都不允许把历史数字直接连成趋势线。
 
+57. **复核必须先看形状，再看结果。** 一条承诺是在某个采样、某个窗口几何上做出的；换了采样就是另一个量。先判形状不一致（`unmeasurable`），才轮到判"没兑现"（`failed`）——否则复核器会成为最危险的组件：它会用一次更严格的手续，回滚一个健康的配置。
+
+58. **被撤回又重新成立的版本必须保留两条记录。** 只留最后一条，表格会对着正在运行的配置说"已撤回"；只留第一条，同样的表格会说"已失效"而实际在役。`checks` 列表是这类版本唯一诚实的表示：现在在役，而且曾经被正确地下线过一次。
+
 ---
 
 ## 6. 下一步（按验证强度排序）
@@ -1500,3 +1544,5 @@ missing for the next level
 13. **（3.31 已完成）每次事件的花费是独立的成本出口。** `decide()` 在质量路径之前先看 `tokens_per_incident`：只要预算内在役两列召回都不降、每事件花费按成本门槛下降，就接受为 `cost`；第 19 轮那条 `reject cost` 经 `--rejudge` 当场翻成 `accept cost`（15516 → 1341 每事件）。泄漏（靠砍翻页量买便宜）由 `paging_holds` 堵住。
 
 14. **（3.32 已完成）35 轮汇总成一张表：战役报告，以及它不能声称的东西。** `brian evolve --campaign` 从账本、版本文件与按域状态里读出每一条流的轮次数、按规则的接受/拒绝分布、在役版本与它的承诺，audit 那一列用今天的规则重算。表第一次把三件事放在同一页：46 次接受只写出 10 份版本、真正在役只有两份、而且两份都是 `unverified`；`demo` 的 13 次接受零承诺也被显式列出。剩下的路：（a）给在役版本补一次留出复核，让 `unverified` 变成 `holds` 或 `failed`；（b）让"同一配置跨轮可比"成为可能——这需要固定留出集与固定基线，而它与边界 47 直接冲突，是一个需要产品口径的取舍，不是又一条规则。
+
+15. **（3.33 已完成）在役版本补了留出复核，并给复核加了形状前置条件。** `v019` 在 15 个没见过的 RCAEval 案例上 `holds`（0.857 对承诺 0.860）；`v020` 先被一次不同采样的复核误回滚，加 `_geometry_mismatch` 后改判 `unmeasurable`，在自己那段数据上精确 `holds`（0.507/3358 对 0.507/3358）。`--verify` 有了第三种结局：未知既不应用也不回滚，只记录。剩下的路：**让承诺自己带上采样形状**（现在 `stream` 字段记录了窗口数与事件数，但 `200` 个窗口意味着多长时间仍要靠比对才能看出），以及**给 `unmeasurable` 一个到期提醒**——一份永远判不出来的承诺与一份没复核过的承诺，区别只在于我们知道自己不知道。
