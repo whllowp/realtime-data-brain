@@ -112,3 +112,19 @@ def test_two_domains_each_count_their_own_files(tmp_path):
     assert rows["SMD"].files == {"data/smd/stream-check.json": 1}
     assert rows["RCAEval RE1-OB"].files == {"data/rcaeval/stream-holdout.json": 1}
     assert result.pooled == 0
+
+
+def test_the_same_file_spelled_two_ways_is_one_file(tmp_path):
+    # Round 54: a record written on Windows says data\smd\stream-check.json, one written by --stream-file
+    # says data/smd/stream-check.json. One file, one name -- otherwise the row claims two samplings
+    # where there is one (the drain produced 9 + 6 + 1 rounds over two SMD streams and said 3 files).
+    _round(tmp_path, source="SMD", stream_path="data/smd/stream-check.json",
+           stamp="2026-11-18T00:00:00+00:00")
+    _round(tmp_path, source="SMD", stream_path="data\\smd\\stream-check.json",
+           stamp="2026-11-18T00:01:00+00:00")
+
+    result = campaign(tmp_path)
+
+    assert result.rows[0].files == {"data/smd/stream-check.json": 2}
+    assert result.pooled == 0
+    assert "were sampled differently" not in format_campaign(result)

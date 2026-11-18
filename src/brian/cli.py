@@ -447,6 +447,19 @@ def _recorded_candidates(record: Mapping[str, Any]) -> List[Candidate]:
     return out
 
 
+def _rerun_limit(args: Any, ready: int) -> int:
+    """How many of the ready rounds this invocation re-runs (round 54).
+
+    `0` means the whole queue. It is not the default because a round is minutes of measurement (boundary 114);
+    it is allowed because the alternative — an operator typing the command thirteen times — is how a debt stops
+    being paid. The queue stops at the first failure so a broken round cannot spend the rest (boundary 117).
+    """
+    value = int(getattr(args, "rerun_limit", 1) or 0)
+    if value <= 0:
+        return ready
+    return min(value, ready)
+
+
 def _rerun_progress(root: Path) -> Dict[str, Any]:
     """How far the queue of nameable rounds has been paid down (round 53).
 
@@ -803,11 +816,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                              progress["rounds"]))
         for domain, name, _why, files in blocked:
             _print("  skipped         %-32s %s" % (name, _candidate_label(files)))
-        limit = max(0, int(getattr(args, "rerun_limit", 1) or 0))
+        limit = _rerun_limit(args, len(ready))
         if len(ready) > limit:
             _print("limit             %d of the %d will be re-run here; the rest keep their place until the "
                    "command runs again" % (limit, len(ready)))
+        elif limit == len(ready) and len(ready) > 1:
+            # Round 54: `--rerun-limit 0` is an explicit instruction to spend the whole queue, and the balance
+            # is printed *before* the first measurement — a reader who asked for ten rounds should learn at
+            # the top that the first broken one stops the rest, not from a stack trace halfway down.
+            _print("limit             draining all %d round(s); the queue stops at the first round that "
+                   "cannot be re-run" % limit)
         failures = 0
+        stopped = False
         rules = _rules_from_args(args)
         for domain, name, _why, files in ready[:limit]:
             target_file = files[0]
@@ -841,7 +861,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("")
                 _print("the re-run recorded nothing, so %s stays as it is" % name)
                 failures += 1
-                continue
+                stopped = True
+                break
             successor = str(fresh[0].get("round"))
             try:
                 mark = retire(root, name, re_measured_as=successor)
@@ -849,7 +870,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("")
                 _print("cannot retire %s: %s" % (name, error))
                 failures += 1
-                continue
+                stopped = True
+                break
             _print("")
             _print("recorded round %s" % written.get("round"))
             _print("retired %s (re-measured as %s)" % (name, successor))
@@ -873,6 +895,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (step["paid"], step["paid"] + step["remaining"], step["remaining"],
                       100.0 * step["share_now"], 100.0 * step["share_after"]))
         if ready:
+            if stopped:
+                # A batch that keeps spending after a broken step is not a batch, it is a way to burn the
+                # budget proving the same failure thirteen times (boundary 117).
+                _print("")
+                _print("queue             stopped after a round that could not be re-run: the remaining "
+                       "round(s) keep their place and the command can be run again")
             remaining = sum(1 for record in history(root) if not str(record.get("stream_path") or ""))
             total = len(history(root))
             _print("")
@@ -997,7 +1025,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
-                               refusal_expiry_days=horizon))
+                               refusal_expiry_days=horizon, queue=_rerun_progress(root)))
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")

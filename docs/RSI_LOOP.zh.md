@@ -2983,6 +2983,81 @@ file unknown      51 of 55 round(s) still cannot be placed — 15 left by the li
 一旦分开，报表就会说出比测量更多的话。
 
 
+### 3.61 整队一次跑完：余额印在第一次测量之前，第一次失败就停
+
+第 53 轮让队列报余额，但仍然一次一轮。欠账要真的降下来，操作员得把同一条命令敲十四次——而人会敲三次然后
+去干别的。这一轮让 `--rerun-limit 0` 表示整队，并把"这是整队"这句话印在**第一次测量之前**。
+
+队列的余额也从命令输出走上了战役报表——读者决定要不要继续花时间，读的往往是那张表：
+
+```
+$ brian evolve --campaign
+rounds            55  (236 candidate measurements, 108 accepted, 128 rejected)
+…
+file unknown      51 of 55 round(s) do not say which file they measured, so 93% of the totals above cannot
+                  be placed on a sampling
+queue             14 round(s) can be re-run from the record; 2 already re-measured; all of them would take
+                  the share 93% -> 67%
+```
+
+两者用的是同一个函数：报表说"全部跑完会到 67%"，命令说"还剩 14 轮"，说不一致的时候，读者只会相信更
+乐观的那个。
+
+整队的开头长这样：
+
+```
+$ brian evolve --rerun-unrecorded --rerun-limit 0
+candidates        14 of 14 round(s) have exactly one file; 0 cannot be placed
+progress          2 round(s) already re-measured into a named successor; 14 still to do
+projection        if the rest are re-run the unrecorded share falls 93% -> 67% of 55 round(s)
+limit             draining all 14 round(s); the queue stops at the first round that cannot be re-run
+```
+
+三个设计选择：
+
+**一、整队不是默认。** 第 52 轮把默认定成一轮，理由是"一轮是几分钟测量"（边界 114）。整队是**显式**指令：
+调用方说了要花这笔钱。默认与显式的区别就是"意外花掉"与"请求花掉"的区别。
+
+**二、第一次失败就停。** 一轮重跑失败意味着：记录读不回来、测量没能写出、或退役没写进账本。此后继续跑，
+花掉的是同样的钱去证明同一件事——一个坏掉的步骤会连续失败十四次。停下来并保留其余轮次的位置，命令可以
+再跑一次。
+
+**三、余额必须在第一次测量之前印出来。** 一个人敲下"整队"时应该先看到"14 轮"和"跑完会到 67%"，而不是在
+输出末尾发现。这条规则的理由是：命令的输出是**读者的预算表**，不是它的执行日志。
+
+整队跑完的样子（摘要）：
+
+```
+$ brian evolve --rerun-unrecorded --rerun-limit 0
+…
+  progress         16 of 16 re-measured; 0 left, share 67% -> 67% if the rest run
+
+$ brian evolve --campaign
+retired           18 round(s) were re-measured; their records stay, the checks skip them
+file unknown      37 of 55 round(s) do not say which file they measured, so 67% of the totals above
+                  cannot be placed on a sampling
+queue             0 round(s) can be re-run from the record; 16 already re-measured; all of them would
+                  take the share 67% -> 67%
+```
+
+`93% -> 67%` 是估计，`67%` 是结果——估计与结果相同不是因为预言准，而是因为两者用的是同一个函数：投影
+算的是"能跑的都跑完会到哪"，跑完之后剩下的就正好是那个数。
+
+整队还顺手暴露了一个缺陷：报表说 SMD 行"这里有 3 个文件被不同采样"，而实际上只有两个——因为一条记录写的是
+`data\smd\stream-check.json`（Windows 反斜杠），另一条写的是 `data/smd/stream-check.json`（命令里粘贴的
+正斜杠）。同一个文件被当成两个文件，于是"这一行的总数在加总两次采样"这句话本身也变成了错的。修法是在数文件
+之前把反斜杠归一成正斜杠，报表与敏感度表用同一个归一化（第 48 轮的两页一致性规则）。
+
+**边界 119：一个文件只有一个名字。** 同一个路径的两种拼写会在报表里变成两次采样，而"几个文件"正是读者用来
+判断这一行能否相减的依据。
+
+**边界 117：批量在第一次失败处停下，并说出来。** 一个坏步骤之后的批量不是批量，是用剩下的预算反复证明
+同一个失败。
+
+**边界 118：显式的"全部"仍然是一条指令，它的代价要在第一次测量前亮出来。** 默认一轮、显式整队，这个区别
+就是"意外花掉"和"请求花掉"。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3207,3 +3282,6 @@ missing for the next level
 
 41. 让 `--rerun-unrecorded` 支持排队跑完（`--rerun-limit 0` 表示整队），并在 `--campaign` 表头给出
 进度（已重跑 / 可重跑 / 剩余），这样"95% 会降到多少"在战役报表上也能读，而不是只在这条命令的输出里。
+
+42. 让整队自己记账：`var/evolve/rerun.json` 记下每次整队何时开始、付清了几轮、停在哪里，这样
+`--campaign` 能说"这笔欠账在下降"，而不只是"还剩多少"。

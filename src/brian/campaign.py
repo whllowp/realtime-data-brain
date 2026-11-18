@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from .evolve import (REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, rejection_provenance,
                      withheld_due, withheld_evidence_age, withheld_records, withheld_staleness)
@@ -252,7 +252,14 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
         # Round 48: which file this round measured, as recorded. A round written before round 47 says
         # nothing, and "(not recorded)" is the honest name for that -- inventing a path from the dataset
         # name is what rounds 46 and 47 each refused to do.
-        path = str(record.get("stream_path") or "")
+        #
+        # Round 54: one file has one name. A record written on Windows says `data\smd\stream-check.json`
+        # while a record written by `--stream-file data/smd/stream-check.json` says the same path with
+        # forward slashes, and a row that counts them separately reports "3 files here were sampled
+        # differently" about two files (the drain produced exactly that: 9 + 6 + 1 rounds over the same
+        # two SMD streams). The name on the page is the posix spelling, because that is the spelling a
+        # reader can paste into a command.
+        path = str(record.get("stream_path") or "").replace("\\", "/")
         row.files[path or "(not recorded)"] = row.files.get(path or "(not recorded)", 0) + 1
         if not path:
             # Counted here rather than derived from the rows later: a round that predates the field is
@@ -437,7 +444,8 @@ def _verdict_line(row: CampaignRow) -> str:
 
 def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     rules: Optional[EvolveRules] = None,
-                    refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS) -> str:
+                    refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS,
+                    queue: Optional[Mapping[str, Any]] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -516,6 +524,14 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             # record it cannot explain -- the reader deserves to know which debt is still open.
             line += ", %d of them written by this build" % result.unattributable_missing
         lines.append(line)
+    if queue is not None and (queue.get("ready") or queue.get("paid")):
+        # Round 54: the share above is a debt, and a debt is only worth printing next to its repayment. The
+        # numbers come from the re-run queue so the page and the command cannot disagree about the balance.
+        lines.append("queue             %d round(s) can be re-run from the record; %d already re-measured; "
+                     "all of them would take the share %.0f%% -> %.0f%%"
+                     % (queue.get("ready") or 0, queue.get("paid") or 0,
+                        100.0 * float(queue.get("share_now") or 0.0),
+                        100.0 * float(queue.get("share_after") or 0.0)))
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")

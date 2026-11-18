@@ -3194,7 +3194,11 @@ def refusal_sensitivity(root: Path, rules: Optional[EvolveRules] = None,
             row.refused += 1
             # Round 48: which file this refusal's round measured. Rounds before round 47 say nothing, and
             # that is printed as "(not recorded)" rather than deduced from the dataset name.
-            path = str(payload.get("stream_path") or recorded_paths.get(candidate.name) or "")
+            #
+            # Round 54: one file has one name. A Windows-spelled path and the same path with forward
+            # slashes are one file, and counting them apart made the campaign row claim three samplings
+            # over two (the same normalisation `campaign()` does; two pages of one ledger must agree).
+            path = str(payload.get("stream_path") or recorded_paths.get(candidate.name) or "").replace("\\", "/")
             row.files[path or "(not recorded)"] = row.files.get(path or "(not recorded)", 0) + 1
             if (trial.get("verdict") or {}).get("detail"):
                 row.recorded += 1
