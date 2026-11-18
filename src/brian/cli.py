@@ -42,8 +42,10 @@ from .evolve import (
     build_pool,
     Candidate,
     catalogue,
+    ceiling_shortfall,
     debt_history,
     format_audit,
+    format_ceiling_shortfall,
     format_limit_drift,
     format_rejudge,
     format_round,
@@ -1374,6 +1376,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         recorded_limits = [record for record in rounds if record.get("limits")]
         _print("ceilings          %d of %d round(s) record the wait ceilings they were judged under; %d do not"
                % (len(recorded_limits), len(rounds), len(rounds) - len(recorded_limits)))
+        # Round 71: the count above is the ledger's. A reader asking "where does that debt sit" needs it per
+        # stream, and a reader deciding whether to run the queue needs to know which of those rounds it could
+        # pay. Both come from the same rows the campaign page prints, so the two pages cannot disagree.
+        for row in ceiling_shortfall(rounds):
+            if not row["missing"]:
+                continue
+            _print("  ceiling debt    %-16s %d of %d round(s) do not record them"
+                   % (row["domain"], row["missing"], row["rounds"]))
         for index, record in enumerate(rounds, start=1):
             baseline_row = record.get("baseline") or {}
             measured = baseline_row.get("tokens_per_report")
@@ -1382,6 +1392,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             baseline_recall = "n/a" if before_recall is None else "%.3f" % before_recall
             trials = record.get("trials") or []
             accepted = record.get("accepted") or []
+            # Round 71: a hand-written or older record may carry the ledger's *count* where the round file
+            # carries the list of names, and merging them left an int here, which crashed the page on
+            # `",".join`. A history page is where a reader goes when something is wrong, so it prints what it
+            # can and never dies on the shape of a record (it said "accepted=-" in the round-70 demo).
+            if not isinstance(accepted, list):
+                accepted = []
+            if not isinstance(trials, list):
+                trials = []
             kept = [t for t in trials if (t.get("verdict") or {}).get("accepted")]
             # Both columns are printed because a round can be accepted on either one: a quality change
             # leaves tokens/report untouched, so a history that shows only the bill reads "nothing
@@ -1675,8 +1693,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("")
         _print("%-16s %-32s %-34s %s" % ("domain", "round", "likely file", "why it still matters"))
         _print("-" * 130)
+        # Round 71: a re-run writes a record that carries its own ceilings, so this list is also the list of
+        # rounds that would let the default --max-limit-drift cap arm. Marked per row rather than summarised,
+        # because the reader is deciding which rows to run, not how many.
+        lacking = {str(record.get("round") or ""): not record.get("limits")
+                   for record in history(root, include_retired=False)}
         for domain, name, why, files in matters:
-            _print("%-16s %-32s %-34s %s" % (domain, name, _candidate_label(files), why))
+            note = "  [+ceilings]" if lacking.get(str(name)) else ""
+            _print("%-16s %-32s %-34s %s%s" % (domain, name, _candidate_label(files), why, note))
         _print("")
         _print("Re-run one with `brian evolve --stream-file <file>`: the new record names the file, and this")
         _print("list shrinks. The likely-file column is matched by geometry, not written anywhere: a file whose")
@@ -1707,7 +1731,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         try:
-            drift = limit_drift(history(root, include_retired=False), limits_view)
+            live_records = history(root, include_retired=False)
+        except OSError:
+            live_records = []
+        try:
+            drift = limit_drift(live_records, limits_view)
         except OSError:
             drift = {"rounds": 0, "differ": [], "unrecorded": 0}
         budget_limit = _rerun_limit(args, int(_rerun_progress(root).get("ready") or 0))
@@ -1715,10 +1743,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # same invocation; computing `_queue_budget` three times would be three chances for the price to differ
         # from the sentence that quotes it.
         budget = _queue_budget(root, limit=budget_limit)
+        # Round 71: of the rounds that never recorded a ceiling, how many the queue could measure again (each
+        # re-run writes a new record that carries its ceilings and retires the old one). The note says whether
+        # that would be enough for the default cap to arm, because "a warning nothing can clear" and "a warning
+        # one command clears" look identical otherwise (boundary 151).
+        shortfall = ceiling_shortfall(live_records)
+        recorded_missing = {str(record.get("round") or ""): bool(record.get("limits"))
+                            for record in live_records}
+        payable_missing = sum(1 for _domain, name, _why, files in _unrecorded_matters(root)
+                              if len(files) == 1 and not recorded_missing.get(str(name), True))
+        ceiling_note = format_ceiling_shortfall(shortfall, payable=payable_missing)
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
-                               budget=budget, limits=_limits_text(limits_view)))
+                               budget=budget, limits=_limits_text(limits_view),
+                               ceiling_note=ceiling_note))
         worst, payable = _debt_view(root)
         if args.json_out:
             # Round 60: the page's next-step lines are derived facts, so the machine-readable form carries the

@@ -599,7 +599,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     debt: Optional[Mapping[str, Any]] = None,
                     plan: Optional[Sequence[Mapping[str, Any]]] = None,
                     budget: Optional[Mapping[str, Any]] = None,
-                    limits: Optional[str] = None) -> str:
+                    limits: Optional[str] = None,
+                    ceiling_note: Optional[str] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -741,6 +742,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # those are re-decided in the rows below -- it is a count of rounds whose *premises* moved.
         lines.append("ceilings          %d round(s) were judged under ceilings that differ from today's: the "
                      "rules did not change, the limits did" % result.drift)
+    if ceiling_note:
+        # Round 71: the count above says how many rounds moved; this says how many never recorded a ceiling at
+        # all, and whether the re-run queue could change that. A warning nobody can clear and a warning one
+        # command could clear look identical on the page otherwise (boundary 151).
+        lines.append("ceiling debt      %s" % ceiling_note)
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")

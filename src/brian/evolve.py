@@ -3253,6 +3253,55 @@ def round_limits_text(limits: Optional[Mapping[str, Any]]) -> str:
     return "; ".join(parts)
 
 
+def ceiling_shortfall(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Per domain, how many live rounds record the wait ceilings they were judged under (round 71).
+
+    Round 70 put each round's ceilings on its `--history` line, and round 69 counted them in the campaign
+    header. Both counted the whole ledger, so a reader could see "38 do not say" and still not know which
+    stream owed them, nor whether any command could pay. A per-domain count is the smallest form that answers
+    both: retired rounds are excluded because their records stand as written and no re-run pays them.
+    """
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for record in rounds:
+        if record.get("retired"):
+            continue
+        name = str((record.get("stream") or {}).get("source") or "(unattributed)")
+        bucket = buckets.setdefault(name, {"domain": name, "rounds": 0, "missing": 0})
+        bucket["rounds"] += 1
+        if not record.get("limits"):
+            bucket["missing"] += 1
+    rows: List[Dict[str, Any]] = []
+    for bucket in buckets.values():
+        bucket["share"] = float(bucket["missing"]) / float(bucket["rounds"]) if bucket["rounds"] else 0.0
+        rows.append(bucket)
+    rows.sort(key=lambda row: (-row["share"], str(row["domain"])))
+    return rows
+
+
+def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0) -> Optional[str]:
+    """One sentence about the rounds that do not record their ceilings, and whether a command could change it.
+
+    The number is only worth printing when it can move: `payable` is how many of the missing rounds the re-run
+    queue could measure again, and each such round writes a new record that carries its ceilings. When the
+    remainder is zero the default `--max-limit-drift` cap would arm by itself, which is the sentence a reader
+    needs to decide whether to start the queue at all (item 57's leftover, boundary 151).
+    """
+    missing = sum(int(row.get("missing") or 0) for row in rows)
+    total = sum(int(row.get("rounds") or 0) for row in rows)
+    if not missing:
+        return None
+    text = "%d of %d round(s) do not record the ceilings they were judged under" % (missing, total)
+    payable = max(0, min(int(payable), missing))
+    if not payable:
+        return text + ", and none of them can be re-run, so the default --max-limit-drift cap stays a warning"
+    left = missing - payable
+    if not left:
+        return (text + "; re-running %d of them would leave none, so the default --max-limit-drift cap "
+                        "would arm" % payable)
+    return (text + "; re-running %d of them would leave %d without one, so the default --max-limit-drift cap "
+                    "stays a warning" % (payable, left))
+
+
 def format_audit(result: Audit) -> str:
     lines: List[str] = []
     lines.append("=" * 96)

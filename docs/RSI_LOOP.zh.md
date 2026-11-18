@@ -3967,6 +3967,63 @@ ceilings          1 round(s) were judged under ceilings that differ from today's
 "检查根本没开"。
 
 
+### 3.78 欠账要按域报，而且要说它能不能被付掉
+
+第 70 轮把每一轮的上限印到了 `--history` 的行上，表头也报了总数。但"38 轮没说"这句话只回答了"有多少"，
+没回答**哪一流欠的**，也没回答**有没有命令能让这个数字变小**。两句话补上之后，一列警告才变成一次决定。
+
+```
+$ brian evolve --campaign
+ceiling debt      56 of 56 round(s) do not record the ceilings they were judged under, and none of them can
+                  be re-run, so the default --max-limit-drift cap stays a warning
+```
+
+```
+$ brian evolve --history
+ceilings          1 of 3 round(s) record the wait ceilings they were judged under; 2 do not
+  ceiling debt    SMD              1 of 2 round(s) do not record them
+  ceiling debt    RCAEval RE1-OB   1 of 1 round(s) do not record them
+```
+
+`--unrecorded` 的队列表里，会写上上限的那些轮被标出来：
+
+```
+SMD   round-ceilings-missing.json   data/smd/stream-one.json   wrote 1 version(s) still on the page; 1 refusal(s) still carried  [+ceilings]
+```
+
+付掉之后，同一句就变成"会亮"：
+
+```
+$ brian evolve --campaign --rerun-limit 1          # 一轮缺上限、且可重跑
+ceiling debt      1 of 1 round(s) do not record the ceilings they were judged under; re-running 1 of them
+                  would leave none, so the default --max-limit-drift cap would arm
+$ brian evolve --rerun-unrecorded --rerun-limit 1
+paid              SMD x1
+$ brian evolve --campaign                          # 债已还，这行不再出现
+```
+
+三件事是有意的：
+
+- **payable 只数队列真能重跑的轮**（有候选定义、几何唯一、还决定着什么），因为一次重跑会写一条**新**记录
+  并把旧的退役；不能重跑的轮永远留在"没说"里，把它们的数算进 payable 就是承诺一个不会发生的动作。
+- **余数为 0 才说"会亮"**，否则明说还剩多少：`would leave 3 without one, so … stays a warning`。这与第 69 轮
+  的默认闸门规则是同一条——闸门只在能被清掉的时候才亮。
+- **标记打在每一行上而不是汇总**，因为读者要决定跑哪几行，不是跑多少行。
+
+## 跑出来的一个崩溃
+
+`--history` 在演示账本上直接抛了 `TypeError: can only join an iterable`：账本行里的 `accepted` 是**计数**，
+轮文件里是**名字列表**，合并后留下的数字被 `",".join(accepted)` 撞上。真实账本的记录两者都是列表，所以从
+没暴露。修法是页面先判断形状、印 `accepted=-` 而不是崩：**历史页是读者在出问题时去看的地方**，它不能因为
+一条记录的形状而退出（边界 153）。
+
+**边界 152：** 一个按整本账统计的欠账也必须按流统计，并说明有没有命令能让它变小；只有"38 轮没说"而没有
+"其中 0 轮可重跑"时，这一列会教读者忽略它。
+
+**边界 153：** 页面必须能读形状更老的记录；历史页尤其如此——它是出问题时去看的地方，应当印出能印的，
+而不是抛异常。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4246,5 +4303,9 @@ missing for the next level
 
 57. **（3.77 已完成）`--history` 也报上限，并且默认闸门只看存活记录。** 剩下的部分：按域统计缺上限的
     轮数，让读者看见"重跑多少轮能让默认闸门亮起来"。
-58. 按域统计缺上限的轮数（`--history`/`--campaign` 共用一列），并在 `--unrecorded` 的队列里把"重跑后会写上
-    上限"标出来，让默认闸门从"永远警告"变成"付得起就亮"。
+58. **（3.78 已完成）按域统计缺上限的轮数，并标出重跑后会写上限的轮。** 剩下的部分：`--history --json-out`
+    也带上按域欠账与队列触达；当欠账可付时，让 `--campaign --strict` 能对"缺上限的比例"收费（与边界 126/135
+    同形：可付才收）。
+59. 把上限欠账做成可收费的：`--max-ceiling-debt SHARE` 只在 payable 覆盖全部缺失轮时才允许点亮，并在
+    `--unrecorded` 的 JSON 里给出"重跑后这个域还剩多少轮缺上限"。同时给 `--history` 加 `--json-out`，把
+    按域欠账、payable、以及每轮的上限原文一并输出，让脚本不必解析文本。
