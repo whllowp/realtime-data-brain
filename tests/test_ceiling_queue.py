@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 from brian import cli
+from brian.campaign import budget_text
 from brian.evolve import EvolveRules, Measurement, RoundResult, format_ceiling_shortfall, persist
 from brian.streams import load_stream_file, summarise
 
@@ -191,3 +192,48 @@ def test_the_two_families_are_counted_separately_on_the_page():
     text = format_ceiling_shortfall(rows, payable=1, named=2)
     assert "re-running 1 of them would leave 2 without one" in text
     assert "2 of them name their file" in text
+
+
+def test_a_drain_prices_the_ceiling_family_it_opens(tmp_path):
+    """Round 75: a drain pays both families, so a budget that prices one quotes a smaller command.
+
+    The sentence is the reader's only warning about how long the command they were told to type will keep
+    them waiting; counting one family while opening two understates the wait by exactly the work the command
+    is about to do (boundary 160).
+    """
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-unrecorded.json", applied=["v020"], shape=shape)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    # `ceiling_limit=0` means "drain this family too"; None means "this command does not touch it at all".
+    one_family = cli._queue_budget(tmp_path, limit=0, ceiling_limit=None)
+    both = cli._queue_budget(tmp_path, limit=0, ceiling_limit=0)
+    assert one_family["ceiling_rounds"] == 0
+    assert one_family["families"] == 1
+    assert both["ceiling_rounds"] == 1
+    assert both["families"] == 2
+    assert both["estimated_minutes"] > one_family["estimated_minutes"]
+    assert "it also re-measures 1 round(s) that named their file" in budget_text(both)
+    assert "it also re-measures" not in budget_text(one_family)
+
+
+def test_the_page_budget_opens_the_family_only_when_the_command_would(tmp_path, monkeypatch, capsys):
+    """Round 75's live defect: `0` means drain-the-family, so "leave it alone" must be `None`.
+
+    The first version passed `0` for a family the recommended command would not touch, and the page priced
+    nine rounds of work it had just told the reader to skip.
+    """
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-unrecorded.json", applied=["v020"], shape=shape)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["evolve", "--campaign", "--rerun-limit", "0", "--without-ceilings"])
+    without = capsys.readouterr().out
+    cli.main(["evolve", "--campaign", "--rerun-limit", "0"])
+    with_ceilings = capsys.readouterr().out
+    without_budget = next(line for line in without.splitlines() if line.startswith("budget"))
+    assert "it also re-measures" not in without_budget
+    assert "it also re-measures 1 round(s) that named their file" in with_ceilings
+    assert "--with-ceilings" in with_ceilings
+    assert "--with-ceilings" not in without_budget

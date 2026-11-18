@@ -566,14 +566,29 @@ def budget_text(budget: Mapping[str, Any]) -> str:
     """
     rounds = int(budget.get("rounds") or 0)
     total = int(budget.get("rounds_total") or 0)
-    if not rounds:
+    ceiling_rounds = int(budget.get("ceiling_rounds") or 0)
+    if not rounds and not ceiling_rounds:
         return ("nothing to spend: the queue has no round it can re-run, so the share stays %.0f%%"
                 % (100.0 * float(budget.get("share_now") or 0.0)))
+    if not rounds:
+        # Round 75: the command spends money even when the file family is empty -- the ceiling family is work
+        # too. Saying "nothing to spend" above a line that recommends measuring nine rounds is the page
+        # arguing with itself (boundary 160: the wait is quoted for the job the command actually does).
+        return ("%s measures %d round(s) that named their file but never recorded their ceilings, leaving "
+                "the unrecorded share unchanged at %.0f%% of %d round(s)"
+                % (budget.get("command"), ceiling_rounds,
+                   100.0 * float(budget.get("share_now") or 0.0), total))
     domains = ", ".join(str(domain) for domain in (budget.get("domains") or [])) or "no domain"
     line = ("%s pays %d round(s) (%s); the queue falls %.0f%% -> %.0f%% of %d round(s)"
             % (budget.get("command"), rounds, domains,
                100.0 * float(budget.get("share_now") or 0.0),
                100.0 * float(budget.get("share_after") or 0.0), total))
+    # Round 75: a drain pays two families, and this sentence counted one. "N rounds" is the file family; the
+    # ceiling family's rounds are measured with the same `run_round`, so leaving them out understates both the
+    # work and the wait. The count is stated next to the money, not folded into it: a reader comparing two
+    # invocations needs to see that one of them opens two families (item 62).
+    if ceiling_rounds:
+        line += "; it also re-measures %d round(s) that named their file but never recorded their ceilings" % ceiling_rounds
     by_domain = {str(name): float(value) for name, value in (budget.get("minutes_by_domain") or {}).items()}
     minutes = budget.get("estimated_minutes_by_domain")
     if minutes is None:

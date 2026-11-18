@@ -41,8 +41,13 @@ def _stream(root: Path, relative: str, dataset: str, windows: int, step_hours: i
 
 
 def _timed_stamp(root: Path, name: str, *, source: str, shape: dict, minutes: float,
-                 stream_path=None) -> None:
-    """One recorded round with an exact duration, written the way `persist` writes it."""
+                 stream_path=None, limits=None) -> None:
+    """One recorded round with an exact duration, written the way `persist` writes it.
+
+    `limits` records the wait ceilings the round was judged under. A round that named its stream file and
+    recorded no ceilings is a *second* family the queue can pay (round 73), so a fixture about minutes must
+    say which family it is testing by recording the ceilings on the rounds it does not want queued.
+    """
     evolve = root / "var" / "evolve"
     evolve.mkdir(parents=True, exist_ok=True)
     from datetime import datetime, timedelta, timezone
@@ -53,7 +58,7 @@ def _timed_stamp(root: Path, name: str, *, source: str, shape: dict, minutes: fl
                           field="max_context_events", value=4)
     (evolve / name).write_text(json.dumps({
         "round": name, "started_at": begin.isoformat(), "finished_at": end.isoformat(),
-        "stream": dict(shape, source=source), "stream_path": stream_path,
+        "stream": dict(shape, source=source), "stream_path": stream_path, "limits": limits,
         "trials": [{"candidate": candidate.to_dict(), "measurement": None, "verdict": None}],
         "baseline": None, "rules": {},
     }), encoding="utf-8", newline="\n")
@@ -78,13 +83,17 @@ def _timed_stamp(root: Path, name: str, *, source: str, shape: dict, minutes: fl
 def _two_domain_root(root: Path) -> None:
     smd = _stream(root, "data/smd/stream-one.json", "SMD", 3, 1)
     rcaeval = _stream(root, "data/rcaeval/stream-one.json", "RCAEval RE1-OB", 4, 2)
-    # Every named round is recorded; the payable one in each domain is unrecorded.
+    # Every named round is recorded; the payable one in each domain is unrecorded. The named rounds also
+    # record their ceilings: this fixture is about the *minutes* one command spends, and a round that kept
+    # its file but not its ceilings would add a second family the queue can pay (round 73), turning a
+    # pricing test into a test of that other family.
     for index, minutes in enumerate(SMD_MINUTES):
         _timed_stamp(root, "round-smd-%d.json" % index, source="SMD", shape=smd, minutes=minutes,
-                     stream_path="data/smd/stream-one.json")
+                     stream_path="data/smd/stream-one.json", limits={"max_minutes": 4.0})
     for index, minutes in enumerate(RCAEVAL_MINUTES):
         _timed_stamp(root, "round-rcaeval-%d.json" % index, source="RCAEval RE1-OB", shape=rcaeval,
-                     minutes=minutes, stream_path="data/rcaeval/stream-one.json")
+                     minutes=minutes, stream_path="data/rcaeval/stream-one.json",
+                     limits={"max_minutes": 6.0})
     # Timed at their domain's own median, so the payable rounds do not move the rate they are priced with.
     _timed_stamp(root, "round-smd-unrecorded.json", source="SMD", shape=smd, minutes=4.5)
     _timed_stamp(root, "round-rcaeval-unrecorded.json", source="RCAEval RE1-OB", shape=rcaeval,

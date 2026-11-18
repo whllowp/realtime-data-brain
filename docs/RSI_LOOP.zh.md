@@ -4198,6 +4198,37 @@ paid              SMD x2
 **边界 159：排空意味着"付掉所有能付的"，单步意味着"付一族"；默认值的花费不许随着族数悄悄翻倍。**
 
 
+### 3.82 预算要说钱，也要说族数：排空会开出第二族
+
+第 74 轮让 `--rerun-limit 0` 默认付两族（文件族 + 上限族），却没有让价格知道这件事。于是同一页上：
+
+```
+budget            brian evolve --rerun-unrecorded --rerun-limit 1 pays 1 round(s) (SMD); the queue falls 50% -> 0% of 2 round(s), about 5 minute(s)
+ceiling debt      2 of 2 round(s) do not record the ceilings they were judged under; ... 1 of them name their file, so --with-ceilings can re-measure them
+```
+
+上面这行报的是"一轮、约 5 分钟"，而推荐的那条命令会把两轮都量一遍。读者据以决定要不要开始的那个数字，是按一件更小的活算出来的。
+
+改了三处，都落在"同一句话"上：
+
+1. `_queue_budget(..., ceiling_limit=...)` 增加返回 `ceiling_rounds` 与 `families`，并把分钟数把第二族算进去——两族走的是同一个 `run_round`，一轮的时间是同一轮的时间；
+2. `budget_text` 把族数写在钱的旁边，而不是折进钱里：`it also re-measures 1 round(s) that named their file but never recorded their ceilings, about 10 minute(s)`。读者挑两条命令时，需要看到的是"一条开了两族"，不是平均掉之后的分钟数；
+3. 文件族为空、只剩上限族时，那句不再说 `nothing to spend`——它现在写 `... --with-ceilings measures 9 round(s) that named their file but never recorded their ceilings, leaving the unrecorded share unchanged at 66% of 56 round(s)`。一条正在花钱的命令不能顶着"没有可花的"这句话；
+4. 命令串本身带上 `--with-ceilings`：排空默认会开这一族，但"默认"是这个构建的事实，读者复制的那一行里看不见它；
+5. `--history` 在上限欠债行之后补 `measure` 行，用的是页面同一个 `_ceiling_command`：
+
+```
+  ceiling debt    SMD              38 of 38 round(s) do not record them
+  measure         brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0
+```
+
+只有跑起来才发现的缺陷：`_queue_budget` 里 `0` 的意思是"把这一族排空"，而我把 `0` 当成"不碰这一族"传给了 `--without-ceilings` 的路径，于是那页仍然报着九轮的钱。`None` 才是"不碰"——一个参数的默认值若有两种"零"，两种都要在签名上写清楚。
+
+**边界 160：一句给出价格的命令，必须把这条命令会开出的每一族都算进去。**只算一族的价钱不是保守估计，它是一张更小的活的价格表：读者照它决定开始，然后在一个比报价更长的等待里发现差额。
+
+**边界 161：读者为诊断打开的那一页，必须和做出诊断的那一页指向同一个下一步。**`--history` 与 `--campaign` 若各自拼一句命令，两页迟早给出不同答案；同一个函数是唯一能保证它们一致的东西。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4307,6 +4338,7 @@ missing for the next level
 62. **等价换算是可比性工具，不是最优值。** 在承诺自己的流上，hint 给出的 286 比 200 更差（0.507 → 0.396）。把 hint 读成"应该改成 286"就是把一次换算当成了实验结论；它唯一的作用是让两次测量量同一个东西。
 
 ---
+
 
 ## 6. 下一步（按验证强度排序）
 
@@ -4482,5 +4514,7 @@ missing for the next level
     同形：可付才收）。
 59. （3.79 已完成）把上限欠账做成可收费的一行。
 
-62. 让 `--history` 的 `ceiling debt` 行也带上命令（现在只有 `--campaign` 带），并把"排空会开出两族"
+62. **（3.82 已完成）** 让 `--history` 的 `ceiling debt` 行也带上命令（现在只有 `--campaign` 带），并把"排空会开出两族"
 写进 `budget` 那句话里 —— 预算说的是钱，族数说的是另一个维度。
+
+63. 让 `--rerun-unrecorded` 在排队时也打印 `families` 与每一族的轮数，并把 `--without-ceilings` 的页面预算写成"本次不碰上限族"一句话，而不是沉默。

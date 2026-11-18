@@ -1032,7 +1032,8 @@ def _ceiling_command(payable: int, named: int) -> Optional[str]:
     return None
 
 
-def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
+def _queue_budget(root: Path, limit: Optional[int] = None,
+                  ceiling_limit: Optional[int] = None) -> Dict[str, Any]:
     """What one invocation of the queue would spend and what it would leave behind (round 60, cost in round 61).
 
     The page printed the queue's size, the plan's first step, and the projected end of the queue as three
@@ -1069,12 +1070,33 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
     share_after = ((without - min(rounds, without)) / total) if total else 0.0
     each = _round_minutes(root)
     rates = _round_minutes_by_domain(root)
+    # Round 75: a drain pays two families, and the budget priced one. The ceiling family's rounds cost the same
+    # minutes as the file family's (both run `run_round`), so a sentence that counts only the file rounds
+    # understates the wait by exactly the work it is about to do. `ceiling_limit` is how many ceiling rounds this
+    # invocation would pay; `families` is the count the sentence states, because "two families" is a different
+    # fact from "N rounds" (item 62: money and dimensions are separate answers).
+    ceiling_rounds = 0
+    if ceiling_limit is not None:
+        pending = 0
+        try:
+            pending = len(_ceiling_matters(root))
+        except OSError:
+            pending = 0
+        ceiling_rounds = pending if int(ceiling_limit or 0) <= 0 else max(0, min(int(ceiling_limit), pending))
+    families = (1 if rounds else 0) + (1 if ceiling_rounds else 0)
+    counted_rounds = rounds + ceiling_rounds
+    estimated_total = (each * counted_rounds) if (each is not None and counted_rounds) else None
     minutes_by_domain: Dict[str, float] = {}
     for domain, count in paid_by_domain.items():
         rate = rates.get(domain, each)
         if rate is not None:
             minutes_by_domain[domain] = rate * count
     estimated = sum(minutes_by_domain.values()) if minutes_by_domain else None
+    if ceiling_rounds and each is not None:
+        # The ceiling family's rounds take the same kind of time; a wait that leaves them out is a wait for a
+        # smaller command than the one the reader was told to type.
+        estimated = (estimated or 0.0) + each * ceiling_rounds
+
     # Round 63: price the queue being drained as well as the step, so "pay it all now" and "pay it in steps"
     # are two numbers a reader can compare instead of two words they have to trust.
     drain_by_domain: Dict[str, float] = {}
@@ -1086,16 +1108,24 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
             drain_by_domain[domain] = rate * count
     drain_minutes = sum(drain_by_domain.values()) if drain_by_domain else None
     runs = -(-ready // rounds) if (ready and rounds) else 0
+    # Round 75: the sentence can now be about a command that opens the ceiling family, so the command it names
+    # must say so. A drain opens it by default, but "by default" is a fact about this build, not something a
+    # reader can see in the string they copy -- and the string is what they will run.
+    command = "brian evolve --rerun-unrecorded --rerun-limit %d" % requested
+    if ceiling_rounds:
+        command += " --with-ceilings"
     return {
-        "command": "brian evolve --rerun-unrecorded --rerun-limit %d" % requested,
+        "command": command,
         "rounds": rounds,
+        "ceiling_rounds": ceiling_rounds,
+        "families": families,
         "domains": paid,
         "ready": ready,
         "share_now": float(progress.get("share_now") or 0.0),
         "share_after": share_after,
         "rounds_total": total,
         "minutes_each": each,
-        "estimated_minutes": (each * rounds) if (each is not None and rounds) else None,
+        "estimated_minutes": estimated_total,
         "minutes_by_domain": minutes_by_domain,
         "estimated_minutes_by_domain": estimated,
         "drain_by_domain": drain_by_domain,
@@ -1516,6 +1546,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 continue
             _print("  ceiling debt    %-16s %d of %d round(s) do not record them"
                    % (row["domain"], row["missing"], row["rounds"]))
+        # Round 75: the campaign page already ends its debt sentence with the command that lowers it; this page
+        # named the debt and stopped. A reader told where the debt sits and not what to type has to go looking
+        # for the command in a different command's output (boundary 158, applied to the page a reader opens when
+        # something is wrong).
+        history_command = _ceiling_command(ceiling_file_payable, ceiling_named) if ceiling_rows else None
+        if history_command and any(int(row["missing"]) for row in ceiling_rows):
+            _print("  measure         %s" % history_command)
         for index, record in enumerate(rounds, start=1):
             baseline_row = record.get("baseline") or {}
             measured = baseline_row.get("tokens_per_report")
@@ -1621,7 +1658,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         drain = int(getattr(args, "rerun_limit", 1) or 0) <= 0
         ceiling_ready = named_pending if _wants_ceilings(args) else []
         ceiling_limit = _rerun_limit(args, len(ceiling_ready))
-        budget = _queue_budget(root, limit=limit)
+        # Round 75: the budget sentence must describe the command that is about to run, and this one may open two
+        # families. Passing the ceiling count is what keeps "about N minutes" from pricing a smaller command.
+        # `None` means this command does not touch the family at all; `0` means "drain all of it", so an
+        # unwanted family must be `None` -- `0` would price work the command was told not to do.
+        budget = _queue_budget(root, limit=limit,
+                               ceiling_limit=ceiling_limit if ceiling_ready else None)
         _print("budget            %s" % budget_text(budget))
         # Round 68: the queue judges every round it pays, so it names the ceilings it judges by -- the same
         # sentence the page and `--audit` print, from the same function, so the three cannot drift apart.
@@ -1940,8 +1982,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         budget_limit = _rerun_limit(args, int(_rerun_progress(root).get("ready") or 0))
         # Round 62: one budget, computed once. The page, the JSON payload and the minutes cap must describe the
         # same invocation; computing `_queue_budget` three times would be three chances for the price to differ
-        # from the sentence that quotes it.
-        budget = _queue_budget(root, limit=budget_limit)
+        # from the sentence that quotes it. Round 75 adds the family the recommended command would open: a drain
+        # pays the named ceiling debt too, and a budget that priced only one family would be quoting a different
+        # command than the one on the line above it.
+        # `None` (not `0`) when the recommended command would not open the family: inside `_queue_budget`, 0
+        # means "drain the whole family", so passing 0 for "leave it alone" prices work nobody asked for.
+        ceiling_would = (_rerun_limit(args, ceiling_named)
+                         if (_wants_ceilings(args) and ceiling_named) else None)
+        budget = _queue_budget(root, limit=budget_limit, ceiling_limit=ceiling_would)
         # Round 71/72: the shortfall and the queue's reach were computed once before the branches, so the page
         # and the gate cannot disagree about how many rounds lack ceilings or how many of them a re-run pays.
         # Round 74: the sentence names the command that lowers the debt, and it keeps the two families apart.
@@ -2080,8 +2128,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # Round 62: the check reads the same budget the page would print, computed by the same function, or a
         # reader could pass `--max-minutes` in one mode and fail it in the other without changing anything.
         try:
+            # Round 75: the audit prices the same command the page recommends, which may open the ceiling
+            # family too -- otherwise passing `--max-minutes` fails in one mode and passes in the other.
+            audit_ceiling = (_rerun_limit(args, ceiling_named)
+                             if (_wants_ceilings(args) and ceiling_named) else None)
             audit_budget = _queue_budget(
-                root, limit=_rerun_limit(args, int(_rerun_progress(root).get("ready") or 0)))
+                root, limit=_rerun_limit(args, int(_rerun_progress(root).get("ready") or 0)),
+                ceiling_limit=audit_ceiling)
         except OSError:
             audit_budget = {}
         # Round 67: the machine-readable side of the same judgement. A check whose stdout says "judged under
