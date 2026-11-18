@@ -29,7 +29,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from .evolve import Candidate, catalogue
+from .evolve import Candidate, EvolveRules, Measurement, catalogue, decide
 
 MAX_PROPOSALS = 8
 """How many *generated* proposals one round may contain. Each measurement is minutes of Laya calls.
@@ -346,6 +346,33 @@ def _is_deployed(candidate: Candidate,
     return all((deployed.get(section) or {}).get(field) == value for section, field, value in changes)
 
 
+SHAPE_TOLERANCE = 0.25
+"""How different the recorded sampling may be before a measurement stops being a seed for this round.
+
+The same number `promote.GEOMETRY_TOLERANCE` uses for claims, because it is the same question: two
+streams whose windows cover different amounts of traffic are not the same measurement.
+"""
+
+
+def _same_shape(recorded: Optional[Mapping[str, Any]],
+                shape: Optional[Mapping[str, Any]]) -> bool:
+    """Whether two stream summaries describe the same sampling. Unknown on either side counts as same.
+
+    `cadence_s` is the direct answer once a record has it (round 27); `windows` is the fallback that catches
+    the older records, and it is the number that exposed the defect: 948 windows at 3000 s against 1355 at
+    2100 s is the same wall-clock twice, not a bigger stream.
+    """
+    if not recorded or not shape:
+        return True
+    for key in ("cadence_s", "windows"):
+        left = recorded.get(key)
+        right = shape.get(key)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)) and left and right:
+            if abs(float(right) / float(left) - 1.0) > SHAPE_TOLERANCE:
+                return False
+    return True
+
+
 def _from_stream(record: Mapping[str, Any], source: Optional[str]) -> bool:
     """Whether this round was measured on `source`.
 
@@ -359,26 +386,54 @@ def _from_stream(record: Mapping[str, Any], source: Optional[str]) -> bool:
     return str((record.get("stream") or {}).get("source") or "") == str(source)
 
 
-def _accepted_measurements(rounds: Sequence[Mapping[str, Any]],
-                           source: Optional[str] = None) -> List[Candidate]:
+def _accepted_measurements(rounds: Sequence[Mapping[str, Any]], source: Optional[str] = None,
+                           rules: Optional[EvolveRules] = None,
+                           shape: Optional[Mapping[str, Any]] = None) -> List[Candidate]:
     """Candidates accepted at least once on `source`, most recent first.
 
     "Accepted" is the ledger's opinion, not the reader's: an accepted change is the only measured claim
     that something in this space can move a column, so it is the only sensible seed for a neighbour.
     Rejected measurements are not seeds — a rejection says the magnitude was wrong or the change inert,
     and searching around a rejection is how a loop spends a budget on a hypothesis it has already refuted.
+
+    Round 30 found the other half of that sentence: a *stored* acceptance is the opinion of the rules that
+    ran then. Round 27's shape experiment left a reshaping accepted under the old `quality` branch, and the
+    next round duly grew neighbours around a configuration today's rules reject — a local optimum around
+    something nobody adopted. When `rules` is given, every stored acceptance is re-decided from its own
+    recorded baseline before it is allowed to seed, which is the same check `--audit` performs, applied
+    where it changes what gets measured.
     """
     found: List[Candidate] = []
     seen = set()
     for record in reversed(list(rounds)):
         if not _from_stream(record, source):
             continue
+        if not _same_shape(record.get("stream"), shape):
+            continue
+        baseline = None
+        if rules is not None and record.get("baseline"):
+            try:
+                baseline = Measurement.from_dict(record["baseline"])
+            except (KeyError, TypeError, ValueError):
+                baseline = None
         for trial in record.get("trials") or []:
             if not (trial.get("verdict") or {}).get("accepted"):
                 continue
             candidate = Candidate.from_dict(trial.get("candidate") or {})
             if candidate.name in seen:
                 continue
+            if rules is not None and baseline is not None:
+                try:
+                    measured = Measurement.from_dict(trial.get("measurement") or {})
+                except (KeyError, TypeError, ValueError):
+                    measured = None
+                if measured is not None:
+                    if measured.promise is None and candidate.promise is not None:
+                        # The first reshape round recorded the measurement before this field existed;
+                        # the promise is still in the candidate, so the re-decision can see it.
+                        measured.promise = candidate.promise
+                    if not decide(baseline, measured, rules, veto=candidate.veto).accepted:
+                        continue
             seen.add(candidate.name)
             found.append(candidate)
     return found
@@ -431,12 +486,21 @@ def mode_from_history(rounds: Sequence[Mapping[str, Any]], *, source: Optional[s
 def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[Candidate]] = None,
             space: Optional[ProposalSpace] = None, mode: Optional[Mode] = None,
             max_proposals: Optional[int] = None, source: Optional[str] = None,
-            deployed: Optional[Mapping[str, Mapping[str, Any]]] = None) -> Proposal:
+            deployed: Optional[Mapping[str, Mapping[str, Any]]] = None,
+            reshaped: Optional[Candidate] = None,
+            rules: Optional[EvolveRules] = None,
+            shape: Optional[Mapping[str, Any]] = None) -> Proposal:
     """The proposals this round should measure, given the ledger and the configuration in force.
 
     `deployed` is the same shape `apply_overrides` takes (`{section: {field: value}}`) and is used for one
     thing only: a neighbour whose every setting already holds is the baseline, and measuring it again
     answers a question nobody asked. Those are counted and dropped, not silently forgotten.
+
+    `reshaped` is a candidate the caller derived from a recorded claim rather than from the catalogue or the
+    space (round 30: the same settings at the window count that covers the span the claim was made over).
+    It goes first and survives the deployed filter's spirit only when it is not itself the deployment. It is
+    a proposal like any other from here on: `decide()` judges it against the promise it carries, because it
+    is not competing with the baseline.
     """
     catalogue_entries = list(entries if entries is not None else catalogue())
     active_space = space if space is not None else space_from_catalogue(catalogue_entries)
@@ -446,20 +510,35 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
 
     if chosen.name != "expand":
         return _from_catalogue(chosen.name, chosen.reason, catalogue_entries, active_space,
-                               source or "", deployed)
+                               source or "", deployed, reshaped)
 
-    seeds = _accepted_measurements(rounds, source=source)
+    seeds = _accepted_measurements(rounds, source=source, rules=rules, shape=shape)
     if not seeds:
         # Nothing has ever been accepted, so there is no measured point to search around; the catalogue
         # is still the only source of claims. Saying so is better than generating neighbours of values
         # that have never moved anything.
-        return _from_catalogue(
-            "catalogue",
-            "%s — but no change has ever been accepted%s, so there is no measured magnitude to search "
-            "around and the catalogue stays the source" % (chosen.reason, label),
-            catalogue_entries, active_space, source or "", deployed)
+        other_sampling = sum(
+            1 for record in rounds
+            if _from_stream(record, source) and not _same_shape(record.get("stream"), shape))
+        if other_sampling:
+            reason = (
+                "%s — but no change has been accepted here at this sampling%s: the %d recorded round(s) "
+                "measured a stream where a window covered other traffic, and a magnitude does not carry "
+                "across densities, so the catalogue stays the source"
+                % (chosen.reason, label, other_sampling))
+        else:
+            reason = (
+                "%s — but no change has ever been accepted%s, so there is no measured magnitude to search "
+                "around and the catalogue stays the source" % (chosen.reason, label))
+        return _from_catalogue("catalogue", reason, catalogue_entries, active_space, source or "",
+                               deployed, reshaped)
 
     known = {tuple(candidate.changes()) for candidate in catalogue_entries}
+    if reshaped is not None:
+        # The reshape is a candidate in its own right and is judged against its promise. A neighbour that
+        # happens to write the same settings is not a second opinion on it: measuring it again would file
+        # it under `quality` and accept a configuration the promise rule had just refused.
+        known.add(tuple(reshaped.changes()))
     generated: List[Candidate] = []
     already = 0
     for seed in seeds:
@@ -483,12 +562,15 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
                                    source or "", deployed)
         fallback.deployed += already
         return fallback
+    if reshaped is not None:
+        generated.insert(0, reshaped)
     return Proposal(chosen.name, chosen.reason, generated[:cap], active_space, source or "",
                     deployed=already)
 
 
 def _from_catalogue(mode: str, reason: str, entries: Sequence[Candidate], space: ProposalSpace,
-                    source: str, deployed: Optional[Mapping[str, Mapping[str, Any]]]) -> Proposal:
+                    source: str, deployed: Optional[Mapping[str, Mapping[str, Any]]],
+                    reshaped: Optional[Candidate] = None) -> Proposal:
     """The catalogue, minus the entries that already describe what is running.
 
     A catalogue entry can be the deployment too — once `reuse-300` is accepted it is both a hand-written
@@ -497,6 +579,14 @@ def _from_catalogue(mode: str, reason: str, entries: Sequence[Candidate], space:
     """
     kept = [candidate for candidate in entries if not _is_deployed(candidate, deployed)]
     dropped = len(entries) - len(kept)
+    if reshaped is not None:
+        # The reshape is not a catalogue entry, so it is not subject to "the catalogue ran dry" — it is
+        # derived from a recorded claim. It still must not be the deployment itself, or the round would
+        # measure the baseline against itself.
+        if _is_deployed(reshaped, deployed):
+            dropped += 1
+        else:
+            kept.insert(0, reshaped)
     if not kept and dropped:
         reason = ("%s — but every catalogue entry describes the configuration already in force (%d of "
                   "them), so this round has nothing to measure" % (reason, dropped))

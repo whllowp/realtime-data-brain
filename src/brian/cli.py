@@ -372,7 +372,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             deployed, _sources, _refused, _unknown = in_force_overrides(root, settings, domain=source)
         except (OSError, ValueError):
             deployed = {}
-        proposal = propose(rounds, mode=mode, source=source, deployed=deployed)
+        proposal = propose(rounds, mode=mode, source=source, deployed=deployed,
+                           rules=EvolveRules(min_gain=args.min_gain))
         if args.catalogue:
             proposal = Proposal(
                 "catalogue",
@@ -544,6 +545,29 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("  ! %s" % note)
             _print("")
 
+    rules = EvolveRules(min_gain=args.min_gain)
+
+    # Round 30: when the deployment's own claim was made on a stream whose windows cover a different
+    # amount of traffic, the round proposes the same settings at the window count that restores the span.
+    # The candidate carries the promise it is trying to re-establish, so `decide()` judges it against that
+    # promise instead of against a baseline it was never meant to beat.
+    stream_shape = summarise(streams)
+    reshaped = None
+    if not args.from_default and deployed:
+        versions = {str(version) for version in sources.values() if version}
+        owners = [item for item in promotions_for_domain(load_promotions(root), domain)
+                  if str(item.version) in versions and item.candidate is not None]
+        if owners:
+            owner = owners[0]
+            reshaped = rescaled_candidate(owner, owner.stream, stream_shape)
+            if reshaped is not None:
+                _print("reshape         v%03d at window %d: the span its claim was made over"
+                       % (owner.version, reshaped.value if reshaped.field == "rolling_window"
+                          else next((value for section, field, value in reshaped.changes()
+                                     if field == "rolling_window"), 0)))
+                _print("  %s" % reshaped.provenance)
+                _print("")
+
     known = {candidate.name: candidate for candidate in catalogue()}
     proposal_record: dict = {}
     if args.candidates:
@@ -565,7 +589,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if args.expand:
             mode = Mode("expand", "forced by --expand, so the bounded space is measured even though the "
                                   "ledger did not ask for it")
-        proposal = (propose(history(root), mode=mode, source=source, deployed=deployed)
+        proposal = (propose(history(root), mode=mode, source=source, deployed=deployed,
+                            reshaped=reshaped, rules=rules, shape=stream_shape)
                     if not args.catalogue else None)
         if proposal is None:
             selected = list(known.values())
@@ -578,7 +603,6 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print(line)
             _print("")
 
-    rules = EvolveRules(min_gain=args.min_gain)
     prior = previously_rejected(root, rules)
     if prior:
         _print("Previously rejected (re-judged under today's rules, so a retired rule cannot poison this):")

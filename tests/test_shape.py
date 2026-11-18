@@ -96,7 +96,10 @@ def test_the_rescaled_candidate_changes_only_the_window(tmp_path):
     assert tuple(shape.changes()) == (("digest", "rolling_window", 286), ("digest", "scoring", "auto"),
                                       ("gate", "rank_probability", 0.85))
     assert shape.name.endswith("@hint286")
-    assert shape.hypothesis == promotion.candidate.hypothesis
+    # Round 30: the shape is a proposal now, so it states the promise it is trying to restore and where
+    # it came from -- `decide()` judges it against that promise, not against the baseline.
+    assert shape.promise == promotion.claim.recall_at_budget
+    assert "v020" in shape.provenance
 
 
 def test_the_rescaled_candidate_needs_a_window_knob(tmp_path):

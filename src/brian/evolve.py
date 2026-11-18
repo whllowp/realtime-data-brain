@@ -98,6 +98,20 @@ class Candidate:
     veto: Optional[str] = None
     """A disqualifier that no metric in this module can see. See `analyze-pages-only`."""
 
+    promise: Optional[float] = None
+    """For a *reshaped* candidate: the recall the version in force promised when it was accepted.
+
+    A reshaping proposes the same configuration at the window count that covers the same wall-clock span
+    on a differently-sampled stream (round 28 measured that 200 windows covered 600000 s where 286 did).
+    It is not a competitor to the baseline: it is trying to make the claim true again where the sampling
+    changed what a window counts. Judged against the baseline it would be accepted for 0.297 -> 0.427,
+    which is a number nobody was promised; judged against the promise it answers the question the claim
+    actually made.
+    """
+
+    provenance: str = ""
+    """Where a non-catalogue candidate came from, so a later reader knows it was not a grid step."""
+
     def changes(self) -> Tuple[Tuple[str, str, Any], ...]:
         """Every setting this candidate writes, as `(section, field, value)`."""
         return ((self.section, self.field, self.value),) + tuple(self.also)
@@ -119,6 +133,8 @@ class Candidate:
             "hypothesis": self.hypothesis,
             "changes": [list(change) for change in self.changes()],
             "veto": self.veto,
+            "promise": self.promise,
+            "provenance": self.provenance,
         }
 
     @classmethod
@@ -141,6 +157,8 @@ class Candidate:
             value=first[2],
             veto=payload.get("veto"),
             also=tuple(changes[1:]),
+            promise=payload.get("promise"),
+            provenance=payload.get("provenance") or "",
         )
 
 
@@ -312,6 +330,8 @@ class Measurement:
     """One configuration, measured on the fixed evaluator. Every field is comparable across candidates."""
 
     candidate: str
+    """The candidate's *name*: a measurement is a record of one configuration, not a reference to it."""
+
     recall: Optional[float]
     fpr: Optional[float]
     precision: Optional[float]
@@ -358,6 +378,14 @@ class Measurement:
     auc_by_recording: Dict[str, Optional[float]] = field(default_factory=dict)
     """What the model itself scored on each recording, so the round table can show the gap it has to close."""
 
+    promise: Optional[float] = None
+    """The recall a reshaped candidate was meant to restore, carried so `decide()` can judge it (round 30).
+
+    It lives here rather than on the candidate because a measurement keeps the candidate's *name*, not the
+    object: the first version read `trial.candidate.promise`, which silently did nothing and filed the
+    reshape under `quality`. The stored round record is what exposed it.
+    """
+
     @property
     def free_cut_alert_rate(self) -> Optional[float]:
         """The share of windows the label-free bar actually paged on."""
@@ -395,6 +423,7 @@ class Measurement:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "candidate": self.candidate,
+            "promise": _round(self.promise),
             "recall": _round(self.recall),
             "fpr": _round(self.fpr),
             "precision": _round(self.precision),
@@ -455,6 +484,7 @@ class Measurement:
             recall_at_free_cut=payload.get("recall_at_free_cut"),
             fpr_at_free_cut=payload.get("fpr_at_free_cut"),
             auc_by_recording=dict(payload.get("auc_by_recording") or {}),
+            promise=payload.get("promise"),
         )
 
 
@@ -877,6 +907,7 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
     faults = counts["tp"] + counts["fn"]
     return Measurement(
         candidate=candidate.name if candidate is not None else "baseline",
+        promise=candidate.promise if candidate is not None else None,
         recall=_rate(counts, "tp", "fn"),
         fpr=_rate(counts, "fp", "tn"),
         precision=_rate(counts, "tp", "fp"),
@@ -1144,6 +1175,28 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
     """
     if veto:
         return Verdict(trial.candidate, False, "veto", veto)
+
+    if trial.promise is not None:
+        # A reshaping is judged against the promise, not against the baseline. Two outcomes, and both
+        # say something the operator needs: either the promise is restored on this sampling, or it is
+        # not — and then what looked like a stable claim was partly a property of how the stream was
+        # sampled. Returning here is deliberate: letting a reshaping fall through to the quality branch
+        # would accept it for beating a baseline it was never meant to beat.
+        measured = trial.recall_at_budget
+        promise = trial.promise
+        if measured is None:
+            return Verdict(trial.candidate, False, "reshape",
+                           "the reshape has no at-budget recall to compare with the promised %.3f"
+                           % promise)
+        if measured >= promise - rules.recall_tolerance:
+            return Verdict(trial.candidate, True, "reshape",
+                           "restores the promised %.3f at the %.0f%% budget: %.3f on this sampling"
+                           % (promise, 100 * trial.budget, measured))
+        return Verdict(trial.candidate, False, "reshape",
+                       "reaches %.3f of the promised %.3f at the %.0f%% budget, so part of the claim "
+                       "was a property of how the stream was sampled: this restores comparability, not "
+                       "the promise, and the deployment stands"
+                       % (measured, promise, 100 * trial.budget))
 
     if trial.fpr is not None and trial.fpr > rules.deploy_fpr_ceiling + 1e-9:
         # A candidate that changes what the shipped threshold would alert on has to land inside the

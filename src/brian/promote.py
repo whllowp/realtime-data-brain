@@ -611,9 +611,11 @@ def rescaled_candidate(promotion: "Promotion", recorded: Optional[Mapping[str, A
                        checked: Optional[Mapping[str, Any]]) -> Optional[Candidate]:
     """The same version, with its window count changed to cover the same wall-clock on this stream.
 
-    `None` when there is nothing to rescale: no candidate, no window knob, or no comparable shape pair. The
-    returned candidate is a *measuring instrument*, not a proposal — it is what `--at-hint` puts through
-    `measure` so a refused check can still say what the promise does at a comparable horizon.
+    `None` when there is nothing to rescale: no candidate, no window knob, or no comparable shape pair.
+
+    Round 30 turned this from a *measuring instrument* into a proposal: the returned candidate carries the
+    recall the version promised (`promise`) and a `provenance` sentence, because `decide()` must judge it
+    against the promise rather than against the baseline it was never meant to beat.
     """
     hint = rescale_hint(promotion, recorded, checked)
     if hint is None or promotion.candidate is None:
@@ -631,9 +633,17 @@ def rescaled_candidate(promotion: "Promotion", recorded: Optional[Mapping[str, A
     if all(change[2] == current[2] for change, current in zip(changes, promotion.candidate.changes())):
         return None
     first = changes[0]
-    return Candidate(name="%s@hint%d" % (promotion.candidate.name, value),
-                     hypothesis=promotion.candidate.hypothesis,
-                     section=first[0], field=first[1], value=first[2], also=tuple(changes[1:]))
+    claim = promotion.claim
+    promise = claim.recall_at_budget if claim is not None else None
+    return Candidate(
+        name="%s@hint%d" % (promotion.candidate.name, value),
+        hypothesis="the version in force was measured where a window covered different traffic; at %d "
+                   "windows it covers the span its claim was made over, so the claim can be tested again"
+                   % value,
+        section=first[0], field=first[1], value=first[2], also=tuple(changes[1:]),
+        promise=promise,
+        provenance="v%03d's own settings at the window count that covers the same span (%s)"
+                   % (promotion.version, hint))
 
 
 def shape_note(payload: Optional[Mapping[str, Any]]) -> str:
