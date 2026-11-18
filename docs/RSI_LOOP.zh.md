@@ -3749,6 +3749,60 @@ if not budget and "budget" not in state:   # 只有"键都没传"才去磁盘读
 一条只能加不能减的政策会累积成没人记得来由的规则；而一个用"空"表示两种含义的写者，
 会在撤销时把政策复活。
 
+### 3.74 门禁也要念出它按什么判定，撤销要跟着它的命令走
+
+3.73 让正文念出了上限，但**门禁**没有：`--audit --strict` 会因为"这一队要跑 10 分钟，超过你要求的 5 分钟"
+退出 1，而它的报告里没有任何"上限"字样。读者看到的是一个失败的检查，看不到它按哪个数判的——
+两条读同一本账的路径，用不同的方式描述同一次判定（第 51 轮边界 108 的老问题，只是换了个位置）。
+
+于是 `--audit` 在报告末尾打印同一句话，用的是同一个函数：
+
+```
+$ brian evolve --audit --rerun-limit 0
+…
+limits            one run 10.0 minute(s) on rcaeval-re1-ob (state); a drain of 3.0 minute(s) on rcaeval-re1-ob (state)
+```
+
+`--ignore-state-limits` 时这句话不出现——因为门禁确实没读它们，声称读过就是另一种撒谎。有测试把
+"两条路径说出同一句话"钉住：`--audit` 与 `--campaign` 的 `limits` 行必须逐字相等。
+
+机器可读的一侧也补上了：`--audit --json-out` 现在写出 `limits`、`limits_text`，以及它已经打印过的
+全部计数（`moved`、`relabelled`、`rounds`、`trials`、`retired`、`unreconstructable`、`inconsistent`、
+`rules_hash`、`entries`）。一份检查如果只在终端里说明判据，事后就没有可复核的记录（边界 131）。
+
+第二半是撤销。3.73 让上限能被撤销，但撤销只活在那条命令的终端里：状态文件里键被删掉，
+"撤过"和"从没设过"在文件里长得一模一样。这个信息不能塞回状态（那会让空政策复活，正是 3.73 的缺陷），
+所以由做出决定的命令自己带出来：
+
+```
+$ brian evolve --set-domain-drain "rcaeval-re1-ob=none" --json-out var\write67.json
+cleared           rcaeval-re1-ob: no drain ceiling
+
+{
+  "recorded": [],
+  "cleared": [{"domain": "rcaeval-re1-ob", "kind": "drain"}],
+  "in_force": {"run": {"rcaeval-re1-ob": 10.0}, "drain": {}},
+  "files": ["var\\evolve\\domains\\rcaeval-re1-ob\\current.json"]
+}
+```
+
+`recorded` 与 `cleared` 是同一种形状的两半（`domain` / `kind` / `minutes`），`in_force` 是写完之后
+真正在生效的集合——这样"我说了什么"和"现在是什么"在同一次输出里，读者不必自己把两个来源对上。
+
+三个读数：
+
+1. **判定的依据属于判定本身。** 门禁、正文、JSON 是三处入口，一处念了另外两处不念，就等于
+   把"可复核"这件事交给读者碰运气。
+2. **撤销是一种状态，不是一次沉默。** 状态文件用"键不存在"表示"没有上限"，撤销必须由命令说出
+   自己做了什么；把撤销写回状态会让它复活，所以它属于那条命令的输出。
+3. **`recorded` 与 `cleared` 要同形。** 两个形状不同的清单，读者无法回答"这个域现在到底被什么限制"。
+
+**边界 144：一条会通过退出码作出判定的报告，必须在同一份输出里念出判据；只在终端里念，
+事后就没有可复核的记录。**
+
+**边界 145：撤销必须由做出撤销的那条命令记录，而不是由状态文件的空缺推断——
+空政策既表示"从没设过"也表示"撤过了"，两者不能靠猜。**
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4018,5 +4072,8 @@ missing for the next level
 53. **（3.73 已完成）正文念出判定的上限，上限也能撤销。** 剩下的：正文里的 `limits` 句子还只有
     机器可读的那一版；下一项让"撤销"也出现在 JSON 的 `limits` 里，并让 `--audit` 报告它读到的上限。
 
-54. 让撤销也出现在 `--json-out` 的 `limits` 里（现在撤销只在正文与文件里可见），并让 `--audit`
-报告它读到的上限与来源——一份门禁报告应当说明自己按什么判定，而不是把这件事留给另一条命令。
+54. **（3.74 已完成）门禁念出它读到的上限，撤销跟着它自己的命令走。** 剩下的：`--rerun-unrecorded`
+    自己开头也要念同一句（现在它只念 `budget`），并让 `--audit --json-out` 的 `limits_text` 进入 CI 比较。
+
+55. 让 `--rerun-unrecorded` 开头也念同一句 `limits`（现在它只念 `budget`），并把
+`--audit --json-out` 的 `limits_text` 接进 CI（一句判据一旦被比较，就该在变化时失败）。

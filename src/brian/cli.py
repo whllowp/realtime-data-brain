@@ -1282,21 +1282,41 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 written.append((name, value, None, clear, False))
             else:
                 written.append((name, None, value, False, clear))
+        recorded_entries: List[Dict[str, Any]] = []
+        cleared_entries: List[Dict[str, Any]] = []
+        state_files: List[str] = []
         for name, run_limit, drain_limit, clear_run, clear_drain in written:
             domain = _domain_name(root, name)
             path = set_state_budget(root, domain, run_limit, drain_minutes=drain_limit,
                                     clear_run=clear_run, clear_drain=clear_drain)
+            state_files.append(str(path))
             if run_limit is not None:
                 _print("recorded          %s: at most %g minute(s) for one queue run" % (domain_slug(domain),
                                                                                         run_limit))
+                recorded_entries.append({"domain": domain_slug(domain), "kind": "run",
+                                         "minutes": float(run_limit)})
             if clear_run:
                 _print("cleared           %s: no queue-run ceiling" % domain_slug(domain))
+                cleared_entries.append({"domain": domain_slug(domain), "kind": "run"})
             if drain_limit is not None:
                 _print("recorded          %s: at most %g minute(s) to empty the queue" % (domain_slug(domain),
                                                                                          drain_limit))
+                recorded_entries.append({"domain": domain_slug(domain), "kind": "drain",
+                                         "minutes": float(drain_limit)})
             if clear_drain:
                 _print("cleared           %s: no drain ceiling" % domain_slug(domain))
+                cleared_entries.append({"domain": domain_slug(domain), "kind": "drain"})
             _print("                  %s" % path)
+        # Round 67: a withdrawal used to exist only in the terminal that typed it. The state file cannot carry
+        # the fact (an absent key says "never set" as loudly as "withdrawn"), so the command that withdraws
+        # says so in its own machine-readable output -- the report of a decision must travel with the decision.
+        if args.json_out:
+            payload = {"recorded": recorded_entries, "cleared": cleared_entries,
+                       "in_force": {"run": state_budgets(root), "drain": state_drains(root)},
+                       "files": list(dict.fromkeys(state_files))}
+            Path(args.json_out).write_text(_json(payload), encoding="utf-8")
+            _print("")
+            _print("wrote %s" % args.json_out)
         return 0
 
     if args.history:
@@ -1709,6 +1729,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot audit %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         _print(format_audit(result))
+        # Round 67: the gate charges ceilings, so it must print the ones it read (item 54). A reader who runs
+        # `--audit --strict` and gets exit 1 needs to see whether the number came from a policy recorded in a
+        # domain's state or from today's command line, exactly as the campaign page does; two modes reading one
+        # ledger must not describe the judgement differently.
+        audit_limits = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
+                                    drain_ceiling, drain_ceilings, flag_drain_ceilings)
+        audit_text = _limits_text(audit_limits)
+        if audit_text:
+            _print("limits            %s" % audit_text)
         # Round 45: the refusals are records too (boundary 91), so the ledger-wide gate counts a refusal
         # nobody re-tested as debt. Computed from the same horizon `--campaign` uses, or the two modes
         # would disagree about the same ledger and a reader could pass the check by picking one.
@@ -1738,6 +1767,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 root, limit=_rerun_limit(args, int(_rerun_progress(root).get("ready") or 0)))
         except OSError:
             audit_budget = {}
+        # Round 67: the machine-readable side of the same judgement. A check whose stdout says "judged under
+        # a 10-minute ceiling" while its JSON says nothing leaves the reader unable to review it later, and
+        # boundary 131 already makes that a rule for the campaign page.
+        if args.json_out:
+            payload = {"limits": audit_limits, "limits_text": audit_text,
+                       "rules_hash": result.fingerprint, "rounds": result.rounds,
+                       "trials": result.trials, "retired": result.retired,
+                       "moved": result.moved, "relabelled": result.relabelled,
+                       "unreconstructable": result.cross, "inconsistent": result.inconsistent,
+                       "entries": result.entries}
+            Path(args.json_out).write_text(_json(payload), encoding="utf-8")
+            _print("")
+            _print("wrote %s" % args.json_out)
         return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
                             due=due, oldest_days=oldest, horizon=horizon,
                             unrecorded=missing, legacy_unrecorded=legacy, unrecorded_share=share,
