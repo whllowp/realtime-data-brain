@@ -1484,16 +1484,24 @@ def test_the_label_free_cut_is_the_quantile_a_deployment_could_read_off_its_own_
 
 def test_the_label_free_rates_are_counted_against_each_recordings_own_scores():
     """One bar per recording: two hosts do not share a scale, and neither do their bars."""
-    high = [_Score(0.95, True), _Score(0.90, True), _Score(0.10, False), _Score(0.20, False)]
-    low = [_Score(0.30, True), _Score(0.25, True), _Score(0.05, False), _Score(0.01, False)]
+    # Eight windows per recording so a 25% alert rate can page on both of its faults; with four windows
+    # the rule (correctly) allows one page and finds one fault, which says nothing about the scales.
+    high = [_Score(0.95, True), _Score(0.90, True),
+            _Score(0.10, False), _Score(0.20, False),
+            _Score(0.15, False), _Score(0.25, False),
+            _Score(0.05, False), _Score(0.30, False)]
+    low = [_Score(0.30, True), _Score(0.25, True),
+           _Score(0.05, False), _Score(0.01, False),
+           _Score(0.08, False), _Score(0.02, False),
+           _Score(0.04, False), _Score(0.20, False)]
     groups = [("high", high), ("low", low)]
 
-    rates = free_cut_rates(groups, budget=0.25)
+    rates = free_cut_rates(groups, alert_budget=0.25)
 
     assert rates["recall"] == pytest.approx(1.0)
     assert rates["fpr"] == pytest.approx(0.0)
     # one pooled bar cannot serve both scales: it sits above the low recording's positives
-    pooled = free_cut_rates([("all", high + low)], budget=0.25)
+    pooled = free_cut_rates([("all", high + low)], alert_budget=0.25)
     assert pooled["recall"] is not None and pooled["recall"] < rates["recall"]
 
 

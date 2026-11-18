@@ -346,8 +346,47 @@ class Measurement:
     """Recall of the bar a deployment can compute from its own scores, with no label read."""
     fpr_at_free_cut: Optional[float] = None
     """The false-positive rate that bar actually spends, which is the budget in practice."""
+    alert_budget: float = 0.0
+    """The alert rate the label-free bar was set at. A different number from `budget`: see
+    `label_free_ceiling` for why the two cannot be the same quantity."""
+    prevalence: Optional[float] = None
+    """Share of scored windows that are anomalous, i.e. what the alert budget is being divided into."""
+    alerts_at_free_cut: Optional[int] = None
+    """How many windows the label-free bar actually paged on. Equal to the target rate only when the
+    scores are distinct enough for the bar to land on a value few windows share."""
+    scored_at_free_cut: Optional[int] = None
     auc_by_recording: Dict[str, Optional[float]] = field(default_factory=dict)
     """What the model itself scored on each recording, so the round table can show the gap it has to close."""
+
+    @property
+    def free_cut_alert_rate(self) -> Optional[float]:
+        """The share of windows the label-free bar actually paged on."""
+        if not self.alerts_at_free_cut or not self.scored_at_free_cut:
+            return None
+        return self.alerts_at_free_cut / self.scored_at_free_cut
+
+    @property
+    def label_free_ceiling(self) -> Optional[float]:
+        """The most recall a fixed alert rate can buy on a stream with this prevalence.
+
+        Alerting on the top `a` share of windows cannot find more than `a / prevalence` share of the
+        faults: if half the windows are faults, a 10% alert rate can at best catch one fifth of them.
+        Round 23 measured recall 0.226 (service domain, prevalence 61%) and 0.284 (host, prevalence 16%)
+        against this ceiling, which is why the number belongs next to the recall it limits.
+
+        The rate used is the one the bar actually spent when that is known: a fifteen-window sample cannot
+        page on 1.5 windows, so the bar pages on two and spends 13.3% at a 10% target. Comparing recall
+        with the nominal budget in that case would report a violation of a rate the bar was never able to
+        respect.
+        """
+        if not self.prevalence or self.prevalence <= 0:
+            return None
+        rate = self.free_cut_alert_rate
+        if rate is None:
+            if not self.alert_budget:
+                return None
+            rate = self.alert_budget
+        return min(1.0, rate / self.prevalence)
 
     @property
     def coverage_floor(self) -> float:
@@ -377,6 +416,12 @@ class Measurement:
             "at_budget_pooled": self.at_budget_pooled,
             "recall_at_free_cut": _round(self.recall_at_free_cut),
             "fpr_at_free_cut": _round(self.fpr_at_free_cut),
+            "alert_budget": _round(self.alert_budget, 4),
+            "prevalence": _round(self.prevalence, 4),
+            "label_free_ceiling": _round(self.label_free_ceiling, 4),
+            "alerts_at_free_cut": self.alerts_at_free_cut,
+            "scored_at_free_cut": self.scored_at_free_cut,
+            "free_cut_alert_rate": _round(self.free_cut_alert_rate, 4),
             "auc_by_recording": {k: _round(v, 6) for k, v in self.auc_by_recording.items()},
         }
 
@@ -724,26 +769,44 @@ def reader_scores(settings: Settings, streams: Sequence[Stream]) -> Dict[str, Li
     return labelled
 
 
-def label_free_cut(scores: Sequence[float], budget: float) -> Optional[float]:
-    """The bar that would alert on `budget` of these windows, read off the scores and nothing else.
+def _count_at_or_above(values: Sequence[float], cut: float) -> int:
+    """How many of the sorted `values` are >= `cut`."""
+    low, high = 0, len(values)
+    while low < high:
+        middle = (low + high) // 2
+        if values[middle] < cut:
+            low = middle + 1
+        else:
+            high = middle
+    return len(values) - low
 
-    The loop's headline result for the reader (recall 0.860 at a 10% budget) comes from a sweep that
-    scans the labels to pick its cut, so it is an upper bound no deployment can reach. This function is
-    what a deployment *can* compute: sort its own scores, take the `budget` quantile, and put the bar
-    there. The difference between the two is the price of not knowing the answer, and it belongs in the
-    table next to the number it discounts.
+
+def label_free_cut(scores: Sequence[float], budget: float) -> Optional[float]:
+    """The bar a deployment could set from its own traffic so that at most `budget` of it pages.
+
+    This is a quantile, but not the naive one. Round 23 measured a reader whose scores take few distinct
+    values: on RCAEval a nominally 10% bar alerted on 14.9% of windows, because dozens of windows shared
+    the value the quantile landed on. A bar that pages on more than the rate it was set for is not a 10%
+    bar, so the cut is raised until the number of windows at or above it fits. When even the highest
+    score is shared by too many windows the sample cannot support that rate, and `None` is returned
+    rather than a bar that lies.
     """
-    values = sorted(float(score) for score in scores)
-    if not values:
+    values = sorted(float(value) for value in scores)
+    count = len(values)
+    if count == 0:
         return None
     if budget <= 0.0:
         return values[-1]
     if budget >= 1.0:
         return values[0]
-    index = int(round(len(values) * (1.0 - budget))) - 1
-    index = min(max(index, 0), len(values) - 1)
-    return values[index]
-
+    allowed = max(1, int(round(count * budget)))
+    best: Optional[float] = None
+    for cut in sorted(set(values), reverse=True):
+        if _count_at_or_above(values, cut) <= allowed:
+            best = cut
+        else:
+            break
+    return best
 
 
 def _comparison_values(comparison: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -760,16 +823,20 @@ def _comparison_values(comparison: Mapping[str, Any]) -> List[Mapping[str, Any]]
 
 
 def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequence[Stream],
-            pool: Sequence[Sequence[Event]], clock=None, budget: float = 0.10) -> Measurement:
+            pool: Sequence[Sequence[Event]], clock=None, budget: float = 0.10,
+            alert_budget: Optional[float] = None) -> Measurement:
     """Measure one configuration: detection from labels, cost from the ledger, coverage from the pool.
 
-    A fresh `LayaClient` and a fresh `Pipeline` per measurement *and per recording*, so no result
-    depends on the order the candidates were tried in, and no recording is scored against another
-    recording's history. The model is deterministic, so the quality signal is reproducible; the cost
-    signal is a token ledger and does not involve sampling at all.
+    Two budgets, not one. `budget` caps the false-positive rate of the sweep that reads the labels; the
+    label-free bar is set from `alert_budget`, because the share of windows that page and the share of
+    healthy windows that page are different numbers whenever the stream is not mostly healthy
+    (round 23). A fresh `LayaClient` and a fresh `Pipeline` per measurement *and per recording*, so no
+    result depends on the order the candidates were tried in, and no recording is scored against another
+    recording's history.
     """
     import time as _time
 
+    alert = budget if alert_budget is None else alert_budget
     started = (_time.perf_counter if clock is None else clock)()
     applied = candidate.apply(settings) if candidate is not None else settings
 
@@ -805,7 +872,9 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
     )
 
     operating = operating_point_by_recording(score_groups, budget)
-    free = free_cut_rates(score_groups, budget)
+    free = free_cut_rates(score_groups, alert)
+    scored = counts["tp"] + counts["fp"] + counts["tn"] + counts["fn"]
+    faults = counts["tp"] + counts["fn"]
     return Measurement(
         candidate=candidate.name if candidate is not None else "baseline",
         recall=_rate(counts, "tp", "fn"),
@@ -818,7 +887,7 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
         coverage=coverage,
         trial_s=(_time.perf_counter if clock is None else clock)() - started,
         reasoner=reasoner,
-        windows=counts["tp"] + counts["fp"] + counts["tn"] + counts["fn"],
+        windows=scored,
         confusion=counts,
         recall_at_budget=operating["recall"],
         fpr_at_budget=operating["fpr"],
@@ -828,18 +897,23 @@ def measure(settings: Settings, candidate: Optional[Candidate], streams: Sequenc
         at_budget_pooled=bool(operating.get("pooled")),
         recall_at_free_cut=free["recall"],
         fpr_at_free_cut=free["fpr"],
+        alert_budget=alert,
+        prevalence=(faults / scored) if scored else None,
+        alerts_at_free_cut=free.get("alerts"),
+        scored_at_free_cut=free.get("scored"),
         auc_by_recording=auc_by_recording,
     )
 
 
 def free_cut_rates(groups: Sequence[Tuple[str, Sequence[Any]]],
-                   budget: float) -> Dict[str, Optional[float]]:
+                   alert_budget: float) -> Dict[str, Optional[float]]:
     """Recall and false-positive rate of the bar a deployment could compute without labels.
 
     `recall_at_budget` is an upper bound: it is found by sweeping the observed scores and keeping the cut
-    with the highest recall inside the budget, which reads the labels. This is the same budget spent via
-    `label_free_cut` — one bar per recording, taken from that recording's own score distribution — so the
-    gap between the two numbers is the price of not knowing the answer.
+    with the highest recall inside the *false-positive* budget, which reads the labels. This computes the
+    bar a deployment can set from its own traffic instead: the (1 - `alert_budget`) quantile of the scores,
+    one per recording. It controls the share of windows paged on, not the share of healthy windows paged
+    on, and those differ by the prevalence — `Measurement.label_free_ceiling` says by how much.
 
     It exists because round 20 found the loop using the fitted bound as the reference for "is this
     deployable": a configuration whose bar can be computed from traffic alone was rejected for falling
@@ -853,7 +927,7 @@ def free_cut_rates(groups: Sequence[Tuple[str, Sequence[Any]]],
                   and not getattr(score, "error", None)]
         if not usable:
             continue
-        cut = label_free_cut([float(score.predicted_probability) for score in usable], budget)
+        cut = label_free_cut([float(score.predicted_probability) for score in usable], alert_budget)
         if cut is None:
             continue
         for score in usable:
@@ -867,6 +941,8 @@ def free_cut_rates(groups: Sequence[Tuple[str, Sequence[Any]]],
     return {
         "recall": (tp / positives) if positives else None,
         "fpr": (fp / negatives) if negatives else None,
+        "alerts": tp + fp,
+        "scored": positives + negatives,
     }
 
 
@@ -895,6 +971,10 @@ class EvolveRules:
     #: The false-positive budget the label comparison is made at. A rate is only comparable at a stated
     #: budget, and the budget is part of the objective, not of any candidate.
     fpr_budget: float = 0.10
+    #: The share of windows a label-free bar is allowed to page on. Separate from `fpr_budget` because it
+    #: is a different quantity: on a stream where half the windows are faults, paging on 10% of windows
+    #: is a 13% false-positive rate, and a deployment can compute the first but never the second.
+    alert_budget: float = 0.10
     #: A hard ceiling on the false-positive rate the configuration would *ship* with. The at-budget curve
     #: chooses a cut the loop is allowed to sweep, so it can accept a change that only looks cheap because
     #: the recorded configuration pages on everything; round 5 hit exactly that (a candidate whose shipped
@@ -924,6 +1004,7 @@ class EvolveRules:
             "recall_tolerance": self.recall_tolerance,
             "fpr_tolerance": self.fpr_tolerance,
             "fpr_budget": self.fpr_budget,
+            "alert_budget": self.alert_budget,
             "deploy_fpr_ceiling": self.deploy_fpr_ceiling,
             "deploy_fpr_tolerance": self.deploy_fpr_tolerance,
             "operational_tolerance": self.operational_tolerance,
@@ -1339,11 +1420,13 @@ def run_round(settings: Settings, streams: Sequence[Stream],
     chosen = list(selected) if selected is not None else catalogue()
     pool = build_pool(settings, streams)
     ceiling = state_ceiling(settings, streams)
-    baseline = measure(settings, None, streams, pool, budget=active_rules.fpr_budget)
+    baseline = measure(settings, None, streams, pool, budget=active_rules.fpr_budget,
+                       alert_budget=active_rules.alert_budget)
 
     trials: List[Tuple[Candidate, Measurement, Verdict]] = []
     for candidate in chosen:
-        trial = measure(settings, candidate, streams, pool, budget=active_rules.fpr_budget)
+        trial = measure(settings, candidate, streams, pool, budget=active_rules.fpr_budget,
+                        alert_budget=active_rules.alert_budget)
         verdict = decide(baseline, trial, active_rules, veto=candidate.veto)
         trials.append((candidate, trial, verdict))
         if on_candidate is not None:
@@ -1577,16 +1660,28 @@ def format_round(result: RoundResult) -> str:
         label = "baseline" if candidate is None else candidate.name
         if measurement.recall_at_free_cut is None:
             continue
-        lines.append("  label-free cut     %-22s recall %.3f  fpr %s"
+        ceiling = measurement.label_free_ceiling
+        lines.append("  label-free cut     %-22s recall %.3f  fpr %s  of at most %s"
                      % (label, measurement.recall_at_free_cut,
                         "n/a" if measurement.fpr_at_free_cut is None
-                        else "%.3f" % measurement.fpr_at_free_cut))
+                        else "%.3f" % measurement.fpr_at_free_cut,
+                        "n/a" if ceiling is None else "%.3f" % ceiling))
     if any(m.recall_at_free_cut is not None
            for _c, m, _v in [(None, result.baseline, None)] + list(result.trials)):
         lines.append("  label-free: the bar a deployment can compute from its own scores at the %.0f%% alert rate."
-                     % (100 * result.rules.fpr_budget))
-        lines.append("  It controls alert rate, not false-positive rate: on an incident-enriched stream the two differ,")
-        lines.append("  and the gap to recall@b is the price of not knowing which alerts were false.")
+                     % (100 * result.rules.alert_budget))
+        lines.append("  It controls alert rate, not false-positive rate: paging on the top %.0f%% of windows cannot"
+                     % (100 * result.rules.alert_budget))
+        lines.append("  find more than %.0f%% / prevalence of the faults, so 'of at most' is that cap,"
+                     " not a target." % (100 * result.rules.alert_budget))
+    for candidate, measurement, _verdict in [(None, result.baseline, None)] + list(result.trials):
+        label = "baseline" if candidate is None else candidate.name
+        if not measurement.alerts_at_free_cut or not measurement.scored_at_free_cut:
+            continue
+        lines.append("  label-free alerts  %-22s %4d / %4d  %5.1f%%  (target %.1f%%)"
+                     % (label, measurement.alerts_at_free_cut, measurement.scored_at_free_cut,
+                        100 * measurement.alerts_at_free_cut / measurement.scored_at_free_cut,
+                        100 * measurement.alert_budget))
     if (result.baseline.fpr is not None
             and result.baseline.fpr > result.rules.deploy_fpr_ceiling + 1e-9):
         lines.append("  ! the deployed configuration already alerts on %.0f%% of windows on this stream,"
