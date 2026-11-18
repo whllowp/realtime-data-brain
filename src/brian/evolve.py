@@ -71,6 +71,19 @@ required reading a round, and "would it still be blocked" required a hypothetica
 also a claim: it says this candidate loses this much on this recording against this bar. Writing it in its
 own numbered family makes the claim readable, checkable and countable the way a version is."""
 
+REFUSAL_EXPIRY_DAYS = 14.0
+"""How long a `skip` refusal speaks for itself before the round measures the candidate again (round 43).
+
+Not a judgement about the candidate: a judgement about evidence. The same horizon as a version claim
+(`promote.CLAIM_EXPIRY_DAYS`), because re-testing a refusal is cheaper than re-testing a deployment — one
+candidate slot against a full re-check — so there is no reason to let the weaker claim live longer.
+
+It sits at the top of the module on purpose: round 43 declared it just above `refusal_plan`, and round 44's
+`withheld_due` then used it as a default argument forty lines *earlier*, which is a `NameError` at import
+time rather than at call time. A default is evaluated where the `def` is read, not where the constant is
+wanted.
+"""
+
 
 # --------------------------------------------------------------------------------------
 # candidates
@@ -1921,6 +1934,69 @@ def _write_withheld(root: Path, directory: Path, round_name: str,
     return written
 
 
+def withheld_check(baseline: Measurement, measurement: Measurement,
+                   rules: EvolveRules, *, checked_at: str, stream: Mapping[str, Any],
+                   round_name: str = "") -> Dict[str, Any]:
+    """The check a re-measurement of a refused candidate writes into its record (rounds 43, 44).
+
+    Shared by the round's write-back and by `--verify-withheld` so the two paths cannot disagree about what
+    "still refused" means. A measurement without per-recording numbers is `unknown`: writing "no longer"
+    there would claim the refusal died on evidence nobody took (boundary 72 at the level of a re-check).
+    """
+    loss = replication_loss(baseline, measurement, rules.replication_bar)
+    comparable = sum(1 for value in (measurement.recall_by_recording or {}).values()
+                     if value is not None) >= 2
+    if not comparable:
+        verdict_name = "unknown"
+        reason = ("this measurement does not say how each recording did, so it cannot test an objection "
+                  "about one of them")
+    elif loss:
+        verdict_name, reason = "still", replication_sentence(loss)
+    else:
+        verdict_name = "no longer"
+        reason = ("no recording fell by more than %.3f at the %.0f%% budget, so the objection no longer "
+                  "holds" % (rules.replication_bar, 100 * rules.fpr_budget))
+    return {
+        "checked_at": checked_at,
+        "stream": dict(stream),
+        "bar": rules.replication_bar,
+        "round": round_name,
+        "verdict": verdict_name,
+        "loss": dict(loss or {}),
+        "reason": reason,
+        "recall_at_budget": measurement.recall_at_budget,
+        "tokens_per_report": measurement.tokens_per_report,
+    }
+
+
+def withheld_evidence_age(record: Withheld, now: Optional[datetime] = None) -> Optional[float]:
+    """How old a refusal's most recent evidence is, in days (round 44).
+
+    The last check if there is one, else the day the refusal was written: a record that was re-measured
+    recently is not stale no matter how old the refusal is.
+    """
+    last = record.last_check or {}
+    return _refusal_age_days(str(last.get("checked_at") or record.created_at or ""), now)
+
+
+def withheld_due(records: Sequence[Withheld], now: Optional[datetime] = None,
+                 expiry_days: float = REFUSAL_EXPIRY_DAYS) -> List[Withheld]:
+    """The refusals whose evidence is older than the horizon (round 44).
+
+    A record whose latest check already says `no longer` is not due: its objection has been retired, and what
+    remains is a candidate a round must consider, not a refusal to re-test.
+    """
+    due: List[Withheld] = []
+    for record in records:
+        last = record.last_check or {}
+        if str(last.get("verdict") or "") == "no longer":
+            continue
+        age = withheld_evidence_age(record, now)
+        if age is not None and age > float(expiry_days):
+            due.append(record)
+    return due
+
+
 def record_withheld_checks(root: Path, result: RoundResult, rules: EvolveRules,
                           skip_round: Optional[str] = None,
                           round_name: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1942,33 +2018,9 @@ def record_withheld_checks(root: Path, result: RoundResult, rules: EvolveRules,
         if skip_round and record.round == skip_round:
             continue
         _candidate, measurement, _verdict = measured[record.name]
-        loss = replication_loss(result.baseline, measurement, rules.replication_bar)
-        # A measurement without per-recording numbers cannot test an objection about one recording. Writing
-        # "no longer" there would claim the refusal died on evidence nobody took (boundary 72 at the level of
-        # a re-check), so the check says what it is.
-        comparable = sum(1 for value in (measurement.recall_by_recording or {}).values()
-                         if value is not None) >= 2
-        if not comparable:
-            verdict_name = "unknown"
-            reason = ("this measurement does not say how each recording did, so it cannot test an objection "
-                      "about one of them")
-        elif loss:
-            verdict_name, reason = "still", replication_sentence(loss)
-        else:
-            verdict_name = "no longer"
-            reason = ("no recording fell by more than %.3f at the %.0f%% budget, so the objection no longer "
-                      "holds" % (rules.replication_bar, 100 * rules.fpr_budget))
-        check = {
-            "checked_at": result.finished_at,
-            "stream": dict(result.stream),
-            "bar": rules.replication_bar,
-            "round": round_name or "",
-            "verdict": verdict_name,
-            "loss": dict(loss or {}),
-            "reason": reason,
-            "recall_at_budget": measurement.recall_at_budget,
-            "tokens_per_report": measurement.tokens_per_report,
-        }
+        check = withheld_check(result.baseline, measurement, rules,
+                               checked_at=result.finished_at, stream=result.stream,
+                               round_name=round_name or "")
         if record_withheld_check(root, record.name, check) is not None:
             written.append({"name": record.name, "label": record.label, "verdict": check["verdict"]})
     return written
@@ -2398,15 +2450,6 @@ def rejection_provenance(root: Path, rules: Optional[EvolveRules] = None) -> Dic
                 "stream": dict(row.get("stream") or {}),
             }
     return latest
-
-
-REFUSAL_EXPIRY_DAYS = 14.0
-"""How long a `skip` refusal speaks for itself before this round measures the candidate again (round 43).
-
-Not a judgement about the candidate: a judgement about evidence. The same horizon as a version claim
-(`promote.CLAIM_EXPIRY_DAYS`) because re-testing a refusal is cheaper than re-testing a deployment — one
-candidate slot against a full re-check — so there is no reason to let the weaker claim live longer.
-"""
 
 
 def refusal_plan(provenance: Mapping[str, Mapping[str, Any]], *, source: Optional[str] = None,

@@ -40,6 +40,7 @@ from .evolve import (
     apply_overrides,
     audit,
     build_pool,
+    Candidate,
     catalogue,
     format_audit,
     format_rejudge,
@@ -55,9 +56,12 @@ from .evolve import (
     refusal_sensitivity,
     rejection_provenance,
     reader_scores,
+    record_withheld_check,
     rejudge,
     retire,
     run_round,
+    withheld_check,
+    withheld_due,
     withheld_records,
 )
 from .laya.client import LayaClient, LayaError, LayaUnavailable
@@ -86,6 +90,7 @@ from .promote import (
     rescale_hint,
     rescaled_candidate,
     shape_note,
+    stacking_note,
     verification_age_days,
     write_verification,
 )
@@ -440,12 +445,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
 
     if args.campaign:
         rules = _rules_from_args(args)
+        horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
         try:
-            result = campaign_result(root, rules, expiry_days=args.expiry_days)
+            result = campaign_result(root, rules, expiry_days=args.expiry_days,
+                                     refusal_expiry_days=horizon)
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
-        _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules))
+        _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
+                               refusal_expiry_days=horizon))
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")
@@ -647,15 +655,27 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # verdict is evidence about the day it ran, so an expired one is due again.
         promotions = [item for item in promotions_for_domain(load_promotions(root), domain)
                       if item.version == wanted or (not wanted and item.due(days=args.expiry_days))]
-        if not promotions:
+        # Round 44: the same question for the refusals. A `w###` record is only re-measured when a round
+        # happens to propose the candidate again, and round 43 made the plan stop proposing settled ones --
+        # so an objection can outlive every check that could have retired it. `--verify-withheld` asks it
+        # directly, on this stream, with the deployment in force as the baseline.
+        horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
+        recorded = [record for record in withheld_records(root)
+                    if str((record.stream or {}).get("source") or "") == str(domain)]
+        due = withheld_due(recorded, expiry_days=horizon)
+        if not promotions and not (args.verify_withheld and due):
             _print("no unverified promotions for %s: every version recorded on it has been re-checked."
                    % domain_slug(domain))
+            if due:
+                _print("%d refusal(s) recorded on %s have not been measured again in %.0f day(s): "
+                       "pass --verify-withheld to re-measure them." % (len(due), domain_slug(domain), horizon))
             return 0
         rules = _rules_from_args(args)
         pool = build_pool(settings, streams)
         checked_stream = summarise(streams)
-        _print("verifying %d promotion(s) from %s on %s"
-               % (len(promotions), domain_slug(domain), source))
+        if promotions:
+            _print("verifying %d promotion(s) from %s on %s"
+                   % (len(promotions), domain_slug(domain), source))
         for promotion in promotions:
             if not promotion.pending:
                 age = verification_age_days(promotion.verification)
@@ -686,8 +706,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                                                  promotion.change, reason))
             elif verdict == VERIFIED:
                 write_verification(root, promotion, payload)
-                apply_promotion(root, promotion, domain=domain)
-                _print("  v%03d  %s  %s" % (promotion.version, promotion.change, verdict))
+                # Round 44: applying every version a check verifies stacked them. The check is recorded
+                # either way; only a domain with no other version in force takes the change.
+                stacked = stacking_note(root, promotion, domain)
+                if stacked:
+                    _print("  v%03d  %s  %s (verified, not applied: %s)"
+                           % (promotion.version, promotion.change, verdict, stacked))
+                else:
+                    apply_promotion(root, promotion, domain=domain)
+                    _print("  v%03d  %s  %s" % (promotion.version, promotion.change, verdict))
             else:
                 # Not comparable: this stream is sampled differently from the one the claim was made
                 # on, so the check neither confirms nor retracts. The deployment state is left alone —
@@ -715,6 +742,57 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 note = shape_note(payload)
                 if note:
                     _print(note)
+        if args.verify_withheld:
+            # The refusal family, re-measured on the same footing as the round that wrote it: the deployment
+            # in force is the baseline, because the objection was raised against it. Nothing is promoted
+            # here -- an objection that stopped holding returns the candidate to the rounds, and promoting
+            # on a verification would be the loop shipping a change nobody proposed (boundary 95).
+            if not due:
+                _print("no refusal recorded on %s is older than the %.0f-day horizon: nothing to re-measure."
+                       % (domain_slug(domain), horizon))
+            else:
+                # The objection was raised by a round, and a round measures on top of the deployment in
+                # force -- `scoring=auto`, the window count, the bar. Re-measuring on the stream's own base
+                # settings answers a different question: the first live run of this block "cleared"
+                # `host-features-3` at recall 0.146 because the reader was not configured the way the round
+                # had it. A re-check must stand where the objection stood (round 44).
+                recheck = settings
+                deployment: Dict[str, Dict[str, Any]] = {}
+                if not args.from_default:
+                    deployment, _sources, _refused_names, _unknown_names = in_force_overrides(
+                        root, settings, domain=domain)
+                    if deployment:
+                        recheck = apply_overrides(settings, deployment)
+                _print("re-measuring %d refusal(s) recorded on %s%s"
+                       % (len(due), domain_slug(domain),
+                          " against the deployment in force" if deployment else " on the stream's own settings"))
+                baseline = measure(recheck, None, streams, pool, budget=rules.fpr_budget,
+                                   alert_budget=rules.alert_budget)
+                cleared = 0
+                for record in due:
+                    candidate = Candidate.from_dict(record.candidate)
+                    measurement = measure(recheck, candidate, streams, pool,
+                                          budget=rules.fpr_budget, alert_budget=rules.alert_budget)
+                    check = withheld_check(baseline, measurement, rules,
+                                           checked_at=_stamp(), stream=checked_stream,
+                                           round_name="verify")
+                    if record_withheld_check(root, record.name, check) is None:
+                        _print("  %-5s %-22s %s  (an identical check is already recorded, so this one is "
+                               "not appended)" % (record.label, record.candidate.get("name", "?"),
+                                                  check["verdict"]))
+                        continue
+                    if check["verdict"] == "no longer":
+                        cleared += 1
+                    _print("  %-5s %-22s %-9s recall %.3f at the %.0f%% budget  (bar %.3f)"
+                           % (record.label, record.candidate.get("name", "?"), check["verdict"],
+                              measurement.recall_at_budget, 100 * rules.fpr_budget, rules.replication_bar))
+                _print("")
+                if cleared:
+                    _print("%d objection(s) no longer hold at the numbers measured here. A cleared refusal "
+                           "goes back to the rounds: nothing is promoted by this command." % cleared)
+                else:
+                    _print("every re-measured objection still holds: the numbers that produced it are still "
+                           "the numbers today.")
         _print("")
         _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain,
                                  expiry_days=args.expiry_days))
@@ -1920,6 +1998,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "no longer holds, then exit")
     evolve.add_argument("--verify-version", type=int, default=0,
                         help="with --verify: only that version number (default: everything unverified)")
+    evolve.add_argument("--verify-withheld", action="store_true",
+                        help="with --verify: also re-measure this stream's refusals whose evidence is older "
+                             "than the refusal horizon, and write the result into their record")
     evolve.add_argument("--strict", action="store_true",
                         help="with --audit or --campaign: exit 1 when a recorded verdict would be decided "
                              "differently today, 2 when part of the ledger cannot be replayed at all")

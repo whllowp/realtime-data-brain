@@ -392,6 +392,29 @@ def in_force_overrides(root: Path, settings: Settings,
     return overrides, sources, refused, unknown
 
 
+def stacking_note(root: Path, promotion: Promotion,
+                  domain: Optional[str] = None) -> Optional[str]:
+    """Why a verified version may not simply be applied next to one already in force (round 44).
+
+    `--verify` walks whatever is due and applies each version it verifies. An unscoped run over the SMD ledger
+    therefore verified `v004` while `v020` was in force and merged both into the deployment — the campaign's
+    own warning then printed "the variables in force come from 2 versions … their sum is a configuration
+    nobody measured". Each version was measured as a patch against the same baseline, so verifying two of
+    them is two answers to two questions, not one configuration.
+
+    The note is returned when another version already owns variables in this domain's state, and the caller
+    records the check without applying it. Nothing is reverted: the version that was in force stays there, and
+    the newly verified one is evidence for a round that proposes the combination deliberately.
+    """
+    state = current_state(root, domain)
+    owners = {str(version) for version in (state.get("sources") or {}).values() if version}
+    others = sorted(owners - {str(promotion.version)})
+    if not others:
+        return None
+    return ("%s is already in force for %s, and the sum of two patches was never measured"
+            % (", ".join("v%s" % version for version in others), domain_slug(domain)))
+
+
 def apply_promotion(root: Path, promotion: Promotion, *, respect_newer: bool = True,
                     domain: Optional[str] = None) -> Dict[str, Any]:
     """Merge one version's assignments into the deployment state, recording where each came from.

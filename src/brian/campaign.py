@@ -16,8 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .evolve import (EvolveRules, audit, history, rejection_provenance, withheld_records,
-                     withheld_staleness)
+from .evolve import (REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, rejection_provenance,
+                     withheld_due, withheld_evidence_age, withheld_records, withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state,
                       load_promotions, shape_note)
 
@@ -69,6 +69,11 @@ class CampaignRow:
     # exists inside a round's prose cannot be found again, let alone re-judged.
     withheld: int = 0
     withheld_stale: int = 0
+    # Round 44: how many of those refusals have not been measured again within the horizon, and how old the
+    # oldest evidence on this stream is. Without both, a reader cannot tell a refusal that was re-checked
+    # last week from one that has stood since the day it was written.
+    withheld_due: int = 0
+    withheld_oldest_days: Optional[float] = None
 
     @property
     def accepted(self) -> int:
@@ -101,6 +106,8 @@ class CampaignRow:
             "measurements_not_repeated": self.skipped,
             "refusals_withheld": self.withheld,
             "withheld_no_longer_holding": self.withheld_stale,
+            "withheld_due_for_check": self.withheld_due,
+            "withheld_oldest_evidence_days": self.withheld_oldest_days,
         }
 
 
@@ -147,6 +154,10 @@ class Campaign:
     # measured and deliberately not shipped.
     withheld: int = 0
     withheld_stale: int = 0
+    # Round 44: refusals whose evidence is older than the horizon, and the age of the oldest evidence on the
+    # page. A refusal nobody re-measured is a conclusion the loop stopped testing without saying so.
+    withheld_due: int = 0
+    withheld_oldest_days: Optional[float] = None
 
     @property
     def domains(self) -> List[str]:
@@ -174,6 +185,8 @@ class Campaign:
             "measurements_not_repeated": self.skipped,
             "refusals_withheld": self.withheld,
             "withheld_no_longer_holding": self.withheld_stale,
+            "withheld_due_for_check": self.withheld_due,
+            "withheld_oldest_evidence_days": self.withheld_oldest_days,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -185,7 +198,8 @@ def _source(record: Dict[str, Any]) -> Optional[str]:
 
 
 def campaign(root: Path, rules: Optional[EvolveRules] = None,
-             expiry_days: float = CLAIM_EXPIRY_DAYS, now: Optional[datetime] = None) -> Campaign:
+             expiry_days: float = CLAIM_EXPIRY_DAYS, now: Optional[datetime] = None,
+             refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS) -> Campaign:
     """Summarise every recorded round, grouped by the stream each one measured.
 
     A round that does not say which stream it measured cannot be attributed to a domain, and is counted
@@ -260,6 +274,20 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
         if not withheld_staleness(record, active)["still"]:
             row.withheld_stale += 1
             result.withheld_stale += 1
+        # Round 44: an objection nobody re-measured is the one kind of refusal a reader cannot price. Both
+        # the count and the oldest age are printed, because "1 due" reads as recent until the age is next to
+        # it, and a 200-day-old check is a different claim from a 15-day-old one.
+        age = withheld_evidence_age(record, now)
+        if age is not None:
+            oldest = row.withheld_oldest_days
+            if oldest is None or age > oldest:
+                row.withheld_oldest_days = age
+            oldest = result.withheld_oldest_days
+            if oldest is None or age > oldest:
+                result.withheld_oldest_days = age
+        if withheld_due([record], now, refusal_expiry_days):
+            row.withheld_due += 1
+            result.withheld_due += 1
 
     for promotion in load_promotions(root):
         if promotion.reverted_at:
@@ -362,7 +390,8 @@ def _verdict_line(row: CampaignRow) -> str:
 
 
 def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
-                    rules: Optional[EvolveRules] = None) -> str:
+                    rules: Optional[EvolveRules] = None,
+                    refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -412,9 +441,15 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
     if result.withheld:
         # Round 42: the half of the ledger a version page cannot show. Printed above the rows because the
         # second number is a question every domain page owes an answer to: which refusals no longer hold.
+        # Round 44 adds the third: how many of them nobody has measured again inside the horizon.
         line = "withheld          %d candidate(s) were measured and refused for replication" % result.withheld
         if result.withheld_stale:
             line += ", %d no longer hold at today's bar (%.3f)" % (result.withheld_stale, active.replication_bar)
+        if result.withheld_due:
+            line += ", %d due for a re-check at the %.0f-day horizon" % (result.withheld_due,
+                                                                        refusal_expiry_days)
+        if result.withheld_oldest_days is not None:
+            line += " (oldest evidence %.0f day(s) old)" % result.withheld_oldest_days
         lines.append(line)
     if result.unsourced:
         lines.append("unattributed      %d round(s) predate the stream field" % result.unsourced)
@@ -467,6 +502,10 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             note = "  withheld          %d candidate(s) refused for replication" % row.withheld
             if row.withheld_stale:
                 note += ", %d no longer hold at today's bar" % row.withheld_stale
+            if row.withheld_due:
+                note += ", %d due for a re-check" % row.withheld_due
+            if row.withheld_oldest_days is not None:
+                note += " (oldest evidence %.0f day(s) old)" % row.withheld_oldest_days
             lines.append(note)
         if row.in_force:
             lines.append("  in force          %s  (%s)"

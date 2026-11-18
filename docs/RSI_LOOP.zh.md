@@ -2407,6 +2407,73 @@ w001   host-features-3   re-measured 2026-11-18: recall at the 10% budget rises 
 
 **边界 94：复测属于它检验的那条记录，而编号数候选、不数测量。** 给同一个候选第二次拒绝编一个新号，会让"有多少个候选被拒绝"变成"拒绝被写了多少次"，而后者随复测次数增长——一个读者用前者做判断，会得到一个随运行次数漂移的数。
 
+### 3.51 复核要站在拒绝成立的地方：自己撞上的两个缺陷
+
+第 43 轮让拒绝过期、并把复测数字写回记录，但复测还得有人发起：计划把 `skip` 的候选挡在生成器外（第 37 轮），
+所以一条被跳过的拒绝，除了"某一轮顺手又提到它"，没有别的复测机会。这一轮让 `--verify` 把 `withheld` 当族来查：
+
+```
+$ brian evolve --verify --verify-version 20 --verify-withheld \
+      --stream-file data\smd\stream-check.json --refusal-expiry-days 0
+verifying 1 promotion(s) from smd on SMD
+  v020  digest.rolling_window = 200; digest.scoring = auto; gate.rank_probability = 0.85
+        unmeasurable: the re-check measured 1235 scored windows against the 828 the claim was made on (1.49x) …
+re-measuring 1 refusal(s) recorded on smd against the deployment in force
+  w001  host-features-3        still     recall 0.312 at the 10% budget  (bar 0.050)
+every re-measured objection still holds: the numbers that produced it are still the numbers today.
+```
+
+第一次跑出来的不是这个。第一次跑出的是这个：
+
+```
+re-measuring 1 refusal(s) recorded on smd on the stream's own settings
+  w001  host-features-3        no longer recall 0.146 at the 10% budget  (bar 0.050)
+1 objection(s) no longer hold.
+```
+
+**缺陷一：复测量的是另一个配置。** `w001` 是第 42 轮在**在役部署之上**（`scoring=auto`、窗口 200、
+`rank_p=0.85`）测出来的：那轮拒绝 `host-features-3` 时，`smd-machine-1-6` 从 0.491 掉到 0.382。而这次复测
+拿的是流自己的基础设置，同一个候选在别的配置下切分不同，于是 0.146 让一条拒绝"作废"了 —— 用另一个配置的
+数字，清掉一个配置的反对。修法是把在役部署叠到设置上再测，并把量在哪边的句子打出来
+（`against the deployment in force` / `on the stream's own settings`）。重跑后是 0.312，与当初那轮一致。
+
+**边界 96：一次复测必须跑在它要检验的那个承诺所属的配置上。另一个配置的数字什么也清不掉。**
+
+**缺陷二：复核多个版本会把补丁叠起来。** 一次不带 `--verify-version` 的 `--verify` 会挑中所有待复核版本
+（v001、v004–v010、v012、v014、v015、v020）。它在验完 `v004` 后调了 `apply_promotion`，于是 v004 的
+`BRIAN_LLM_MAX_CONTEXT_EVENTS=4` 与 v020 的三个变量并排生效，部署页自己打出了这句话：
+
+```
+the variables in force come from 2 versions: v020, v004 … their sum is a configuration nobody measured
+```
+
+每个版本都是**相对同一个基线**测出来的补丁；验两个补丁，是回答了两次不同的问题，不是得到了一个配置。修法是
+`stacking_note()`：只要这个域里还有别的版本在持变量，就只记录复核结果、不应用，打印
+`(verified, not applied: v20 is already in force for smd, and the sum of two patches was never measured)`。
+状态手工恢复到只剩 v020（`var/restore_smd_state.py`；顺带发现第一版脚本假设状态里有 `overrides` 键，
+把 v004 的变量从 `sources` 删了却留在 `env` 里 —— 一个没有来源的变量比叠两个版本更糟）。
+
+**边界 95：复核可以清掉一条反对，但不能顺带发布这个改动 —— 否则循环会发布没人提出过的东西。**
+**边界 97：两个各自通过的补丁不是一个通过的配置；因为"它验过了"就逐个应用，会得到没人量过的组合。**
+
+**那条坏掉的复核记录没有删。** 删掉会抹掉"确实量过什么"，留着会让一条活着的反对被当作已作废。第三种写法是
+`withdrawn`：它保留数字、写清为什么不算（"measured on the stream's own settings rather than the deployment in
+force … withdrawn in round 44"），并且不把记录从"到期"里拿掉 —— `withheld_due()` 只跳过 `no longer`，
+所以一条 `withdrawn` 的拒绝立刻重新到期、会被再测。
+
+`--withheld` 与 `--campaign` 现在也说得出这件事：
+
+```
+records 1  no longer hold 0  re-measured 1 of them have been measured again since the refusal
+w001  host-features-3  SMD  0.050  0.109  smd-machine-1-6
+  re-measured 2026-11-18: recall at the 10% budget rises 0.297 -> 0.312 pooled, but smd-machine-1-6 falls …
+withheld 1 candidate(s) were measured and refused for replication (oldest evidence 0 day(s) old)
+```
+
+三段读法：一是"复核"和"发布"是两件事，同一个命令里做，就要在两者之间放一句话；二是一条被推翻的复核必须能
+被撤回而不是被删除，否则下一次复测会重复同样的错误，而记录看起来干净；三是"到期"要能主动到达，否则把它做成
+只读的报表，等于把第 43 轮的过期又变成一句永不触发的机制。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2593,3 +2660,5 @@ missing for the next level
 
 31. **（3.50 已完成）让拒绝过期，并把复测写回拒绝记录。** 下一步：`--verify` 应当把 `withheld` 当成一个族来复核——不是等某一轮顺带重新提出候选，而是主动按域列出到期未复测的拒绝，并在必要时复测；同时 `--campaign` 的 `withheld` 行应当显示"最老的一次复测有多老"。
 
+32. **（3.51 已完成）复核接到部署上，验过不等于发布。** 待办：`--verify-withheld` 支持一次给多个域；
+`--campaign --strict` 把"最老的未复核反对"也算成一条债务。
