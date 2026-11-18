@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .evolve import EvolveRules, audit, history
-from .promote import UNMEASURABLE, VERIFIED, current_state, load_promotions
+from .promote import UNMEASURABLE, VERIFIED, current_state, load_promotions, shape_note
 
 __all__ = ["Campaign", "CampaignRow", "campaign", "format_campaign"]
 
@@ -253,6 +253,12 @@ def format_campaign(result: Campaign) -> str:
                             or "no variables", _verdict_line(row)))
             if row.reverted:
                 lines.append("  ! this version was reverted after its claim failed")
+            # Round 28: a refusal that recorded the comparable shape carries its number here too. The
+            # campaign is the page a reader consults to decide what is in force, so "not comparable" alone
+            # would leave them without the measurement that says how far off it is.
+            shaped = shape_note(row.verification)
+            if shaped:
+                lines.append("  " + shaped.strip())
     lines.append("")
     lines.append("What this is: one row per stream the loop has measured, the rules that accepted or")
     lines.append("refused each candidate, and the configuration a deployment on that stream would now")
