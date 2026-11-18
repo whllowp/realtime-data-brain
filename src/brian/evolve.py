@@ -1869,6 +1869,25 @@ def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict
     round with verdicts from retired rules is worse than no ledger. The re-decided reason is prefixed
     `re-judged`, so a reader can tell which verdicts came from stored runs and which from today's rules.
     """
+    rejected: Dict[str, str] = {}
+    for name, verdict in rejection_provenance(root, rules).items():
+        if verdict["accepted"]:
+            continue
+        rejected[name] = "on %s: %s" % (verdict["source"], verdict["reason"])
+    return rejected
+
+
+def rejection_provenance(root: Path, rules: Optional[EvolveRules] = None) -> Dict[str, Dict[str, Any]]:
+    """candidate name -> the round, stream and retirement status behind the verdict that still stands.
+
+    `previously_rejected` answers "what is settled"; this answers "settled by whom". Round 35 needs the
+    second question because a refusal outlives the round that recorded it: after round 34 a retired
+    record keeps its verdicts on purpose (retirement says the *gate* no longer owes an answer, not that
+    the loop forgets), so the campaign can honestly say "23 candidates are still held as rejected"
+    while none of those refusals was re-checked today. Reporting the count without naming who carries
+    it would let a reader mistake inherited refusals for verified ones — the same defect as a verdict
+    that never expires, one level up.
+    """
     latest: Dict[str, Dict[str, Any]] = {}
     # Retired records are read here even though the audit skips them (round 34): retirement is a
     # statement about what the *check* still has to answer for, not about what the loop learned. A
@@ -1877,6 +1896,8 @@ def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict
     # round's own fix would have caused it.
     for row in history(root, include_retired=True):
         source = (row.get("stream") or {}).get("source") or (row.get("stream") or {}).get("service") or "?"
+        retirement = row.get("retired")
+        retired = bool(retirement)
         baseline = Measurement.from_dict(row.get("baseline") or {}) if rules is not None else None
         for trial in row.get("trials") or []:
             verdict = trial.get("verdict") or {}
@@ -1891,13 +1912,11 @@ def previously_rejected(root: Path, rules: Optional[EvolveRules] = None) -> Dict
                 "accepted": accepted,
                 "reason": reason,
                 "source": source,
+                "round": row.get("round"),
+                "retired": retired,
+                "re_measured_as": (retirement or {}).get("re_measured_as") if retired else None,
             }
-    rejected: Dict[str, str] = {}
-    for name, verdict in latest.items():
-        if verdict["accepted"]:
-            continue
-        rejected[name] = "on %s: %s" % (verdict["source"], verdict["reason"])
-    return rejected
+    return latest
 
 
 # --------------------------------------------------------------------------------------

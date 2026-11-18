@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .evolve import EvolveRules, audit, history
+from .evolve import EvolveRules, audit, history, rejection_provenance
 from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state,
                       load_promotions, shape_note)
 
@@ -49,6 +49,12 @@ class CampaignRow:
     audit_moved: int = 0
     audit_relabelled: int = 0
     audit_unreconstructable: int = 0
+    # Rounds on this stream that a re-measurement superseded (round 34), and the records that replaced
+    # them (round 35). Held per row because "2 rounds were retired" is a ledger-wide number on a page
+    # where every other number names a stream: the reader deciding about SMD should not wonder whether
+    # the retirement concerned SMD.
+    retired: int = 0
+    successors: List[str] = field(default_factory=list)
 
     @property
     def accepted(self) -> int:
@@ -74,6 +80,8 @@ class CampaignRow:
             "audit_moved": self.audit_moved,
             "audit_relabelled": self.audit_relabelled,
             "audit_unreconstructable": self.audit_unreconstructable,
+            "rounds_retired": self.retired,
+            "re_measured_as": list(self.successors),
         }
 
 
@@ -105,6 +113,12 @@ class Campaign:
     inconsistent: int = 0
     # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
     retired: int = 0
+    # Refusals the loop still holds: the count `previously_rejected` would return, and how many of them
+    # come from a retired record — a refusal nobody re-checked (round 35). The second number is printed
+    # next to the first because "23 candidates are settled" reads as verified until you ask who settled
+    # them.
+    refusals: int = 0
+    refusals_retired: int = 0
 
     @property
     def domains(self) -> List[str]:
@@ -128,6 +142,8 @@ class Campaign:
             "comparisons_unreconstructable": self.unreconstructable,
             "comparisons_inconsistent": self.inconsistent,
             "rounds_retired": self.retired,
+            "refusals_carried": self.refusals,
+            "refusals_from_retired": self.refusals_retired,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -147,10 +163,10 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     legitimately unknown.
     """
     rounds = history(root)
+    everything = history(root, include_retired=True)
     # Counted from the same file: a retired round is one the campaign still holds but no longer asks the
     # checks to answer for, and hiding it would make "42 rounds" and "40 audited" look like a defect.
-    result = Campaign(rounds=len(rounds),
-                      retired=max(0, len(history(root, include_retired=True)) - len(rounds)))
+    result = Campaign(rounds=len(rounds), retired=max(0, len(everything) - len(rounds)))
     rows: Dict[str, CampaignRow] = {}
 
     for record in rounds:
@@ -180,6 +196,21 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
                 row.rejections[rule] = row.rejections.get(rule, 0) + 1
         if record.get("applied"):
             result.applied += 1
+
+    # Retired rounds are attributed to their stream too (round 35). They carry no trials in the counts
+    # above — the successor measured those questions again — but a domain page that said nothing about
+    # them would leave a reader unable to tell "this stream was never re-measured" from "it was, and the
+    # old record is still here".
+    for record in everything:
+        retirement = record.get("retired")
+        if not retirement:
+            continue
+        source = _source(record) or "(unattributed)"
+        row = rows.setdefault(source, CampaignRow(domain=source))
+        row.retired += 1
+        successor = retirement.get("re_measured_as") if isinstance(retirement, dict) else None
+        if successor and str(successor) not in row.successors:
+            row.successors.append(str(successor))
 
     for promotion in load_promotions(root):
         if promotion.reverted_at:
@@ -230,6 +261,13 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
         row.audit_moved += len(entry.get("changed") or [])
         row.audit_relabelled += len(entry.get("relabelled") or [])
         row.audit_unreconstructable += len(entry.get("cross") or [])
+    # What the loop still holds as settled, and how much of that it inherited (round 35). The rejected
+    # column above counts verdicts the rounds recorded; this counts the candidates that stay refused
+    # after the latest verdict and today's rules, which is the number the *next* round acts on.
+    provenance = rejection_provenance(root, rules)
+    result.refusals = sum(1 for verdict in provenance.values() if not verdict["accepted"])
+    result.refusals_retired = sum(1 for verdict in provenance.values()
+                                  if not verdict["accepted"] and verdict["retired"])
     return result
 
 
@@ -292,6 +330,13 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
     if result.retired:
         lines.append("retired           %d round(s) were re-measured; their records stay, the checks skip them"
                      % result.retired)
+    if result.refusals:
+        # A refusal is what the next round acts on, so it belongs on this page next to the accept counts.
+        # The second number says how much of it nobody re-checked (round 35).
+        line = "refusals          %d candidate(s) are still held as rejected" % result.refusals
+        if result.refusals_retired:
+            line += ", %d of them on retired record(s)" % result.refusals_retired
+        lines.append(line)
     if result.unsourced:
         lines.append("unattributed      %d round(s) predate the stream field" % result.unsourced)
     lines.append("")
@@ -318,6 +363,13 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
             if row.audit_unreconstructable:
                 bits.append("%d not reconstructable" % row.audit_unreconstructable)
             lines.append("  audit             %s" % ", ".join(bits))
+        if row.retired:
+            # Per domain, because the header's count is the ledger's: an SMD reader should not have to
+            # guess whether the retired rounds concerned SMD (round 35).
+            note = "  retired           %d round(s)" % row.retired
+            if row.successors:
+                note += ": re-measured as %s" % ", ".join(row.successors)
+            lines.append(note)
         if row.in_force:
             lines.append("  in force          %s  (%s)"
                          % (" ".join("%s=%s" % item for item in sorted(row.env.items()))

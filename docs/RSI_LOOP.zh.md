@@ -1858,6 +1858,74 @@ demo                    9     23     13 -    …
 消失的唯一理由是它不再属于这个闸门，而不是因为它被修好了。**
 
 
+## 3.42 一条命令，两份记录：批量退役与"谁还在替这个拒绝负责"
+
+上一轮结束时，退役是这样用的：
+
+```
+$ python -m brian.cli evolve --retire round-20261118T012841Z.json --re-measured-as round-20261118T015111Z.json
+$ python -m brian.cli evolve --retire round-20261118T013236Z.json --re-measured-as round-20261118T015111Z.json
+```
+
+两条记录、一个继任者、同一条命令写两遍。抄第二遍的时候最容易错的是继任者的名字，而错了之后没有人会报错
+——退役是写进账本的，`--audit` 不会再质疑它。所以 `--retire` 现在可重复，也可以逗号分隔：
+
+```
+$ python -m brian.cli evolve --retire round-20261118T012841Z.json,round-20261118T013236Z.json \
+      --re-measured-as round-20261118T015111Z.json
+retired           round-20261118T012841Z.json  (re-measured as round-20261118T015111Z.json)
+                  1 of its 8 trial(s) appear in the successor: host-rolling-rank-0-85-200@hint286
+                  the other 7 are not repeated there, so this retirement does not claim they were answered
+retired           round-20261118T013236Z.json  (re-measured as round-20261118T015111Z.json)
+                  1 of its 15 trial(s) appear in the successor: host-rolling-rank-0-85-200@hint286
+                  the other 14 are not repeated there, so this retirement does not claim they were answered
+retired           2 of 2 round(s), each naming round-20261118T015111Z.json
+```
+
+**批量的合并只在命令层，不在这项判断里**：两条记录各自和继任者比一遍，各自报自己的重叠。它们恰好共享同一个
+继任者，但继任者只重复了 1 条候选，所以两份记录都只主张 1 条。一个名字写错时整条命令退 2，并且只打印失败的
+那一条：
+
+```
+$ python -m brian.cli evolve --retire round-20261118T012841Z.json,round-nope.json
+retired           round-20261118T012841Z.json  (re-measured as round-20261118T015111Z.json)
+cannot retire round-nope.json: no recorded round matches round-nope.json
+retired           1 of 2 round(s)
+exit=2
+```
+
+## 页面上于是出现两个新数字
+
+```
+$ python -m brian.cli evolve --campaign
+rounds            41  (178 candidate measurements, 68 accepted, 110 rejected)
+retired           2 round(s) were re-measured; their records stay, the checks skip them
+refusals          35 candidate(s) are still held as rejected, 14 of them on retired record(s)
+…
+SMD                    24    128     48 20        recall 0.507 at the 10% budget, 3358 tokens/report
+  audit             6 moved, 17 relabelled
+  retired           2 round(s): re-measured as round-20261118T015111Z.json
+```
+
+第二个数字是这一轮真正的发现：循环"已经定下来"的 35 条拒绝里，**14 条来自退役记录**——那两轮没有再被
+复核过。上一轮把它们从 `--audit` 里拿掉是对的（那个检查不欠它们答案），但 `previously_rejected()` 仍然
+读它们也是对的（循环确实学到过这些拒绝）。错的是页面：它把 35 条并成一列 `rejected by`，读起来像"这 35 条
+是刚判过的"。现在它分开说：
+
+- `refusals N …` 是下一轮实际会跳过的候选数（`previously_rejected()` 的返回长度）；
+- `, M of them on retired record(s)` 是其中没有人再复核过的条数。
+
+为此 `previously_rejected()` 被拆成两层：新的 `rejection_provenance()` 返回每条候选的
+`{accepted, reason, source, round, retired, re_measured_as}`，"谁判的"和"判了什么"放在一起；
+`previously_rejected()` 变成它的一个薄投影（`on <source>: <reason>`），输出一字未变，旧调用方不受影响。
+
+**边界 77：批量退役是一条命令，不是一次判断。每条记录都要和继任者单独比一遍并报出自己的重叠；共享同一个
+继任者不等于两份记录都被回答过。**
+
+**边界 78：一份"已定"清单必须说明其中有多少条没有人再复核。把继承来的拒绝和刚判过的拒绝并成一列，读起来
+就是一次不存在的验证。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2013,3 +2081,6 @@ missing for the next level
 23. 让 `--retire` 能一次退役多条并把继任者写进 `--campaign`（现在每次一条，继任者要手工抄），
     以及让 campaign 显示"退役记录里的拒绝是否仍在参与 `previously_rejected`"——现在它们参与，但页面上
     看不到这一点。
+
+24. 让 `--campaign` 的 `refusals` 也能按域拆开（现在它是账本级的），并在 `--propose` 输出里标出
+    "这条候选之所以没被提出，是因为一条退役记录里的拒绝"——现在它只是静默地少了一条候选。

@@ -267,6 +267,23 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     return 1 if moved else 0
 
 
+def _retire_names(values: List[str]) -> List[str]:
+    """Flatten `--retire` into one name per round, in the order the operator wrote them.
+
+    The flag repeats and also accepts comma-separated names, because retiring the two records a single
+    re-measurement superseded was two commands with the same `--re-measured-as`, and an operator
+    transcribing a successor twice is an operator who will eventually mistype one. Duplicates collapse
+    to the first mention: retiring the same round twice is idempotent in `retire()`, but printing it
+    twice would read as two records.
+    """
+    names: List[str] = []
+    for value in values:
+        for piece in str(value).replace(",", " ").split():
+            if piece and piece not in names:
+                names.append(piece)
+    return names
+
+
 def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     """Run the improvement mechanism: propose, measure, select, and (only with --apply) integrate."""
     root = Path(".")
@@ -312,35 +329,45 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     if args.retire:
-        try:
-            mark = retire(root, args.retire, re_measured_as=args.re_measured_as or None)
-        except (OSError, ValueError) as error:
-            _print("cannot retire %s: %s" % (args.retire, error))
-            return 2
-        successor = mark.get("re_measured_as") if isinstance(mark, dict) else None
-        _print("retired           %s  (%s)"
-               % (args.retire, "re-measured as %s" % successor if successor
-                  else "no successor named: the record stays, the checks skip it"))
-        overlap = (mark or {}).get("overlap") or {}
-        if successor:
-            matches = overlap.get("matches") or []
-            rest = overlap.get("not_repeated") or []
-            if not overlap.get("successor_readable"):
-                _print("                  the successor record is not readable, so how much of this "
-                       "round it repeats is unknown")
-            elif matches:
-                _print("                  %d of its %d trial(s) appear in the successor: %s"
-                       % (len(matches), len(matches) + len(rest), ", ".join(matches)))
-                if rest:
-                    # A single shared candidate must not launder the rest of the record: those
-                    # comparisons were not re-measured, they are questions nobody is asking again.
-                    _print("                  the other %d are not repeated there, so this retirement "
-                           "does not claim they were answered" % len(rest))
-            else:
-                _print("                  none of its %d trial(s) appear in the successor: this round is "
-                       "retired as a question, not answered" % len(rest))
-        _print("The record is unchanged; --audit no longer re-decides it, and --history still lists it.")
-        return 0
+        names = _retire_names(args.retire)
+        failed: List[str] = []
+        for name in names:
+            try:
+                mark = retire(root, name, re_measured_as=args.re_measured_as or None)
+            except (OSError, ValueError) as error:
+                _print("cannot retire %s: %s" % (name, error))
+                failed.append(name)
+                continue
+            successor = mark.get("re_measured_as") if isinstance(mark, dict) else None
+            _print("retired           %s  (%s)"
+                   % (name, "re-measured as %s" % successor if successor
+                      else "no successor named: the record stays, the checks skip it"))
+            overlap = (mark or {}).get("overlap") or {}
+            if successor:
+                matches = overlap.get("matches") or []
+                rest = overlap.get("not_repeated") or []
+                if not overlap.get("successor_readable"):
+                    _print("                  the successor record is not readable, so how much of this "
+                           "round it repeats is unknown")
+                elif matches:
+                    _print("                  %d of its %d trial(s) appear in the successor: %s"
+                           % (len(matches), len(matches) + len(rest), ", ".join(matches)))
+                    if rest:
+                        # A single shared candidate must not launder the rest of the record: those
+                        # comparisons were not re-measured, they are questions nobody is asking again.
+                        _print("                  the other %d are not repeated there, so this retirement "
+                               "does not claim they were answered" % len(rest))
+                else:
+                    _print("                  none of its %d trial(s) appear in the successor: this round is "
+                           "retired as a question, not answered" % len(rest))
+        if len(names) > 1:
+            # One command, but the overlap above is per round: a shared successor cannot stand in for the
+            # trials it never repeated, so the batch reports each record's own share (boundary 77).
+            _print("retired           %d of %d round(s)%s"
+                   % (len(names) - len(failed), len(names),
+                      "" if not args.re_measured_as else ", each naming %s" % args.re_measured_as))
+        _print("The record(s) are unchanged; --audit no longer re-decides them, and --history still lists them.")
+        return 2 if failed else 0
 
     if args.rejudge:
         path = Path(args.rejudge)
@@ -1713,9 +1740,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-decide a recorded round file under today's rules and exit")
     evolve.add_argument("--audit", action="store_true",
                         help="re-decide every recorded round under today's rules and exit")
-    evolve.add_argument("--retire", default="",
+    evolve.add_argument("--retire", default=[], action="append", metavar="ROUND",
                         help="mark a recorded round superseded by a re-measurement and exit; its record "
-                             "stays as written, the checks stop asking the mechanism to answer for it")
+                             "stays as written, the checks stop asking the mechanism to answer for it. "
+                             "Repeat the flag or separate the names with commas to retire several")
     evolve.add_argument("--re-measured-as", default="",
                         help="with --retire: the round that replaced it, so the retirement names a successor")
     evolve.add_argument("--campaign", action="store_true",
