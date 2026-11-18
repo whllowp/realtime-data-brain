@@ -2769,6 +2769,59 @@ file unknown      53 of 54 round(s) do not say which file they measured, so 98% 
 他不会打开；他会假定数据集的名字就是文件的名字。
 
 
+### 3.57 数字要能进闸门，也要能自己变小：98% 的两种去向
+
+第 49 轮把比例印在表头上。印完之后它还是什么都不做 —— 一个没有退出码读取的数字是装饰。这一轮给它两条去向：
+**让它能被要求**（`--max-unrecorded`），和**让它能被减少**（`--unrecorded` 列出仍然影响决策的那几轮）。
+
+```
+$ brian evolve --audit --strict --max-unrecorded 0.25     # exit 1
+98% of the recorded rounds cannot be placed on a sampling, above the 25% asked for:
+re-run the rounds whose totals still decide something, on the file each one measured.
+```
+
+`--max-unrecorded` 是**可选**的，默认不设 —— 原因写在实现里，也是这一轮自己的一个失败测试逼出来的：
+
+> 本构建写的、没有文件的轮次，不一定是缺陷。`brian evolve` 不带 `--stream-file` 时测的是**生成出来的**
+> demo 流，它没有文件可写。把这种轮次算成债务，会让 demo 域永远红着 —— 正是第 33 轮修过的那个失败
+> （一个总是红的闸门等于没有闸门）。
+
+所以默认只警告，比例上限由部署方自己定。默认警告是这样的两句：
+
+```
+53 round(s) predate the stream-file field, so which sampling their totals belong to is not recorded.
+Re-running a round writes a record that says; --unrecorded lists the ones that still decide something.
+```
+
+第二条去向是这一轮真正的工作量所在。把 53 轮全部重跑没有意义，所以 `--unrecorded` 只列出**仍然在决定什么**
+的轮次 —— 写出过还在页面上的版本，或者它还压着一份仍然被持有的拒绝：
+
+```
+rounds            53 of 54 cannot be attributed; 17 of them still decide something
+
+domain             round                              why it still matters
+------------------------------------------------------------------------------------------------
+SMD                round-20261117T203743Z.json        wrote 4 version(s) still on the page
+SMD                round-20261118T000310Z.json        wrote 1 version(s) still on the page; 6 refusal(s) still carried
+SMD                round-20261118T022144Z.json        1 refusal(s) still carried
+```
+
+三件事一起读：
+
+1. **闸门只收费它能说清的那部分。** 历史欠账和本构建的欠账要分开（第 33 轮的做法，这里换了个字段），
+   而"本构建写的没有文件"还要再分一层：生成流没有文件可写。一个分不清这两者的闸门，会先被人静音，再被人删掉。
+2. **比例要能被要求，就不能只印。** `--max-unrecorded 0.25` 让"不可归属超过四分之一"成为一个失败的构建，
+   这样它和"有判词会变"（第 15 轮）、"有拒绝没人复核"（第 45 轮）一样，是同一类东西：能被机器读的断言。
+3. **债要能变小，而且只变小值得变小的那部分。** 53 轮里 17 轮仍然在决定什么；其余 36 轮是没人再问的问题。
+   把重跑的成本压在 17 轮上，比例才会真的从 98% 往下走 —— 而这不是把数字藏起来，是把数字变成工作。
+
+**边界 109：一个印出来的比例必须能被某条命令要求，也必须能被某条命令减少。** 不能要求的比例是装饰；不能减少的
+比例是抱怨。两者都会让读者学会忽略它。
+
+**边界 110：欠账要按"谁还能还"分类，而不是按"欠了多少"一行带过。** 历史欠账（记录早于字段）和本构建的欠账
+（生成流没有文件）不能合并计数，否则闸门要么永远红，要么永远绿 —— 两种都等于没在检查。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2980,4 +3033,8 @@ missing for the next level
 37. **（3.56 已完成）把比例写进闸门，并让它自己下降。** `file unknown` 现在只是打印。下一步：给
     `--strict` 一个上限（例如不可归属比例超过 25% 就退出 1），并按域挑出仍然影响决策的轮次，在它们各自
     的文件上重跑 —— 因为补记不可能（没人记过），比例只能靠新测量降下来。
+
+38. **（3.57 已完成）让 `--unrecorded` 直接给出重跑命令。** 现在它给出的是原则（`--stream-file <the
+    file it measured>`），而"它测的是哪个文件"恰恰是缺的那条信息。下一步：用几何匹配（第 47 轮的
+    `var/backfill_version_path.py` 做过一次）为每一轮列出**候选文件**，让操作员只做选择题而不是回想题。
 

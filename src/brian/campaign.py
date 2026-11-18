@@ -171,6 +171,15 @@ class Campaign:
     # the header is what a reader sees first: "54 rounds" reads as fully attributable until the page says
     # how much of it cannot be placed on a sampling.
     unattributable: int = 0
+    # Round 50 splits that count by who is responsible: a record written before the field existed is history
+    # nobody can back-fill (an invented measurement), while a record this build wrote and left without a file
+    # is a defect here -- `--strict` charges the second kind and only warns about the first (boundary 73).
+    unattributable_legacy: int = 0
+    unattributable_missing: int = 0
+
+    @property
+    def unattributable_share(self) -> float:
+        return (float(self.unattributable) / float(self.rounds)) if self.rounds else 0.0
 
     @property
     def domains(self) -> List[str]:
@@ -202,6 +211,8 @@ class Campaign:
             "withheld_oldest_evidence_days": self.withheld_oldest_days,
             "domains_pooling_files": self.pooled,
             "rounds_without_recorded_file": self.unattributable,
+            "rounds_without_file_legacy": self.unattributable_legacy,
+            "rounds_without_file_this_build": self.unattributable_missing,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -247,6 +258,13 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
             # Counted here rather than derived from the rows later: a round that predates the field is
             # unattributable, and the header says how much of the page that is (round 49).
             result.unattributable += 1
+            # Round 50: the key's presence is the seam. `persist` has written `stream_path` since round 47,
+            # so a record with the key measured on no file at all (the demo stream), while a record without
+            # it was written by a build that could not tell -- history, not a defect in this one.
+            if "stream_path" in record:
+                result.unattributable_missing += 1
+            else:
+                result.unattributable_legacy += 1
         finished = record.get("finished_at") or record.get("started_at") or ""
         if not row.first or finished < row.first:
             row.first = finished
@@ -490,9 +508,14 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # Round 49: the per-row detail has said this since round 48, but the header is what a reader reads
         # first, and "54 rounds" reads as fully attributable until the page states otherwise.
         share = 100.0 * result.unattributable / result.rounds if result.rounds else 0.0
-        lines.append("file unknown      %d of %d round(s) do not say which file they measured, so %.0f%% of "
-                     "the totals above cannot be placed on a sampling"
-                     % (result.unattributable, result.rounds, share))
+        line = ("file unknown      %d of %d round(s) do not say which file they measured, so %.0f%% of "
+                "the totals above cannot be placed on a sampling"
+                % (result.unattributable, result.rounds, share))
+        if result.unattributable_missing:
+            # Round 50: not all of it is history. This build writes the field, so a round without one is a
+            # record it cannot explain -- the reader deserves to know which debt is still open.
+            line += ", %d of them written by this build" % result.unattributable_missing
+        lines.append(line)
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")

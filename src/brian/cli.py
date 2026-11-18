@@ -249,7 +249,9 @@ def _evolve_streams(args: argparse.Namespace, settings: Settings
 
 def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent: int = 0,
                  due: int = 0, oldest_days: Optional[float] = None,
-                 horizon: float = REFUSAL_EXPIRY_DAYS) -> int:
+                 horizon: float = REFUSAL_EXPIRY_DAYS, unrecorded: int = 0,
+                 legacy_unrecorded: int = 0, unrecorded_share: float = 0.0,
+                 max_unrecorded: Optional[float] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -293,7 +295,32 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                   "" if oldest_days is None else " (oldest evidence %.0f day(s) old)" % oldest_days))
         _print("a refusal nobody re-tests is an assertion the loop cannot lose, so --strict exits 1.")
         _print("pass --verify-withheld to re-measure them.")
-    return 1 if (moved or due) else 0
+    if legacy_unrecorded:
+        # Round 50, same seam as round 33: a round written before the field existed is history nobody can
+        # back-fill (writing a path in would invent a measurement), so it is a warning even when a cap is
+        # set -- otherwise the gate is red until 40 rounds have been re-run, which is how a gate stops being
+        # read. One line, because this debt only falls as new rounds are written.
+        _print("")
+        _print("%d round(s) predate the stream-file field, so which sampling their totals belong to is not "
+               "recorded." % legacy_unrecorded)
+        _print("Re-running a round writes a record that says; --unrecorded lists the ones that still decide "
+               "something.")
+    if unrecorded:
+        # Round 50 learned this from a failing test: a round this build writes without a file is not
+        # automatically a defect. `brian evolve` with no --stream-file measures the generated demo stream,
+        # which has no file to name -- so charging this would leave the demo domain permanently red, the
+        # failure round 33 fixed. Named as a warning; the share cap is what a deployment can ask for.
+        _print("")
+        _print("%d round(s) were written by this build and say no stream file: a round measured on the "
+               "generated stream has none to name." % unrecorded)
+        _print("Pass --stream-file to make a round's totals attributable to a sampling.")
+    if max_unrecorded is not None and unrecorded_share > max_unrecorded:
+        _print("")
+        _print("%.0f%% of the recorded rounds cannot be placed on a sampling, above the %.0f%% asked for:"
+               % (100.0 * unrecorded_share, 100.0 * max_unrecorded))
+        _print("re-run the rounds whose totals still decide something, on the file each one measured.")
+    capped = max_unrecorded is not None and unrecorded_share > max_unrecorded
+    return 1 if (moved or due or capped) else 0
 
 
 def _withheld_debt(root: Path, horizon: float) -> Tuple[int, Optional[float]]:
@@ -309,6 +336,60 @@ def _withheld_debt(root: Path, horizon: float) -> Tuple[int, Optional[float]]:
     ages = [withheld_evidence_age(record) for record in records]
     known = [age for age in ages if age is not None]
     return len(due), (max(known) if known else None)
+
+
+def _unrecorded_debt(root: Path) -> Tuple[int, int, int, float]:
+    """Rounds that cannot be placed on a sampling, split by who can answer for it (round 50).
+
+    `persist` has written `stream_path` since round 47, so the key's presence is the seam: a record with the
+    key measured on no file at all (the demo stream) and belongs to this build, while a record without it was
+    written by a build that could not tell. The first is a debt one command pays; the second is history, and
+    charging it to the gate would keep the gate red for as long as the ledger is older than the field — the
+    failure round 33 already fixed once (boundary 73).
+    """
+    rounds = history(root)
+    missing = 0
+    legacy = 0
+    for record in rounds:
+        if str(record.get("stream_path") or ""):
+            continue
+        if "stream_path" in record:
+            missing += 1
+        else:
+            legacy += 1
+    share = (float(missing + legacy) / float(len(rounds))) if rounds else 0.0
+    return missing, legacy, len(rounds), share
+
+
+def _unrecorded_matters(root: Path) -> List[Tuple[str, str, str]]:
+    """(domain, round, why) for rounds nobody can attribute but whose numbers still decide something.
+
+    Round 50's second half: the share can only fall by re-running rounds, and re-running all 53 is not worth
+    it. A round matters when it wrote a version that is still on the page, or when a candidate it refused is
+    still being held. Those are the ones whose totals a reader acts on today.
+    """
+    provenance = rejection_provenance(root)
+    carried: Dict[str, List[str]] = {}
+    for name, verdict in provenance.items():
+        if verdict.get("accepted"):
+            continue
+        carried.setdefault(str(verdict.get("round") or ""), []).append(str(name))
+    out: List[Tuple[str, str, str]] = []
+    for record in history(root):
+        if str(record.get("stream_path") or ""):
+            continue
+        name = str(record.get("round") or "")
+        why: List[str] = []
+        if record.get("applied"):
+            why.append("wrote %d version(s) still on the page" % len(record.get("accepted") or []))
+        held = carried.get(name) or []
+        if held:
+            why.append("%d refusal(s) still carried" % len(held))
+        if not why:
+            continue
+        domain = str((record.get("stream") or {}).get("source") or "(unattributed)")
+        out.append((domain, name, "; ".join(why)))
+    return out
 
 
 def _withheld_pairs(values: Sequence[str]) -> List[Tuple[str, Path]]:
@@ -615,6 +696,43 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print(format_rejudge(result))
         return 0
 
+    if args.unrecorded:
+        # Round 50: the campaign's `file unknown` line says how much of the page cannot be attributed; this
+        # says which of it is still deciding something, because re-running 53 rounds to move a percentage is
+        # not work anyone does. An in-force version or a carried refusal is what makes a total load-bearing.
+        try:
+            rounds = history(root)
+        except OSError as error:
+            _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
+            return 2
+        matters = _unrecorded_matters(root)
+        unknown = sum(1 for record in rounds if not str(record.get("stream_path") or ""))
+        _print("=" * 96)
+        _print("brian evolve - rounds whose totals cannot be placed on a sampling")
+        _print("=" * 96)
+        _print("rounds            %d of %d cannot be attributed; %d of them still decide something"
+               % (unknown, len(rounds), len(matters)))
+        if not matters:
+            _print("")
+            _print("Every round that still decides something says which file it measured.")
+            return 0
+        _print("")
+        _print("%-18s %-34s %s" % ("domain", "round", "why it still matters"))
+        _print("-" * 96)
+        for domain, name, why in matters:
+            _print("%-18s %-34s %s" % (domain, name, why))
+        _print("")
+        _print("Re-run one with `brian evolve --stream-file <the file it measured>`: the new record names the")
+        _print("file, and this list shrinks. Nothing is re-run here, and no path is guessed (boundary 102).")
+        if args.json_out:
+            Path(args.json_out).write_text(
+                _json({"rounds": len(rounds), "unattributed": unknown,
+                       "matters": [{"domain": d, "round": n, "why": w} for d, n, w in matters]}),
+                encoding="utf-8")
+            _print("")
+            _print("wrote %s" % args.json_out)
+        return 0
+
     if args.campaign:
         rules = _rules_from_args(args)
         horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
@@ -632,7 +750,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("wrote %s" % args.json_out)
         return _strict_exit(args.strict, result.moved, result.unreconstructable,
                             result.inconsistent, due=result.withheld_due,
-                            oldest_days=result.withheld_oldest_days, horizon=horizon)
+                            oldest_days=result.withheld_oldest_days, horizon=horizon,
+                            unrecorded=result.unattributable_missing,
+                            legacy_unrecorded=result.unattributable_legacy,
+                            unrecorded_share=result.unattributable_share,
+                            max_unrecorded=args.max_unrecorded)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -681,11 +803,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             due, oldest = _withheld_debt(root, horizon)
         except OSError:
             due, oldest = 0, None
+        # Round 50: the same seam the campaign page prints, read here so the gate can charge it. `--audit`
+        # re-decides records and never looks at the campaign page, but a reader who runs the check deserves
+        # the same debt list in either mode.
+        try:
+            missing, legacy, _rounds, share = _unrecorded_debt(root)
+        except OSError:
+            missing, legacy, share = 0, 0, 0.0
         # The exit code is the part that makes this a check rather than a report: a rule change that
         # rewrites history should fail the build, or it will be noticed months later by whoever reads the
         # table last.
         return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
-                            due=due, oldest_days=oldest, horizon=horizon)
+                            due=due, oldest_days=oldest, horizon=horizon,
+                            unrecorded=missing, legacy_unrecorded=legacy, unrecorded_share=share,
+                            max_unrecorded=args.max_unrecorded)
 
     if args.grade:
         try:
@@ -2176,6 +2307,13 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--sensitivity-bar", type=float, default=[], action="append", metavar="BAR",
                         help="with --sensitivity: a bar to test (repeat the flag); default: the bar in "
                              "force, 2x and 4x it")
+    evolve.add_argument("--unrecorded", action="store_true",
+                        help="list the rounds that cannot be placed on a sampling but whose numbers still "
+                             "decide something, per stream, and exit (no Laya)")
+    evolve.add_argument("--max-unrecorded", type=float, default=None, metavar="SHARE",
+                        help="with --strict: fail when more than this share of the recorded rounds cannot "
+                             "be placed on a sampling (0.25 means 25%%); a round written before the field "
+                             "existed is still only a warning")
     evolve.add_argument("--apply", action="store_true",
                         help="also write a version file per accepted change "
                              "(the round itself is always recorded)")
