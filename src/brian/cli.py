@@ -44,6 +44,7 @@ from .evolve import (
     format_rejudge,
     format_round,
     format_sensitivity,
+    format_withheld,
     grade,
     history,
     label_free_cut,
@@ -56,6 +57,7 @@ from .evolve import (
     rejudge,
     retire,
     run_round,
+    withheld_records,
 )
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import campaign as campaign_result, format_campaign
@@ -440,7 +442,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
-        _print(format_campaign(result, expiry_days=args.expiry_days))
+        _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules))
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
             _print("")
@@ -459,6 +461,22 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print(format_sensitivity(result))
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
+            _print("")
+            _print("wrote %s" % args.json_out)
+        return 0
+
+    if args.withheld:
+        rules = _rules_from_args(args)
+        try:
+            records = withheld_records(root)
+        except OSError as error:
+            _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
+            return 2
+        _print(format_withheld(records, rules))
+        if args.json_out:
+            payload = {"bar": rules.replication_bar,
+                       "withheld": [record.to_dict() for record in records]}
+            Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
         return 0
@@ -1845,6 +1863,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="how far one recording's at-budget recall may fall while the pooled number "
                              "rises before a quality gain stops counting as replicated (default: the "
                              "quality bar); stored with the refusal so --rejudge can disagree with it")
+    evolve.add_argument("--withheld", action="store_true",
+                        help="list the candidates the loop measured and refused for replication, and say "
+                             "which refusals no longer hold at today's bar (no Laya)")
     evolve.add_argument("--sensitivity", action="store_true",
                         help="for each stream, how many `replicate` refusals would become acceptances at a "
                              "looser replication bar (re-decides stored measurements, no re-run), then exit")

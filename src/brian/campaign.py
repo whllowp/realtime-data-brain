@@ -16,7 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .evolve import EvolveRules, audit, history, rejection_provenance
+from .evolve import (EvolveRules, audit, history, rejection_provenance, withheld_records,
+                     withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state,
                       load_promotions, shape_note)
 
@@ -63,6 +64,11 @@ class CampaignRow:
     # refused them there at this sampling (round 38). A saving is only a saving if it accumulates
     # somewhere; a round's own log line is not that place.
     skipped: int = 0
+    # Refusals this stream wrote down as records rather than sentences (round 42), and how many of them no
+    # longer hold at today's bar. The second number is why the first is worth keeping: a refusal that only
+    # exists inside a round's prose cannot be found again, let alone re-judged.
+    withheld: int = 0
+    withheld_stale: int = 0
 
     @property
     def accepted(self) -> int:
@@ -93,6 +99,8 @@ class CampaignRow:
             "refusals_carried": self.refusals,
             "refusals_from_retired": self.refusals_retired,
             "measurements_not_repeated": self.skipped,
+            "refusals_withheld": self.withheld,
+            "withheld_no_longer_holding": self.withheld_stale,
         }
 
 
@@ -134,11 +142,15 @@ class Campaign:
     # that stream at that sampling (round 38). Reported as a count, never as tokens: what it saves is a
     # slot in a capped proposal, not a run.
     skipped: int = 0
+    # Refusals written down as `w###` records (round 42), and how many of them the bar has since outgrown.
+    # A version page says what shipped; without these two numbers the page says nothing about what was
+    # measured and deliberately not shipped.
+    withheld: int = 0
+    withheld_stale: int = 0
 
     @property
     def domains(self) -> List[str]:
         return [row.domain for row in self.rows]
-
     def to_dict(self) -> Dict[str, Any]:
         return {
             "rounds": self.rounds,
@@ -160,6 +172,8 @@ class Campaign:
             "refusals_carried": self.refusals,
             "refusals_from_retired": self.refusals_retired,
             "measurements_not_repeated": self.skipped,
+            "refusals_withheld": self.withheld,
+            "withheld_no_longer_holding": self.withheld_stale,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -233,6 +247,19 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
         successor = retirement.get("re_measured_as") if isinstance(retirement, dict) else None
         if successor and str(successor) not in row.successors:
             row.successors.append(str(successor))
+
+    active = rules if rules is not None else EvolveRules()
+    # Round 42: refusals written down as records. They carry no trials in the counts above — a refusal is
+    # not an acceptance — but they are the half of the ledger a version page cannot show, and the stale
+    # count is what makes them worth reading again.
+    for record in withheld_records(root):
+        source = str((record.stream or {}).get("source") or "(unattributed)")
+        row = rows.setdefault(source, CampaignRow(domain=source))
+        row.withheld += 1
+        result.withheld += 1
+        if not withheld_staleness(record, active)["still"]:
+            row.withheld_stale += 1
+            result.withheld_stale += 1
 
     for promotion in load_promotions(root):
         if promotion.reverted_at:
@@ -334,7 +361,12 @@ def _verdict_line(row: CampaignRow) -> str:
     return note
 
 
-def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) -> str:
+def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
+                    rules: Optional[EvolveRules] = None) -> str:
+    # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
+    # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
+    # page lying about which assumption it used (round 42).
+    active = rules if rules is not None else EvolveRules()
     lines: List[str] = []
     lines.append("=" * 96)
     lines.append("brian evolve - the campaign, not the round")
@@ -377,6 +409,13 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
         # many questions were never asked twice, not how much compute the loop saved.
         lines.append("saving            %d candidate measurement(s) the mechanism never proposed: a stream "
                      "had already refused them" % result.skipped)
+    if result.withheld:
+        # Round 42: the half of the ledger a version page cannot show. Printed above the rows because the
+        # second number is a question every domain page owes an answer to: which refusals no longer hold.
+        line = "withheld          %d candidate(s) were measured and refused for replication" % result.withheld
+        if result.withheld_stale:
+            line += ", %d no longer hold at today's bar (%.3f)" % (result.withheld_stale, active.replication_bar)
+        lines.append(line)
     if result.unsourced:
         lines.append("unattributed      %d round(s) predate the stream field" % result.unsourced)
     lines.append("")
@@ -424,6 +463,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS) ->
             # know what this stream's own refusals have been buying (round 38).
             lines.append("  saving            %d candidate measurement(s) not repeated"
                          % row.skipped)
+        if row.withheld:
+            note = "  withheld          %d candidate(s) refused for replication" % row.withheld
+            if row.withheld_stale:
+                note += ", %d no longer hold at today's bar" % row.withheld_stale
+            lines.append(note)
         if row.in_force:
             lines.append("  in force          %s  (%s)"
                          % (" ".join("%s=%s" % item for item in sorted(row.env.items()))

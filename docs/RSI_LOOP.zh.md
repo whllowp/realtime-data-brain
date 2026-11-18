@@ -2285,6 +2285,72 @@ no surviving round refuses a candidate for `replicate`, so there is nothing to t
 "没有拒绝"，从而高估自己的域。
 
 
+## 3.49 拒绝也是一条记录：把它写成"没发布的版本"
+
+第 41 轮的敏感度表能回答"这次拒绝有多依赖那个 bar"，但它读的是**轮次记录里的 verdict**。于是还有两个问题没人能答：
+一个候选被拒绝之后去哪找它？如果 bar 改了，谁来指出"这条拒绝已经不成立了"？verdict 只活在轮次文件里，而轮次文件
+按时间写，不按候选写。
+
+这一轮把拒绝写到版本家族旁边：`var/evolve/withheld/w###.json`，`w` 前缀保证它永远不会被当成发布过的 `v###`。一条
+真实记录（SMD 上的 `host-features-3`）：
+
+```
+{
+  "withheld": 1,
+  "round": "round-20261118T024405Z.json",
+  "stream": {"source": "SMD", "windows": 1355, "scored": 1235, "cadence_s": 2100.0},
+  "candidate": {"name": "host-features-3", "changes": [["digest", "host_features", "cpu_r,load_1,mem_free"]]},
+  "bar": 0.05,
+  "loss": {"recording": "smd-machine-1-6", "before": 0.4909, "after": 0.3818, "drop": 0.1091,
+           "tolerance": 0.05, "pooled_before": 0.2969, "pooled_after": 0.3125},
+  "measured": {"recall_at_budget": 0.3125, "fpr_at_budget": 0.0968, "tokens_per_report": 2907.7, ...},
+  "reason": "recall at the 10% budget rises 0.297 -> 0.312 pooled, but smd-machine-1-6 falls 0.491 -> 0.382: ...",
+  "rule": "replicate"
+}
+```
+
+`brian evolve --withheld` 把它读回来，并且**用记录里的 bar 判**：
+
+```
+bar in force      0.050
+records           1 refusal(s) recorded
+no longer hold    0 of them would not be refused at today's bar
+
+id     candidate                domain                      bar     loss whose gain it was
+------------------------------------------------------------------------------------------
+w001   host-features-3          SMD                       0.050    0.109 smd-machine-1-6
+
+w001   host-features-3          the loss was 0.109 against a bar of 0.050; today's bar is 0.050, so it still holds
+```
+
+把 bar 放宽到 0.20（`--replication-tolerance 0.20`，第 40 轮加的那个参数），同一份数据、一个字都不重测，结论就变了：
+
+```
+no longer hold    1 of them would not be refused at today's bar
+w001   host-features-3          the loss was 0.109 against a bar of 0.050; today's bar is 0.200, so this objection no longer holds
+```
+
+`--campaign` 也认这两条记录。默认 bar 下头部是 `withheld          1 candidate(s) were measured and refused for replication`，
+行内是 `  withheld          1 candidate(s) refused for replication`；放宽到 0.20 之后两处都带上
+`1 no longer hold at today's bar (0.200)`。**版本页第一次能说出"测过、故意没上"的那一半**，而且说的不是"当时拒绝了"，
+而是"按今天的假设还该不该拒绝"。
+
+三点读法：
+
+1. **拒绝是候选的属性，不是轮次的属性。** 轮次文件按时间写，"这个候选为什么没上"要翻遍所有轮次；`w###` 按候选写，
+   一条记录就是一句可核对的话："在这个 bar 下，它在这台机器上掉了 0.109"。
+2. **判一条拒绝，用它自己的 bar。** bar 存在记录里（第 40 轮），所以复核问的是"当时的判断在当时的假设下是否成立"，
+   而不是拿今天的假设改写昨天。两个 bar 并排打印，读者知道分歧落在哪一个假设上。
+3. **"不再成立"不等于"该被接受"。** 复核只覆盖 `replicate` 这一条分支：成本、证据、部署底线都没跑，所以表里说的是
+   "这条反对意见不成立"，不是"这个候选现在会被接受"。这是第 20 轮那个错误的同类：把上界当成决定。
+
+**边界 91：一次拒绝必须写成一条记录，而不是一句理由。** 理由能读、不能查：它没有数字、没有 bar、没有说是哪台机器，
+所以下一个人想有意见就只能重测一遍。拒绝和版本是同一种东西，只是承诺的方向相反。
+
+**边界 92：判一条拒绝，用记录里的那个假设，并把两个假设并排打印。** 用今天的 bar 判一条旧拒绝，是拿新假设改写旧证据；
+只打印结论（"不成立"）而不打印两个 bar，是让读者自己猜分歧在哪。复核可以不同意旧假设，但必须先把它说出来。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2466,3 +2532,5 @@ missing for the next level
     的提升从来不写入版本文件——它的 bar 只活在 round 记录里。做法：让被 replication 拒绝的候选也写一份
     "未提升"记录（含 bar 与损失），复核时按记录里的 bar 判，这样"当时为什么没上"和"现在还会不会被挡住"
     用同一个数回答。
+30. **（3.49 已完成）拒绝写记录；复核按记录里的 bar 判。** 下一步：让重测一个被拒绝的候选（`--candidates`）把结果
+    回写到它自己的 `w###`，并让 `--verify` 认这个家族，这样"已被拒绝"和"已复核过"就不再是两套说法。

@@ -62,6 +62,14 @@ REFERENCE_EVENTS = 64
 
 #: Where rounds, version files and the append-only ledger live. Gitignored, like the rest of `var/`.
 EVOLVE_DIR = "var/evolve"
+WITHHELD_DIR = "withheld"
+"""Where a `replicate` refusal is written down (round 42).
+
+A version file is a change the loop decided to ship. A refusal is a change the loop decided *not* to ship,
+and until this round it existed only as a verdict inside one round's record — so "why wasn't this promoted"
+required reading a round, and "would it still be blocked" required a hypothetical rejudge. A refusal is
+also a claim: it says this candidate loses this much on this recording against this bar. Writing it in its
+own numbered family makes the claim readable, checkable and countable the way a version is."""
 
 
 # --------------------------------------------------------------------------------------
@@ -1806,8 +1814,12 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
         }) + "\n")
 
     written: List[str] = []
+    # Refusals are written whatever `write_versions` says: `--apply` decides whether a *change* is deployed,
+    # and a refusal deploys nothing. Leaving them out of the record family would keep "why wasn't this
+    # promoted" answerable only by reading one round's file (round 42).
+    refusals = _write_withheld(directory, round_path.name, result)
     if not write_versions:
-        return {"round": str(round_path), "versions": written}
+        return {"round": str(round_path), "versions": written, "withheld": refusals}
     existing = sorted(versions.glob("v*.json"))
     version = 0
     for path in existing:
@@ -1841,13 +1853,204 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
         path = versions / ("v%03d.json" % version)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         written.append(str(path))
-    return {"round": str(round_path), "versions": written}
+    return {"round": str(round_path), "versions": written, "withheld": refusals}
+
+
+def _next_withheld_number(folder: Path) -> int:
+    number = 0
+    for path in folder.glob("w*.json"):
+        try:
+            number = max(number, int(path.stem.lstrip("w")))
+        except ValueError:
+            continue
+    return number
+
+
+def _write_withheld(directory: Path, round_name: str, result: RoundResult) -> List[str]:
+    """Write one record per `replicate` refusal, numbered `w###` so it cannot be read as a shipped version."""
+    refusals = [(candidate, measurement, verdict) for candidate, measurement, verdict in result.trials
+                if verdict.rule == "replicate"]
+    if not refusals:
+        return []
+    folder = directory / WITHHELD_DIR
+    folder.mkdir(exist_ok=True)
+    number = _next_withheld_number(folder)
+    bar = result.rules.replication_bar
+    written: List[str] = []
+    for candidate, measurement, verdict in refusals:
+        number += 1
+        payload = Withheld(
+            number=number,
+            round=round_name,
+            created_at=result.finished_at,
+            stream=dict(result.stream),
+            candidate=candidate.to_dict(),
+            changes=[list(change) for change in candidate.changes()],
+            bar=bar,
+            loss=dict(verdict.detail or {}),
+            measured=measurement.to_dict(),
+            reason=verdict.reason,
+            rule=verdict.rule,
+        ).to_dict()
+        path = folder / ("w%03d.json" % number)
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        written.append(str(path))
+    return written
 
 
 def _env_value(value: Any) -> str:
     if isinstance(value, bool):
         return "1" if value else "0"
     return str(value)
+
+
+@dataclass
+class Withheld:
+    """A candidate the loop measured and refused, written like a version it decided not to ship (round 42).
+
+    The refusal is a claim in the same sense a version is: it says this candidate loses this much on this
+    recording against this bar. Its number is `w###` so it can never be mistaken for a version that shipped.
+
+    `loss` is `Verdict.detail` from `replication_loss`: which recording fell, by how much, and the bar that
+    judged it. A record without it (a refusal written before round 40) can still be read, but its objection
+    cannot be checked, and saying so is better than pretending the row is empty.
+    """
+
+    number: int
+    round: str
+    created_at: str
+    stream: Dict[str, Any] = field(default_factory=dict)
+    candidate: Dict[str, Any] = field(default_factory=dict)
+    changes: List[List[Any]] = field(default_factory=list)
+    bar: Optional[float] = None
+    loss: Dict[str, Any] = field(default_factory=dict)
+    measured: Dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+    rule: str = "replicate"
+
+    @property
+    def domain(self) -> str:
+        return str((self.stream or {}).get("source") or "(unattributed)")
+
+    @property
+    def name(self) -> str:
+        return str((self.candidate or {}).get("name") or "?")
+
+    @property
+    def label(self) -> str:
+        return "w%03d" % self.number
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "withheld": self.number,
+            "round": self.round,
+            "created_at": self.created_at,
+            "stream": dict(self.stream),
+            "candidate": dict(self.candidate),
+            "changes": [list(change) for change in self.changes],
+            "bar": self.bar,
+            "loss": dict(self.loss),
+            "measured": dict(self.measured),
+            "reason": self.reason,
+            "rule": self.rule,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "Withheld":
+        bar = payload.get("bar")
+        return cls(
+            number=int(payload.get("withheld") or 0),
+            round=str(payload.get("round") or ""),
+            created_at=str(payload.get("created_at") or ""),
+            stream=dict(payload.get("stream") or {}),
+            candidate=dict(payload.get("candidate") or {}),
+            changes=[list(change) for change in (payload.get("changes") or [])],
+            bar=None if bar is None else float(bar),
+            loss=dict(payload.get("loss") or {}),
+            measured=dict(payload.get("measured") or {}),
+            reason=str(payload.get("reason") or ""),
+            rule=str(payload.get("rule") or "replicate"),
+        )
+
+
+def withheld_records(root: Path) -> List[Withheld]:
+    """Every refusal written by `persist`, oldest first. Missing directory means none were written."""
+    folder = root / EVOLVE_DIR / WITHHELD_DIR
+    if not folder.is_dir():
+        return []
+    records: List[Withheld] = []
+    for path in sorted(folder.glob("w*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        record = Withheld.from_dict(payload)
+        if not record.round:
+            record.round = path.stem
+        records.append(record)
+    return sorted(records, key=lambda item: item.number)
+
+
+def withheld_staleness(record: Withheld, rules: EvolveRules) -> Dict[str, Any]:
+    """Does the objection still hold at today's bar? Answers with the recorded numbers, not a re-measure.
+
+    The bar is a judgement stored with the refusal (round 40), so a later reader can disagree with it
+    without measuring anything: if the recorded loss is now inside today's bar, the refusal was a judgement
+    about a loss the objective no longer calls a loss. The answer is deliberately narrower than "would be
+    accepted": the other branches still have to pass, and claiming otherwise would be the round-20 mistake
+    (a bound reported as a decision).
+    """
+    drop = (record.loss or {}).get("drop")
+    bar = rules.replication_bar
+    if drop is None:
+        return {"still": True, "comparable": False, "note": "the record does not say how much was lost, so "
+                                                           "this objection cannot be checked"}
+    drop = float(drop)
+    recorded = record.bar if record.bar is not None else None
+    if drop >= bar:
+        shown = "%.3f" % drop
+        if recorded is None:
+            return {"still": True, "comparable": True,
+                    "note": "the loss was %s, still above today's bar of %.3f" % (shown, bar)}
+        return {"still": True, "comparable": True,
+                "note": "the loss was %s against a bar of %.3f; today's bar is %.3f, so it still holds"
+                        % (shown, recorded, bar)}
+    return {"still": False, "comparable": True,
+            "note": "the loss was %.3f against a bar of %.3f; today's bar is %.3f, so this objection no "
+                    "longer holds" % (drop, recorded if recorded is not None else bar, bar)}
+
+
+def format_withheld(records: Sequence[Withheld], rules: Optional[EvolveRules] = None) -> str:
+    active = rules if rules is not None else EvolveRules()
+    lines: List[str] = []
+    lines.append("=" * 96)
+    lines.append("brian evolve - candidates measured and refused, written like versions not shipped")
+    lines.append("=" * 96)
+    lines.append("bar in force      %.3f" % active.replication_bar)
+    lines.append("records           %d refusal(s) recorded" % len(records))
+    if not records:
+        lines.append("")
+        lines.append("no refusal has been written down yet: `replicate` verdicts are recorded by the next "
+                     "round that produces one.")
+        return "\n".join(lines)
+    stale = [record for record in records if not withheld_staleness(record, active)["still"]]
+    lines.append("no longer hold    %d of them would not be refused at today's bar" % len(stale))
+    lines.append("")
+    header = "%-6s %-24s %-22s %8s %8s %s" % ("id", "candidate", "domain", "bar", "loss", "whose gain it was")
+    lines.append(header)
+    lines.append("-" * len(header))
+    for record in records:
+        loss = record.loss or {}
+        lines.append("%-6s %-24s %-22s %8s %8s %s"
+                     % (record.label, record.name[:24], record.domain[:22],
+                        "%.3f" % record.bar if record.bar is not None else "-",
+                        "%.3f" % float(loss["drop"]) if loss.get("drop") is not None else "-",
+                        str(loss.get("recording") or "-")))
+    lines.append("")
+    for record in records:
+        state = withheld_staleness(record, active)
+        lines.append("%-6s %-24s %s" % (record.label, record.name[:24], state["note"]))
+    return "\n".join(lines)
 
 
 def history(root: Path, include_retired: bool = False) -> List[Dict[str, Any]]:
