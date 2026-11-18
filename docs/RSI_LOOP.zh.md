@@ -1273,6 +1273,62 @@ SMD 几乎没变（比值连续，几乎没有重复分数）；RCAEval 掉到�
 2. **告警率控制的是一次数，不是一条比率**。分数有原子值时，"翻 10% 的窗口"这句话没有实现方式：要么翻整个原子，要么一个都不翻。这就是第 52 条边界。
 3. **两个预算必须同时打印**。只打印 `fpr_budget` 时，RCAEval 的无标签召回看起来是 0.226（一个不可能的数字）；只打印 `alert_budget` 时，SMD 的上限 0.612 看起来像个目标。两者并排，读者才能看出哪个数字在撒谎。
 
+## 3.31 让"每次事件的花费"单独成为成本出口
+
+第 6 节第 13 项：第 22 轮接受的那条候选把 `tok/inc` 从 17973 压到 7419，可这个数字只在质量路径上被读——报告变贵、召回也变的时候，它救不了候选。第 19 轮服务域那次正是如此：`host-scoring-deviation` 把召回从 0.068 抬到 0.860，代价是每份报告 1618 → 1703（+5.3%），超过 5% 的容忍，于是被判 `reject cost`，而"每找到一次故障"的花费从 **15516 掉到 1341**。
+
+现在 `decide()` 里多了一个独立出口，位置在"质量涨、账单不涨"之后、"质量涨、账单超容忍"之前：
+
+```python
+recall_holds  = 预算内召回未下降
+paging_holds  = 在役召回未下降          # 见下面那次泄漏
+if recall_holds and paging_holds and 每次事件花费下降 >= min_gain:
+    接受，rule = "cost"
+```
+
+规则的说法是：探测器的计价单位是"找到的事件"，不是"写出的报告"；只要每条事件的账单按成本门槛下降、且没有靠少翻页换来，这一次花费就算降了。对照第 21 轮之前的口径——报告单价是*产出*的价钱，事故单价才是*检出*的价钱。
+
+### 用旧记录验证
+
+`brian evolve --rejudge var\evolve\round-20261117T232141Z.json`（第 19 轮那次服务域完整测量）：
+
+```
+host-scoring-deviation reject cost            accept cost            -> accept
+
+host-scoring-deviation was rejected: recall improves but the bill rises 1618 -> 1703
+                                tokens/report, more than the 5% a quality gain may cost
+                       now  accepted: the bill per incident it finds falls 15516 -> 1341 tokens
+                                with recall at the 10% budget 0.068 -> 0.860, even though
+                                the bill per report moves 1618 -> 1703
+
+1 verdict(s) changed. The stored measurements were not re-run; only the rules moved.
+```
+
+这正是第 13 项说的那个判决，翻案的依据是当年就记在账上的 `confusion`——不需要重跑。
+
+### 泄漏：便宜的事故单价可以靠"少翻页"买到
+
+第一版没有 `paging_holds`，`--audit` 立刻显示第 21 轮的记录从 `gain` 变成 `cost` 被**接受**了：
+
+```
+round-20261117T235604Z.json RCAEval RE1-OB   deviation-bar-free gain -> cost
+```
+
+原因：`deviation-bar-free` 与在役配置共享同一套排序，所以 `recall_at_budget` 两边都是 0.860（预算内召回对"只动门限"的候选天然不变），而每份报告的价钱也几乎相同（1703.2 对 1703.3）；但它只翻前 10% 的窗口，于是在役召回从 0.806 掉到 0.211，报告数从 225 掉到几十份，**总开销**跟着掉——按事件算就是 15516 → 1341 的"便宜"。
+
+所以门槛必须同时看两列：预算内召回（排序是否变差）和**在役召回**（部署上是否少翻页）。加上 `paging_holds` 之后：
+
+```
+7 verdict(s) would be decided differently today; 18 more kept their verdict but changed rule.
+```
+
+8 → 7，去掉的正是那条假便宜。
+
+### 两点读法
+
+1. **同一个"接受"可能有两个名字**。先命中"质量涨、账单没涨"就叫 `quality`，先命中"事件单价下降"就叫 `cost`；名字描述的是理由，不是功劳大小。第 19 轮那条测试因此从断言 `rule == "quality"` 改成 `rule == "cost"`，并在注释里写清顺序。
+2. **事件单价没法替代在役那一列**。`recall_at_budget` 对门限类候选是不变量（3.14 节），所以"找到多少事件"必须再用实际翻页那一列兜一次底；这也是第 54 条边界。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -1364,6 +1420,8 @@ missing for the next level
 51. **第三列的 engine 指的是当前配置的判定者**：`scoring=auto` 时它读的是读者，`scoring=model` 时读的是模型。跨轮比较这三列必须同时说明配置，否则第 11 轮的 0.517 和第 22 轮的 0.833 会被当成引擎变好了。
 52. **分数重复时，告警率预算控制的是计数不是比率**：读者在服务域上的分数只有几十个取值，一条 10% 的分位数会落在几十个窗口共享的值上——第 23 轮实测 14.9%。`label_free_cut` 因此把条抬到"落在其上（含）的窗口数"符合预算的位置，撑不起时返回 `None`。
 53. **至多是上限，不是目标**：把 `label_free_ceiling` 当成召回目标汇报，就是第 20 轮用偷看标签的数字当承诺的错误换了个位置。上限的作用是判断某个无标签数字是否已经自相矛盾。
+54. **事故单价可以靠少找事故变便宜**：`recall_at_budget` 对只动门限的候选是不变量，所以"每事件花费下降"必须同时要求在役召回不下降；否则一个把翻页量砍到五分之一的配置会被算成"更省"。第 24 轮的 `--audit` 抓到过一次。
+55. **判决的名字取决于规则顺序**：同一次接受到底叫 `cost` 还是 `quality`，取决于哪条分支先命中；名字解释理由，不解释功劳大小，跨轮比较时看数不看名。
 
 ---
 
@@ -1386,4 +1444,4 @@ missing for the next level
 
 12. **（3.29 已完成）状态按域分开，提议器不再测量自己的基线。** `var/evolve/domains/<slug>/current.json` + `domain_slug` + `promotions_for_domain` 让"在役"有了域限定词；`--propose` 与真正的轮次都会把"描述在役配置"的候选丢掉并计数。本轮在 SMD 上接受了 `host-rolling-rank-0-85-200`：预算内召回 0.224 → 0.507，每故障 token 17973 → 7419，无标签召回 0.209 → 0.284。剩下的路：**给每个域一份自己的候选目录**（现在目录只服务主机形态，服务域的那四个渲染候选全是"no change"），**把告警率预算与误报率预算分开建模**（边界 45），以及**让每故障 token 在成本路径上也能单独成为接受理由**——本轮的 1341 → 352 就是因为召回没动而被忽略。
 
-13. **让每次事件的花费单独成为成本出口**：第 22 轮接受的那条 `tok/inc` 从 17973 掉到 7419，但这个数字只在质量路径上被读，所以它救不了报告变贵、召回下降的候选；把 `tokens_per_incident` 做成和 `tokens_per_report` 平级的接受理由，是下一步。
+13. **（3.31 已完成）每次事件的花费是独立的成本出口。** `decide()` 在质量路径之前先看 `tokens_per_incident`：只要预算内在役两列召回都不降、每事件花费按成本门槛下降，就接受为 `cost`；第 19 轮那条 `reject cost` 经 `--rejudge` 当场翻成 `accept cost`（15516 → 1341 每事件）。泄漏（靠砍翻页量买便宜）由 `paging_holds` 堵住。

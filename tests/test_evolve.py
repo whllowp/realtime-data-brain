@@ -1444,7 +1444,10 @@ def test_the_bill_per_incident_is_the_other_denominator():
     assert before > after * 10
     verdict = decide(baseline, trial, EvolveRules())
     assert verdict.accepted
-    assert verdict.rule == "quality"
+    # Round 24 moved this decision to the cost path: the incident bill is the unit a detector is paid
+    # in, so a falling per-incident bill is a cost win and names itself that way. The quality path's
+    # version of the same case is below (`test_a_quality_gain_inside_the_cost_tolerance...`).
+    assert verdict.rule == "cost"
     assert "bill per incident" in verdict.reason
 
 
@@ -1554,3 +1557,73 @@ def test_the_table_prints_the_bar_a_deployment_can_compute_next_to_the_fitted_on
     assert "label-free cut" in table
     assert "0.136" in table and "0.226" in table
     assert "controls alert rate, not false-positive rate" in table
+
+def test_a_smaller_recall_gain_paid_for_cheaply_is_a_cost_win():
+    """Round 24: a 4% recall gain under the 5% quality bar, bought for a 1% bill rise.
+
+    Per report the change looks expensive; per incident it is cheaper, because the bill rose less than
+    the number of found failures did. Before round 24 this landed in the `gain` rejection, which priced
+    a detection gain by the wrong unit.
+    """
+    baseline = _service_domain(recall=0.100, found=28, tokens=1618, reports=228)
+    trial = _service_domain(recall=0.104, found=29, tokens=1586, reports=228)
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert verdict.accepted
+    assert verdict.rule == "cost"
+    assert "bill per incident" in verdict.reason
+
+
+def test_a_cheaper_incident_bill_does_not_license_finding_fewer_incidents():
+    """Boundary 52's sibling: the incident bill can be cut by finding fewer of them, which is not a win."""
+    baseline = _service_domain(recall=0.224, found=62, tokens=3355, reports=820)
+    trial = _service_domain(recall=0.150, found=41, tokens=2000, reports=500)
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+
+
+def test_the_incident_bill_must_fall_by_the_cost_bar():
+    """A 2% cheaper incident is below the 5% bar, so it is not a cost win."""
+    baseline = _service_domain(recall=0.200, found=56, tokens=1600, reports=150)
+    trial = _service_domain(recall=0.200, found=56, tokens=1568, reports=147)
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+
+def test_a_cheaper_incident_bill_bought_with_silence_is_rejected():
+    """Round 24's own leak, caught by the audit of round 21's stored round.
+
+    `deviation-bar-free` shares the ranking with the configuration in force, so `recall_at_budget` is
+    identical (0.860) and a threshold-only change leaves the per-report bill alone — but it pages on
+    the top 10% instead of trusting a bar the labels chose, so the shipped recall falls 0.806 -> 0.211
+    and the *total* spend falls with the report count. Priced per incident that looks like a cost win
+    (15516 -> 1341) while the deployment misses three quarters of the failures. The shipped column has
+    to hold for the incident bill to count.
+    """
+    baseline = _service_domain(recall=0.860, found=240, tokens=1703, reports=225)
+    baseline.recall = 0.806
+    trial = _service_domain(recall=0.860, found=240, tokens=1703, reports=60)
+    trial.recall = 0.211
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert not verdict.accepted
+    assert verdict.rule in {"operational", "silence", "gain", "cost"}
+    assert "bill per incident" not in verdict.reason or not verdict.accepted
+
+
+def test_a_threshold_that_keeps_paging_on_the_same_failures_may_still_be_cheaper():
+    """The guard is the shipped column, not the intent: same paging, smaller total spend is a win."""
+    baseline = _service_domain(recall=0.860, found=240, tokens=1703, reports=225)
+    baseline.recall = 0.806
+    trial = _service_domain(recall=0.860, found=240, tokens=1703, reports=150)
+    trial.recall = 0.806
+
+    verdict = decide(baseline, trial, EvolveRules())
+
+    assert verdict.accepted
+    assert "bill per incident" in verdict.reason

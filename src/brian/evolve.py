@@ -1304,6 +1304,35 @@ def decide(baseline: Measurement, trial: Measurement, rules: EvolveRules,
                        % (100 * baseline.budget, before_recall, after_recall, before, after))
     before_incident = tokens_per_incident(baseline)
     after_incident = tokens_per_incident(trial)
+    recall_holds = (
+        before_recall is None
+        or after_recall is None
+        or after_recall >= before_recall - rules.recall_tolerance
+    )
+    # A cheaper incident bill can also be bought by paging on fewer of them: fewer alerts means fewer
+    # reports, a smaller total bill and — because `recall_at_budget` is invariant under a
+    # threshold-only change — a per-incident number that looks better while the deployment misses
+    # failures. The audit of round 21's stored round showed exactly that (`deviation-bar-free`
+    # gain -> cost, shipped recall 0.806 -> 0.211), so the shipped column has to hold too.
+    paging_holds = (
+        baseline.recall is None
+        or trial.recall is None
+        or trial.recall >= baseline.recall - rules.recall_tolerance
+    )
+    if (recall_holds and paging_holds and before_incident and after_incident
+            and after_incident <= before_incident * (1.0 - rules.min_gain)):
+        # The unit a detector is paid in is the incident it finds, not the report it writes. When the
+        # bill per incident falls by the same bar the report bill is judged by, and recall did not fall,
+        # the change is cheaper in the only currency that survives the report count changing
+        # (round 24; the branch was reachable in principle since round 19 but only ran when recall rose
+        # by the quality bar, so a 3% recall gain bought for a 1% bill rise was called a rejection).
+        return Verdict(trial.candidate, True, "cost",
+                       "the bill per incident it finds falls %.0f -> %.0f tokens with recall at the "
+                       "%.0f%% budget %.3f -> %.3f, even though the bill per report moves "
+                       "%.0f -> %.0f"
+                       % (before_incident, after_incident, 100 * baseline.budget,
+                          before_recall if before_recall is not None else 0.0,
+                          after_recall if after_recall is not None else 0.0, before, after))
     if (quality_gain and before_incident and after_incident
             and after_incident <= before_incident * (1.0 - rules.min_quality_gain)):
         # The bill per report may rise and the bill per *incident* still fall, because the change
