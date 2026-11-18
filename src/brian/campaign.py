@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .evolve import EvolveRules, audit, history
-from .promote import current_state, load_promotions
+from .promote import UNMEASURABLE, VERIFIED, current_state, load_promotions
 
 __all__ = ["Campaign", "CampaignRow", "campaign", "format_campaign"]
 
@@ -37,6 +37,9 @@ class CampaignRow:
     claim: Dict[str, Any] = field(default_factory=dict)
     verification: Optional[str] = None
     reverted: bool = False
+    # How the claim's re-checks ended: the verdict of the last one, and how many came before it.
+    verdict: Optional[str] = None
+    checks: int = 0
 
     @property
     def accepted(self) -> int:
@@ -56,6 +59,8 @@ class CampaignRow:
             "claim": dict(self.claim),
             "verification": self.verification,
             "reverted": self.reverted,
+            "verdict": self.verdict,
+            "checks": self.checks,
         }
 
 
@@ -73,6 +78,9 @@ class Campaign:
     unsourced: int = 0
     applied: int = 0
     reverted: int = 0
+    holding: int = 0
+    not_comparable: int = 0
+    never_checked: int = 0
 
     @property
     def domains(self) -> List[str]:
@@ -89,6 +97,9 @@ class Campaign:
             "rounds_without_stream": self.unsourced,
             "rounds_applied": self.applied,
             "versions_reverted": self.reverted,
+            "versions_holding": self.holding,
+            "versions_not_comparable": self.not_comparable,
+            "versions_never_checked": self.never_checked,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -140,6 +151,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None) -> Campaign:
 
     for promotion in load_promotions(root):
         if promotion.reverted_at:
+            # Counted before the source filter: an early version carries no stream field, and it was still
+            # retracted. Counting it after the filter reported the campaign as having retracted nothing.
             result.reverted += 1
         source = (promotion.stream or {}).get("source")
         if source in (None, ""):
@@ -154,8 +167,14 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None) -> Campaign:
             row.claim = promotion.claim.to_dict() if promotion.claim else {}
             row.verification = promotion.verification
             row.reverted = bool(promotion.reverted_at)
-        if promotion.reverted_at:
-            result.reverted += 1
+            row.verdict = str((promotion.verification or {}).get("verdict") or "") or None
+            row.checks = len(promotion.checks)
+            if row.verdict == VERIFIED:
+                result.holding += 1
+            elif row.verdict == UNMEASURABLE:
+                result.not_comparable += 1
+            elif row.verdict is None:
+                result.never_checked += 1
 
     result.rows = sorted(rows.values(), key=lambda item: (-item.rounds, item.domain))
     result.trials = sum(row.trials for row in result.rows)
@@ -179,6 +198,21 @@ def _claim_line(claim: Dict[str, Any]) -> str:
     return ", ".join(bits) or "no claim recorded"
 
 
+def _verdict_line(row: CampaignRow) -> str:
+    """`holds`, `not comparable`, `failed`, or `unverified` — the three-outcome verify, summarised."""
+    if row.verdict == VERIFIED:
+        note = "holds"
+    elif row.verdict == UNMEASURABLE:
+        note = "not comparable"
+    elif row.verdict:
+        note = row.verdict
+    else:
+        note = "unverified"
+    if row.checks:
+        note = "%s, %d earlier check%s" % (note, row.checks, "" if row.checks == 1 else "s")
+    return note
+
+
 def format_campaign(result: Campaign) -> str:
     lines: List[str] = []
     lines.append("=" * 96)
@@ -190,6 +224,8 @@ def format_campaign(result: Campaign) -> str:
                  % (result.applied, result.reverted))
     lines.append("audit             %d verdict(s) would be decided differently today, %d relabelled"
                  % (result.moved, result.relabelled))
+    lines.append("verification      %d holding, %d not comparable, %d never re-checked"
+                 % (result.holding, result.not_comparable, result.never_checked))
     if result.unsourced:
         lines.append("unattributed      %d round(s) predate the stream field" % result.unsourced)
     lines.append("")
@@ -214,7 +250,7 @@ def format_campaign(result: Campaign) -> str:
         if row.in_force:
             lines.append("  in force          %s  (%s)"
                          % (" ".join("%s=%s" % item for item in sorted(row.env.items()))
-                            or "no variables", row.verification or "unverified"))
+                            or "no variables", _verdict_line(row)))
             if row.reverted:
                 lines.append("  ! this version was reverted after its claim failed")
     lines.append("")

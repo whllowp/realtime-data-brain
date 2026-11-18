@@ -149,8 +149,10 @@ def test_flatten_streams_orders_by_time_across_recordings() -> None:
 
 
 def test_an_empty_set_summarises_as_empty_not_as_a_zero() -> None:
+    # `cadence_s`/`span_s` are None rather than 0 for the same reason: nothing measured is not the same
+    # as a measurement of zero, and a re-check comparing against 0 would divide by it.
     assert summarise([]) == {"streams": 0, "windows": 0, "scored": 0, "anomalous": 0,
-                             "events": 0, "names": []}
+                             "events": 0, "names": [], "cadence_s": None, "span_s": None}
 
 
 def test_a_label_lands_on_the_window_the_pipeline_will_emit() -> None:

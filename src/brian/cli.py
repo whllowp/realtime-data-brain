@@ -75,6 +75,7 @@ from .promote import (
     promotions_for_domain,
     revert_promotion,
     version_label,
+    rescale_hint,
     write_verification,
 )
 from .pipeline import Pipeline
@@ -466,6 +467,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # applying on an unknown would be as wrong as reverting on one.
                 write_verification(root, promotion, payload)
                 _print("  v%03d  %s  unmeasurable: %s" % (promotion.version, promotion.change, reason))
+                hint = rescale_hint(promotion, promotion.stream, checked_stream)
+                if hint:
+                    _print("        hint  %s" % hint)
         _print("")
         _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain))
         return 0

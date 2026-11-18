@@ -481,7 +481,55 @@ def _geometry_mismatch(recorded: Optional[Mapping[str, Any]],
         if before and abs(after / before - 1.0) > GEOMETRY_TOLERANCE:
             return ("the re-check saw %.1f events per window against %.1f at the time of the claim"
                     % (after, before))
+    # Round 27: a window count is not a duration. `rolling_window = 200` covers 200 windows, and how much
+    # traffic that is depends on the cadence — the same 200 meant 50 minutes per window on one SMD stream
+    # and 35 on another, which is exactly how a healthy configuration looked like a regression.
+    before_cadence = recorded.get("cadence_s")
+    after_cadence = checked.get("cadence_s")
+    if before_cadence and after_cadence:
+        ratio = float(after_cadence) / float(before_cadence)
+        if abs(ratio - 1.0) > GEOMETRY_TOLERANCE:
+            return ("a window covers %.0f s of traffic here against %.0f s when the claim was made "
+                    "(%.2fx cadence)" % (float(after_cadence), float(before_cadence), ratio))
     return None
+
+
+def _claimed_window(promotion: "Promotion") -> Optional[int]:
+    """The window count the version put in force, when it put one there."""
+    raw = (promotion.env or {}).get("BRIAN_DIGEST_ROLLING_WINDOW")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def rescale_hint(promotion: "Promotion", recorded: Optional[Mapping[str, Any]],
+                 checked: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The window count that would make this stream cover the same wall-clock as the claim.
+
+    Reported rather than applied: rescaling changes the configuration, so the result would be a measurement
+    of a different version. The number is here so the next round can propose that version deliberately,
+    instead of a person guessing what "200 windows" means on a stream sampled differently.
+    """
+    if not recorded or not checked:
+        return None
+    claimed = _claimed_window(promotion)
+    before_cadence = recorded.get("cadence_s")
+    after_cadence = checked.get("cadence_s")
+    if not claimed or not before_cadence or not after_cadence:
+        return None
+    # Only when the cadence difference is what refused the check: a 2% difference changes the equivalent
+    # window count too, and printing a "comparable" number for a comparison that was never refused would
+    # imply the deployment should change when nothing is wrong.
+    if abs(float(after_cadence) / float(before_cadence) - 1.0) <= GEOMETRY_TOLERANCE:
+        return None
+    equivalent = max(1, int(round(claimed * float(before_cadence) / float(after_cadence))))
+    if equivalent == claimed:
+        return None
+    return ("a comparable re-check on this stream would use BRIAN_DIGEST_ROLLING_WINDOW=%d "
+            "(%d windows x %.0f s is %.0f s of traffic, the same span %d windows covered here)"
+            % (equivalent, claimed, float(before_cadence),
+               claimed * float(before_cadence), equivalent))
 
 
 def claim_check(claim: Claim, measurement: Measurement, rules: EvolveRules,

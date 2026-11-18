@@ -225,9 +225,34 @@ def dump_stream_file(path: Path, streams: Sequence[Stream], dataset: str,
     return target
 
 
+def _cadence(windows: Sequence[LabeledWindow]) -> Optional[float]:
+    """Median seconds between consecutive window starts, or None for fewer than two windows.
+
+    Round 27: a window count is not a duration. `digest.rolling_window = 200` covers 200 windows, and how
+    much traffic that is depends on how the stream was sampled — the same number meant 50 minutes per
+    window on one SMD stream and 35 on another, which is why a re-check on the second one looked like a
+    regression. Recording the cadence with the claim is what makes the two comparable at all.
+    """
+    starts = sorted({int(window.window_start.timestamp()) for window in windows})
+    if len(starts) < 2:
+        return None
+    gaps = [later - earlier for earlier, later in zip(starts, starts[1:]) if later > earlier]
+    if not gaps:
+        return None
+    gaps.sort()
+    middle = len(gaps) // 2
+    return float(gaps[middle]) if len(gaps) % 2 else (gaps[middle - 1] + gaps[middle]) / 2.0
+
+
 def summarise(streams: Sequence[Stream]) -> Dict[str, Any]:
     """Totals the round record quotes, computed the same way whether one stream or a hundred."""
     rows = [stream.stats() for stream in streams]
+    cadences = [value for value in (_cadence(stream.windows) for stream in streams) if value]
+    spans = []
+    for stream in streams:
+        starts = [int(window.window_start.timestamp()) for window in stream.windows]
+        if len(starts) >= 2:
+            spans.append(max(starts) - min(starts))
     return {
         "streams": len(rows),
         "windows": sum(row["windows"] for row in rows),
@@ -235,6 +260,9 @@ def summarise(streams: Sequence[Stream]) -> Dict[str, Any]:
         "anomalous": sum(row["anomalous"] for row in rows),
         "events": sum(row["events"] for row in rows),
         "names": [row["name"] for row in rows],
+        # Median cadence across recordings, and the total wall-clock the windows cover.
+        "cadence_s": round(sum(cadences) / len(cadences), 3) if cadences else None,
+        "span_s": sum(spans) if spans else None,
     }
 
 
