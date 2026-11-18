@@ -4024,6 +4024,78 @@ $ brian evolve --campaign                          # 债已还，这行不再出
 而不是抛异常。
 
 
+### 3.79 能付的欠账才进闸门：上限欠账与"队列够不着"的那一半
+
+3.78 让页面按域报出"多少轮没记过判它们所用的上限"，并说明重跑队列能不能把它清零。那个数字仍然是警告：
+没有任何退出码读它。一个域 100% 的轮都没记上限，`--strict` 照样 0。
+
+3.79 把它做成可以要求的：`--max-ceiling-debt SHARE`，但只在一个条件下允许点亮——重跑队列能覆盖**每一个**
+缺上限的轮。两条现成的规则在这里再次适用：
+
+- 能付的账才收费（126/135）：收一个谁也降不下来的比例，等于把这道闸门永久判红，没人会再看它；
+- 默认只在记录够新时才亮（149）：真实账本里 74 轮全部早于该字段，默认点亮就是全红。
+
+```
+$ brian evolve --campaign --strict --max-ceiling-debt 0.5 --rerun-limit 0     # var/ceil72p（可付）
+ceiling debt      1 of 1 round(s) do not record the ceilings they were judged under; re-running 1 of them
+                  would leave none, so the default --max-limit-drift cap would arm
+1 of 1 round(s) do not record the ceilings they were judged under (100%), above the 50% asked for:
+re-running the queue would leave none, so --strict exits 1 until it is paid.
+                                                                              # 退出码 1
+
+$ brian evolve --audit --strict --max-ceiling-debt 0.5 --rerun-limit 0        # 同一账本，审计给同一句
+1 of 1 round(s) do not record the ceilings they were judged under (100%), above the 50% asked for:
+re-running the queue would leave none, so --strict exits 1 until it is paid.
+run `brian evolve --rerun-unrecorded` to measure them again with their ceilings.
+
+$ brian evolve --campaign --strict --max-ceiling-debt 0.5 --rerun-limit 0     # var/ceil72（一半够不着）
+ceiling debt      2 of 2 round(s) do not record the ceilings they were judged under; re-running 1 of them
+                  would leave 1 without one, so the default --max-limit-drift cap stays a warning
+2 of 2 round(s) do not record the ceilings they were judged under (100%), above the 50% asked for:
+only 1 of them can be re-run, so --strict does not charge it: a gate that can never be cleared is a gate
+nobody runs.
+                                                                              # 退出码 0
+
+$ brian evolve --rerun-unrecorded --rerun-limit 1                             # 付掉
+paid              SMD x1
+$ brian evolve --audit --strict --max-ceiling-debt 0.5 --rerun-limit 0
+ceilings          every recorded round was judged under today's ceilings     # 退出码 0
+```
+
+**一个只有跑起来才看得见的缺口：命了文件名的轮，队列够不着。** `_unrecorded_matters` 只列"文件不知"的轮
+（3.53 之后队列按这个集合工作）。于是两类缺上限的轮并不同命：
+
+- 没记文件、但几何只匹配一个文件 → 队列能重跑，重跑后新记录带上限 → 可付；
+- 记了文件、但没记上限 → 队列**从不**碰它，所以既不能被重跑，也不能被收费 —— 它只出现在页面那行文字里。
+
+这正是收费条件必须写成"payable 覆盖全部缺失"而不是"有一个可付就算"的原因：否则一半能付、一半永远付不了
+的账本，会得到一道永远红的闸门（126 的原话）。
+
+**第三种状态：判的时候根本没有上限。** 一轮若在上限为空的情况下被判定，它记下的是 `{}`，而 `{}` 在
+`ceiling_shortfall` 里和"没说"一样算缺失。这个处理是对的（读者确实无法知道它被什么限制），但它说明"重跑
+能把欠账清零"只在这些轮重跑时**也**带着上限才成立。所以演示根必须先 `--set-domain-limit`，否则重跑写出的
+新记录仍然是 `{}`，欠账原样保留 —— 队列付了一轮，`ceiling debt` 却一行没少。这条在 `var/ceil72_demo.py`
+的注释里。
+
+**JSON 同形（131 的延伸）。** `--history --json-out` 现在输出每轮的上限原文与"是否与今天一致"，以及整个
+账本的 `{missing, rounds, payable, by_domain}`；`--unrecorded --json-out` 也带上同一个块，并多给一个
+`after`（重跑之后还剩几个）—— 读者原本要在两条文本行之间做减法。
+
+实测（`var/ceil72` 两轮、payable 1）：
+
+```
+{"ceilings": {"missing": 2, "rounds": 2, "payable": 1,
+              "by_domain": [{"domain": "SMD", "rounds": 2, "missing": 2, "share": 1.0}]},
+ "rounds": [{"round": "round-payable.json", "ceilings": null, "ceilings_text": "no ceilings recorded"},
+            {"round": "round-named.json",   "ceilings": null, "ceilings_text": "no ceilings recorded"}]}
+```
+
+**边界 154：欠账只有在某条命令能把它降下来时才允许进闸门收费。** 收一个没有执行者的比例，读者学到的是
+"这道闸门可以忽略"，而不是"这件事要修"。
+
+**边界 155：`{}`（判的时候没有上限）与缺失（没说）必须在记录里分得开，并且在收费时被同等对待。** 区别在
+于付费方式：前者重跑之后仍然是 `{}`，所以它不进 payable；后者重跑一次就补上了。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4306,6 +4378,9 @@ missing for the next level
 58. **（3.78 已完成）按域统计缺上限的轮数，并标出重跑后会写上限的轮。** 剩下的部分：`--history --json-out`
     也带上按域欠账与队列触达；当欠账可付时，让 `--campaign --strict` 能对"缺上限的比例"收费（与边界 126/135
     同形：可付才收）。
-59. 把上限欠账做成可收费的：`--max-ceiling-debt SHARE` 只在 payable 覆盖全部缺失轮时才允许点亮，并在
-    `--unrecorded` 的 JSON 里给出"重跑后这个域还剩多少轮缺上限"。同时给 `--history` 加 `--json-out`，把
-    按域欠账、payable、以及每轮的上限原文一并输出，让脚本不必解析文本。
+59. （3.79 已完成）把上限欠账做成可收费的一行。
+
+60. 让"队列够不着"真的够得着：`_unrecorded_matters` 目前只列文件未知的轮，但一条记录了
+    `stream_path` 的轮其实有据可查——它缺的只是上限，不是文件。给重跑队列加一条 `--with-ceilings` 路径：对
+    这些轮直接用记录里的文件名重跑一次，补上上限（154 说的"有人能付"就成立了），并让 `--campaign` 的
+    `ceiling debt` 行说明"其中 N 轮的文件已知、可直接补记录"。

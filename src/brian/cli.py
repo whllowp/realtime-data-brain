@@ -274,7 +274,9 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  max_drain: Optional[float] = None,
                  drain_by_domain: Optional[Mapping[str, Any]] = None,
                  drain_ceilings: Optional[Mapping[str, Any]] = None,
-                 limit_drift: int = 0, max_limit_drift: Optional[float] = None) -> int:
+                 limit_drift: int = 0, max_limit_drift: Optional[float] = None,
+                 ceiling_missing: int = 0, ceiling_rounds: int = 0, ceiling_payable: int = 0,
+                 max_ceiling_debt: Optional[float] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -447,7 +449,27 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                "asked for:" % (limit_drift, int(max_limit_drift)))
         _print("their verdicts were reached under other limits, so --strict exits 1 until they are re-decided")
         _print("with the ceilings in force now, or the cap is raised.")
-    return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped) else 0
+    # Round 72: the ceiling debt may be capped, but only when the queue can pay it. A share that no command can
+    # lower is the always-red gate (boundary 126), so the cap is asked for explicitly and the exit code moves
+    # only when `ceiling_payable` covers every missing round -- the same shape as the per-domain debt and the
+    # minutes cap. When it cannot be paid the paragraph still prints: silence would read as "nothing owed".
+    ceiling_share = (float(ceiling_missing) / float(ceiling_rounds)) if ceiling_rounds else 0.0
+    if max_ceiling_debt is not None and ceiling_missing and ceiling_share > float(max_ceiling_debt):
+        _print("")
+        _print("%d of %d round(s) do not record the ceilings they were judged under (%.0f%%), above the %.0f%% "
+               "asked for:" % (ceiling_missing, ceiling_rounds, 100.0 * ceiling_share,
+                               100.0 * float(max_ceiling_debt)))
+        if ceiling_payable >= ceiling_missing:
+            _print("re-running the queue would leave none, so --strict exits 1 until it is paid.")
+            _print("run `brian evolve --rerun-unrecorded` to measure them again with their ceilings.")
+        else:
+            _print("only %d of them can be re-run, so --strict does not charge it: a gate that can never be "
+                   "cleared is a gate nobody runs." % max(0, int(ceiling_payable)))
+            _print("nothing was charged; the debt is on the page above.")
+    ceiling_capped = (max_ceiling_debt is not None and ceiling_missing
+                      and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
+    return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
+                 or ceiling_capped) else 0
 
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
@@ -1307,6 +1329,31 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                "compare; pass one of them, or drop the flag")
         return 2
 
+    if getattr(args, "max_ceiling_debt", None) is not None and not getattr(args, "strict", False):
+        # Round 72: `--max-ceiling-debt` is read by the gate, not by the page, so without --strict it would be
+        # inert and the reader would believe a check ran (round 40's lesson, in a third place).
+        _print("--max-ceiling-debt caps a --strict charge; without --strict nothing reads it")
+        return 2
+
+    # Round 72: the ceiling debt is computed once, before any branch, because the campaign page, the audit gate
+    # and the re-run queue must agree about how many rounds lack ceilings and how many of those the queue can
+    # pay. `payable` counts a missing round only when exactly one candidate file is known and the round is still
+    # live: a re-run writes a new record that carries its ceilings and retires the old one.
+    try:
+        live_records = history(root, include_retired=False)
+    except OSError:
+        live_records = []
+    ceiling_rows = ceiling_shortfall(live_records)
+    ceiling_missing = sum(int(row["missing"]) for row in ceiling_rows)
+    ceiling_rounds = sum(int(row["rounds"]) for row in ceiling_rows)
+    lacking_limits = {str(record.get("round") or ""): not record.get("limits")
+                      for record in live_records}
+    try:
+        ceiling_payable = sum(1 for _domain, name, _why, files in _unrecorded_matters(root)
+                              if len(files) == 1 and lacking_limits.get(str(name), False))
+    except OSError:
+        ceiling_payable = 0
+
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
         written: List[Tuple[str, Optional[float], Optional[float], bool, bool]] = []
         for entry, flag in [(item, "--set-domain-limit") for item in
@@ -1376,6 +1423,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         recorded_limits = [record for record in rounds if record.get("limits")]
         _print("ceilings          %d of %d round(s) record the wait ceilings they were judged under; %d do not"
                % (len(recorded_limits), len(rounds), len(rounds) - len(recorded_limits)))
+        history_rows: List[Dict[str, Any]] = []
         # Round 71: the count above is the ledger's. A reader asking "where does that debt sit" needs it per
         # stream, and a reader deciding whether to run the queue needs to know which of those rounds it could
         # pay. Both come from the same rows the campaign page prints, so the two pages cannot disagree.
@@ -1435,6 +1483,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 drift = limit_drift([record], today_limits)
                 note = "  (differs from today's)" if drift.get("differ") else "  (as in force now)"
                 _print("      ceilings  %s%s" % (round_limits_text(recorded), note))
+            # Round 72: the same facts the lines above print, in a form a script can read without parsing the
+            # text -- including the ceilings payload itself, which the page renders but never emits verbatim.
+            history_rows.append({
+                "round": str(record.get("round") or record.get("finished_at") or ""),
+                "retired": bool(record.get("retired")),
+                "ceilings": record.get("limits") or None,
+                "ceilings_text": round_limits_text(recorded),
+                "ceilings_match_today": (not drift.get("differ")) if recorded else None,
+            })
+        if getattr(args, "json_out", None):
+            Path(args.json_out).write_text(_json({
+                "rounds": history_rows,
+                "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
+                             "payable": ceiling_payable, "by_domain": ceiling_rows},
+            }), encoding="utf-8")
         return 0
 
     if args.rerun_unrecorded:
@@ -1710,7 +1773,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             Path(args.json_out).write_text(
                 _json({"rounds": len(rounds), "unattributed": unknown,
                        "matters": [{"domain": d, "round": n, "why": w, "files": f}
-                                   for d, n, w, f in matters]}),
+                                   for d, n, w, f in matters],
+                       # Round 72: which of these rows would also record their ceilings, and what the debt
+                       # would look like afterwards -- the two numbers a reader deciding whether to run the
+                       # queue has to add up by hand otherwise.
+                       "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
+                                    "payable": ceiling_payable,
+                                    "after": max(0, ceiling_missing - ceiling_payable),
+                                    "by_domain": ceiling_rows}}),
                 encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
@@ -1731,10 +1801,6 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         try:
-            live_records = history(root, include_retired=False)
-        except OSError:
-            live_records = []
-        try:
             drift = limit_drift(live_records, limits_view)
         except OSError:
             drift = {"rounds": 0, "differ": [], "unrecorded": 0}
@@ -1743,16 +1809,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # same invocation; computing `_queue_budget` three times would be three chances for the price to differ
         # from the sentence that quotes it.
         budget = _queue_budget(root, limit=budget_limit)
-        # Round 71: of the rounds that never recorded a ceiling, how many the queue could measure again (each
-        # re-run writes a new record that carries its ceilings and retires the old one). The note says whether
-        # that would be enough for the default cap to arm, because "a warning nothing can clear" and "a warning
-        # one command clears" look identical otherwise (boundary 151).
-        shortfall = ceiling_shortfall(live_records)
-        recorded_missing = {str(record.get("round") or ""): bool(record.get("limits"))
-                            for record in live_records}
-        payable_missing = sum(1 for _domain, name, _why, files in _unrecorded_matters(root)
-                              if len(files) == 1 and not recorded_missing.get(str(name), True))
-        ceiling_note = format_ceiling_shortfall(shortfall, payable=payable_missing)
+        # Round 71/72: the shortfall and the queue's reach were computed once before the branches, so the page
+        # and the gate cannot disagree about how many rounds lack ceilings or how many of them a re-run pays.
+        ceiling_note = format_ceiling_shortfall(ceiling_rows, payable=ceiling_payable)
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
@@ -1798,7 +1857,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             max_drain=drain_ceiling,
                             drain_ceilings=drain_ceilings,
                             limit_drift=len(drift.get("differ") or []),
-                            max_limit_drift=_drift_cap(args, drift))
+                            max_limit_drift=_drift_cap(args, drift),
+                            ceiling_missing=ceiling_missing, ceiling_rounds=ceiling_rounds,
+                            ceiling_payable=ceiling_payable,
+                            max_ceiling_debt=getattr(args, "max_ceiling_debt", None))
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -1921,7 +1983,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             max_drain=drain_ceiling,
                             drain_ceilings=drain_ceilings,
                             limit_drift=len(drift.get("differ") or []),
-                            max_limit_drift=_drift_cap(args, drift))
+                            max_limit_drift=_drift_cap(args, drift),
+                            ceiling_missing=ceiling_missing, ceiling_rounds=ceiling_rounds,
+                            ceiling_payable=ceiling_payable,
+                            max_ceiling_debt=getattr(args, "max_ceiling_debt", None))
 
     if args.grade:
         try:
@@ -3445,6 +3510,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --audit --strict: fail when more than this many recorded rounds were "
                              "judged under wait ceilings that differ from today's (a ceiling is not in the "
                              "rulebook, so a rules audit cannot otherwise see it move)")
+    evolve.add_argument("--max-ceiling-debt", type=float, default=None, metavar="SHARE",
+                        help="with --strict: fail when more than this fraction of the live rounds do not "
+                             "record the ceilings they were judged under -- charged only when the re-run queue "
+                             "can measure every one of them again, because a debt no command can pay is a "
+                             "warning, not a gate")
     evolve.add_argument("--max-minutes", action="append", default=None, metavar="MINUTES|DOMAIN=MINUTES",
                         help="with --strict: fail when the next queue run would spend more than this many "
                              "minutes (estimated per domain from the median duration of the recorded rounds, "
