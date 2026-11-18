@@ -3384,6 +3384,61 @@ budget            nothing to spend: the queue has no round it can re-run, so the
 **边界 131：页面上任何派生数字都必须同时出现在机器可读输出里；脚本只能解析人类可读文本时，
 它的"真相"会随文案改版悄悄过期。**
 
+### 3.68 一句预算要有时间，也要是同一句话
+
+3.67 让页面回答了"跑一次会到哪"，但只说**轮数**：`pays 1 round(s) … the queue falls 67% -> 33%`。
+"一轮"不是一个答案，除非读者已经知道一轮多久——而这个数正好在记录里，页面从来没印过。
+同时，命令自己印的是另外两句（`projection` 与 `limit`），与页面推荐的句子措辞不同：
+读者照着页面运行，看到的是另一句话，需要自己确认它们是同一件事。
+
+修法两件：
+
+1. **时间从中位数来。** `_round_minutes(root)` 取所有带 `started_at`/`finished_at` 的记录的
+   墙钟时长中位数（不是均值：一次慢轮不该给整队定价），`_queue_budget` 再乘上这一轮要跑的轮数，
+   得到 `estimated_minutes`。记录里没有时间戳的轮贡献 0 次，而不是"猜一个"。
+2. **一句话只由一处产出。** 新增 `budget_text(budget)`，页面与命令**共用**它：命令在第一次测量之前
+   印同一句 `budget`，而把原来"排空时会停在第一个无法复跑的轮"那句保留成单独的 `stops` 行
+   （边界 118 仍然成立）。
+
+```
+$ brian evolve --campaign                      # var/budget61，两条可付欠账，中位数一轮 5 分钟
+debt              the largest payable debt is on RCAEval RE1-OB: 1 of 1 round(s) cannot be placed on a sampling (100%), 1 of them can be re-run from the record
+measure next      brian evolve --rerun-unrecorded --rerun-limit 1 pays RCAEval RE1-OB by one round; the command prints the balance at the end
+then              SMD: 1 of 2 round(s) unrecorded (50%), 1 re-runnable
+budget            brian evolve --rerun-unrecorded --rerun-limit 1 pays 1 round(s) (RCAEval RE1-OB); the queue falls 67% -> 33% of 3 round(s), about 5 minute(s)
+
+$ brian evolve --campaign --rerun-limit 0
+budget            brian evolve --rerun-unrecorded --rerun-limit 2 pays 2 round(s) (RCAEval RE1-OB, SMD); the queue falls 67% -> 0% of 3 round(s), about 10 minute(s)
+
+$ brian evolve --rerun-unrecorded --rerun-limit 0     # 命令自己印的那一句，与上面逐字相同
+candidates        2 of 2 round(s) have exactly one file; 0 cannot be placed
+progress          0 round(s) already re-measured into a named successor; 2 still to do
+budget            brian evolve --rerun-unrecorded --rerun-limit 2 pays 2 round(s) (RCAEval RE1-OB, SMD); the queue falls 67% -> 0% of 3 round(s), about 10 minute(s)
+stops             at the first round that cannot be re-run; the rest keep their place
+```
+
+机器可读的那一半同样带两个新字段：
+
+```json
+"budget": {"command": "…--rerun-limit 1", "domains": ["RCAEval RE1-OB"], "estimated_minutes": 5.0,
+           "minutes_each": 5.0, "ready": 2, "rounds": 1, "rounds_total": 3,
+           "share_after": 0.3333, "share_now": 0.6667}
+```
+
+**造这个证据时踩到的两个坑，都是"演示根目录"的坑**（值得记下，因为它们会伪装成产品缺陷）：
+
+1. 两个演示流文件的几何完全一样，于是**每一条记录都同时匹配两个文件**，`ready` 是 0、`blocked` 是 2，
+   页面说"没有可付欠账"——这与 3.58 里两个 RCAEval 文件并列的情形是同一件事，只是这次是我自己造的。
+2. 第一版演示记录写了 `"stream_path": null` 这个**键**、却没写版本文件，于是轮次既不算"有文件"
+   也不满足"仍在决定什么"（写了仍在页面上的版本或被携带的拒绝），`_unrecorded_matters` 根本不列它。
+   记录的形状要按 `persist` 真正写出来的样子来造，否则测的是夹具不是代码。
+
+**边界 132：一句预算必须包含它要花的时间——"三轮"不是时间；估法必须来自记录（中位数），
+否则它是猜测，而猜测会在第一次慢轮之后过期。**
+
+**边界 133：页面推荐的句子与命令打印的句子必须由同一个函数产出；各自拼接时，改一处就会让读者
+照着建议运行、却看到另一句话。**
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3634,3 +3689,8 @@ missing for the next level
 48. **（3.67 已完成）下一次调用的一句预算，以及它的 JSON 副本。** 剩下的：让 `--rerun-unrecorded`
     自己也在开头印同一句预算（现在它印 `projection` 与 `limit` 两行），把"页面推荐的命令"与"命令
     自己报的预算"合成同一个函数调用，并让 `budget` 带上 `estimated_minutes`（按每轮实测耗时的中位数）。
+
+
+49. **（3.68 已完成）预算带上时间，页面与命令共用一句。** 剩下的：把 `minutes_each` 按域分开
+    （SMD 与 RCAEval 的轮耗时不是一个量级），并让 `--campaign --strict --max-minutes` 能拒绝
+    "这一条命令要跑二十分钟"的预算。

@@ -21,7 +21,7 @@ from .evolve import (REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, rejection
 from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state,
                       load_promotions, shape_note)
 
-__all__ = ["Campaign", "CampaignRow", "campaign", "format_campaign", "span_text"]
+__all__ = ["Campaign", "CampaignRow", "budget_text", "campaign", "format_campaign", "span_text"]
 
 
 @dataclass
@@ -495,6 +495,29 @@ def _trend_line(trend: Mapping[str, Any]) -> str:
     return line
 
 
+def budget_text(budget: Mapping[str, Any]) -> str:
+    """The one sentence that says what a queue run costs and leaves behind (round 60, shared in round 61).
+
+    The page and the command print the same sentence from the same function, so the recommendation and the
+    thing the command then does cannot drift apart — round 60 printed them from two expressions and the page
+    argued with itself (it budgeted "all ready" while recommending one round).
+    """
+    rounds = int(budget.get("rounds") or 0)
+    total = int(budget.get("rounds_total") or 0)
+    if not rounds:
+        return ("nothing to spend: the queue has no round it can re-run, so the share stays %.0f%%"
+                % (100.0 * float(budget.get("share_now") or 0.0)))
+    domains = ", ".join(str(domain) for domain in (budget.get("domains") or [])) or "no domain"
+    line = ("%s pays %d round(s) (%s); the queue falls %.0f%% -> %.0f%% of %d round(s)"
+            % (budget.get("command"), rounds, domains,
+               100.0 * float(budget.get("share_now") or 0.0),
+               100.0 * float(budget.get("share_after") or 0.0), total))
+    minutes = budget.get("estimated_minutes")
+    if minutes is not None:
+        line += ", about %.0f minute(s)" % float(minutes)
+    return line
+
+
 def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     rules: Optional[EvolveRules] = None,
                     refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS,
@@ -630,20 +653,9 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # Round 60: the queue's size, the plan's first step and the projected end were three lines, so "if I
         # run it once, where do I end up?" had to be assembled by the reader. This is that sentence, derived
         # from the same functions the command runs, so the page cannot promise a movement the command will
-        # not make. The JSON output carries the same fields, so a script never has to parse this line.
-        rounds = int(budget.get("rounds") or 0)
-        if rounds:
-            domains = [str(name) for name in (budget.get("domains") or [])]
-            named = ", ".join(dict.fromkeys(domains)) or "the queue"
-            lines.append("budget            %s pays %d round(s) (%s); the queue falls %.0f%% -> %.0f%% of %d "
-                         "round(s)"
-                         % (budget.get("command") or "brian evolve --rerun-unrecorded",
-                            rounds, named, 100.0 * float(budget.get("share_now") or 0.0),
-                            100.0 * float(budget.get("share_after") or 0.0),
-                            int(budget.get("rounds_total") or 0)))
-        else:
-            lines.append("budget            nothing to spend: the queue has no round it can re-run, so the "
-                         "share stays %.0f%%" % (100.0 * float(budget.get("share_now") or 0.0)))
+        # not make. The JSON output carries the same fields, so a script never has to parse this line. Round 61
+        # moved the sentence into `budget_text` so the command prints the identical line before it measures.
+        lines.append("budget            %s" % budget_text(budget))
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")

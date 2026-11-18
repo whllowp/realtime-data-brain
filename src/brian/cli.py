@@ -69,7 +69,7 @@ from .evolve import (
     withheld_streams,
 )
 from .laya.client import LayaClient, LayaError, LayaUnavailable
-from .campaign import campaign as campaign_result, format_campaign, span_text
+from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
 from .laya.gate import explain_thresholds
 from .laya.qcatalog import CATALOG_VERSION, catalog_hash, describe as describe_catalog, validate_questions
 from .llm.rca import RcaEngine
@@ -652,8 +652,37 @@ def _debt_plan(root: Path) -> List[Dict[str, Any]]:
     return [_row_dict(row) for row in _debt_by_domain(root) if row[4]]
 
 
+def _round_minutes(root: Path) -> Optional[float]:
+    """The median wall-clock minutes a recorded round took, or None when no round timed itself (round 61).
+
+    A budget in rounds is a budget in minutes only for someone who already knows how long a round takes, and
+    that is exactly the number the records hold and the page never showed. Records that predate the timestamps
+    contribute nothing rather than a guess; a median is used because one slow round should not price the queue.
+    """
+    lengths: List[float] = []
+    for record in history(root):
+        started, finished = record.get("started_at"), record.get("finished_at")
+        if not started or not finished:
+            continue
+        try:
+            begin = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+            end = datetime.fromisoformat(str(finished).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        seconds = (end - begin).total_seconds()
+        if seconds > 0:
+            lengths.append(seconds / 60.0)
+    if not lengths:
+        return None
+    lengths.sort()
+    middle = len(lengths) // 2
+    if len(lengths) % 2:
+        return lengths[middle]
+    return (lengths[middle - 1] + lengths[middle]) / 2.0
+
+
 def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
-    """What one invocation of the queue would spend and what it would leave behind (round 60).
+    """What one invocation of the queue would spend and what it would leave behind (round 60, cost in round 61).
 
     The page printed the queue's size, the plan's first step, and the projected end of the queue as three
     separate lines, so a reader who wanted "if I run it once, where do I end up?" had to combine them. This is
@@ -664,6 +693,9 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
     `limit` is what the reader would type, and its default is the command's own default (one round); `0` means
     "drain the queue", exactly as `_rerun_limit` reads it. Passing the same value to both is the point: a page
     whose budget line describes a different command than the one it recommends is a page arguing with itself.
+
+    Round 61 added `estimated_minutes`, because "three rounds" is not yet an answer to "how long will I be
+    waiting" for a reader who does not already know what a round costs.
     """
     plan = _debt_plan(root)
     progress = _rerun_progress(root)
@@ -681,6 +713,7 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
         if left <= 0:
             break
     share_after = ((without - min(rounds, without)) / total) if total else 0.0
+    each = _round_minutes(root)
     return {
         "command": "brian evolve --rerun-unrecorded --rerun-limit %d" % requested,
         "rounds": rounds,
@@ -689,6 +722,8 @@ def _queue_budget(root: Path, limit: Optional[int] = None) -> Dict[str, Any]:
         "share_now": float(progress.get("share_now") or 0.0),
         "share_after": share_after,
         "rounds_total": total,
+        "minutes_each": each,
+        "estimated_minutes": (each * rounds) if (each is not None and rounds) else None,
     }
 
 
@@ -1026,21 +1061,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         progress = _rerun_progress(root)
         _print("progress          %d round(s) already re-measured into a named successor; %d still to do"
                % (progress["paid"], progress["remaining"]))
-        _print("projection        if the rest are re-run the unrecorded share falls %.0f%% -> %.0f%% of %d "
-               "round(s)" % (100.0 * progress["share_now"], 100.0 * progress["share_after"],
-                             progress["rounds"]))
+        # Round 61: the command prints the *same* sentence the page recommends, from `budget_text`, instead of
+        # its own `projection`/`limit` pair. Round 60 made the page and the command share the arithmetic; this
+        # makes them share the words, so the reader recognises the command they were told to run.
+        limit = _rerun_limit(args, len(ready))
+        budget = _queue_budget(root, limit=limit)
+        _print("budget            %s" % budget_text(budget))
+        if limit == len(ready) and len(ready) > 1:
+            # A drain still has to say *before the first measurement* that one broken round stops the rest: a
+            # reader who asked for ten rounds should learn that at the top, not from a stack trace halfway down.
+            _print("stops             at the first round that cannot be re-run; the rest keep their place")
         for domain, name, _why, files in blocked:
             _print("  skipped         %-32s %s" % (name, _candidate_label(files)))
-        limit = _rerun_limit(args, len(ready))
-        if len(ready) > limit:
-            _print("limit             %d of the %d will be re-run here; the rest keep their place until the "
-                   "command runs again" % (limit, len(ready)))
-        elif limit == len(ready) and len(ready) > 1:
-            # Round 54: `--rerun-limit 0` is an explicit instruction to spend the whole queue, and the balance
-            # is printed *before* the first measurement — a reader who asked for ten rounds should learn at
-            # the top that the first broken one stops the rest, not from a stack trace halfway down.
-            _print("limit             draining all %d round(s); the queue stops at the first round that "
-                   "cannot be re-run" % limit)
         failures = 0
         stopped = False
         paid_now = 0
