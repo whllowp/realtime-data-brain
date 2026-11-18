@@ -2558,6 +2558,75 @@ no refusal recorded on smd is older than the 0-day horizon: nothing to re-measur
 **边界 100：按域跑的命令必须点出"没有到期的域"，不能沉默。** 沉默让"没有到期"和"没看"无法区分，
 而这两件事对一条拒绝意味着完全不同的未来。
 
+## 3.53 拒绝要记得自己住在哪个文件里：不猜路径，只拒绝
+
+3.51 之后，`--verify-withheld` 能一次跑多个域，但要操作者写 `--withheld-stream "smd=data\smd\stream-check.json"`。
+记录里存的是**数据集名**（`"SMD"`），不是文件。这个差别在本仓库不是学术性的：`SMD` 有两个文件 ——
+`data/smd/stream.json` 是 828 个打分窗口、3000 秒一个窗口；`data/smd/stream-check.json` 是 1235 个、
+2100 秒。名字不能确定文件，而**认错文件就是换一个采样再测一遍**，那正是第 26 轮（窗口几何被当成回归）
+和第 44 轮（在别的配置上复核）各自的缺陷换了个位置重演。所以这一轮做两件事：让记录记住文件，以及
+**拒绝从名字推断路径**。
+
+跑起来先看到的是拒绝：
+
+```
+$ brian evolve --verify --verify-withheld
+1 refusal(s) do not say which stream file they were measured on: w001 (SMD)
+pass --withheld-stream for smd=<stream.json>; a source name does not name a file, and guessing one
+would re-check the objection on whatever sampling happens to be at that path.
+                                                                                       (exit 2)
+```
+
+这不是"慢慢会补上"，而是"现在不能替你做这个决定"：两条 `SMD` 流里选哪一条，是一个关于**这次复核要问
+什么**的决定，不能由命令悄悄做。
+
+记录补上路径之后，同样的命令不需要任何参数：
+
+```
+$ brian evolve --verify --verify-withheld --refusal-expiry-days 0.001
+---- smd  <-  data\smd\stream-check.json
+re-measuring 1 refusal(s) recorded on smd against the deployment in force
+  w001  host-features-3        still  (an identical check is already recorded, so this one is not appended)
+
+every re-measured objection still holds: the numbers that produced it are still the numbers today.
+
+1 domain(s) re-checked, 0 objection(s) cleared. …
+```
+
+改动很小：`RoundResult.stream_path`（由调用方写入，因为轮次拿不到 CLI 的参数）、`Withheld.stream_path`、
+`persist` 复制过去、`withheld_streams(root)` 把"每个域自己是哪个文件"读回来、`_self_described_pairs()`
+把它们变成命令的入参。页面上多一行覆盖度，**只在不满时出现**：
+
+```
+stream files      0 of 1 record(s) say which file they were measured on; the rest need --withheld-stream
+```
+
+**旧记录怎么办：按几何补，不按名字补。** 唯一的既有记录 `w001` 写于第 42 轮，没有这个字段。于是写了一个
+一次性脚本（`var/backfill_path.py`）：拿记录自己的 `stream` 摘要（1355 个窗口 / 1235 个打分窗口）去比对
+磁盘上每个候选流文件的摘要，**恰好匹配一个**才写入。输出：
+
+```
+w001.json -> data\smd\stream-check.json (windows 1355, scored 1235)
+```
+
+这是一次有证据的重建，不是猜测：如果零个或多个文件匹配，脚本什么都不写。补字段的代价就在这里 ——
+两种做法都比第三个选项好：留着不补，账本里最老的记录就永远没人能测；按名字猜，测的是另一条采样。
+
+顺带修的第二处：`--verify` 在"没有待复核版本"分支里判断"有没有到期拒绝"用的是原始字符串比较 ——
+与 3.52 修掉的过滤缺陷同一处代码的另一个副本。**同一个错误写两遍，就会出现两次**；这次是读代码发现的，
+不是跑出来的，也记在这里。
+
+这一轮的现场证据（`var/round46.txt`，记录 `var/evolve/round-20261118T035517Z.json`）：`events-4` 以成本赢
+被接受（`3356 -> 2139` tokens/report，−36.3%），每个录音的召回不变（`0.491 -> 0.491` / `0.037 -> 0.037`，
+复制性通过），而新记录里现在有 `stream_path = data\smd\stream-check.json` —— 下一轮起，拒绝自己带着
+自己的位置出生。
+
+**边界 101：一份拒绝必须记住它是在哪个文件上被测量的，而不只是哪个数据集。** 只记名字时，复核要靠操作者
+的记忆，而人会去测"最吵的那条流"，不会去测"最老的那条异议"。
+
+**边界 102：缺输入时要拒绝，不要从名字推断。** 当一个数据集可能对应两个采样时，推断出的路径会静默地
+换掉采样，然后把差别当成结论 —— 而它看起来像一次正常的复核。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2751,4 +2820,9 @@ missing for the next level
     `w###` 记录写下时就该记住的东西：记录里有 `stream` 的摘要（源、窗口、打分窗口数），却没有这个流
     来自哪个文件的路径。把路径写进记录，`--verify-withheld` 就能不带参数地跑遍所有域 —— "记得拒绝
     存在哪里"的根源是记录自己没记住，而不是操作者记性不好。
+
+34. **让承诺也记住自己的流。** `--verify-version` 现在同样依赖操作者写 `--stream-file`，而
+    `v020` 的承诺是在 `data\smd\stream.json` 上立的、在 `stream-check.json` 上复核时被判"不可比"的
+    —— 这个家族缺的是同一样东西：版本记录里没有那份文件的路径。把 `stream_path` 写进版本/承诺记录，
+    让 `--verify` 不带参数就能站回承诺被立下的那条流上。
 

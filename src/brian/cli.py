@@ -65,6 +65,7 @@ from .evolve import (
     withheld_due,
     withheld_evidence_age,
     withheld_records,
+    withheld_streams,
 )
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import campaign as campaign_result, format_campaign
@@ -342,6 +343,21 @@ def _refusals_on(root: Path, domain: str) -> List[Withheld]:
     slug = domain_slug(domain)
     return [record for record in withheld_records(root)
             if domain_slug(str((record.stream or {}).get("source") or "")) == slug]
+
+
+def _self_described_pairs(root: Path) -> Tuple[List[Tuple[str, Path]], List[Withheld]]:
+    """The (domain, stream file) pairs the refusals name for themselves, and the records that cannot (round 46).
+
+    `--verify-withheld` used to require the operator to remember which file each domain was measured on,
+    which makes an objection's re-check depend on a memory rather than on the ledger. Now the round writes
+    the path and this reads it. What it does **not** do is guess: `"SMD"` is two files in this repo sampled
+    differently (828 scored windows vs 1235), so a path derived from the dataset name would re-check the
+    objection on whatever sampling happened to be at that path and report the difference as a result —
+    exactly the defect rounds 26 and 44 each had in a different place.
+    """
+    paths, missing = withheld_streams(root)
+    pairs = sorted(((domain, path) for domain, path in paths.items()), key=lambda item: item[0])
+    return pairs, missing
 
 
 def _recheck_withheld(root: Path, domain: str, settings: Any, streams: Any, rules: EvolveRules,
@@ -794,6 +810,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         except ValueError as error:
             _print("cannot re-measure refusals: %s" % error)
             return 2
+        if args.verify_withheld and not pairs:
+            # Round 46: the refusals name the file they were measured on, so this mode needs no arguments.
+            pairs, missing = _self_described_pairs(root)
+            if missing:
+                _print("%d refusal(s) do not say which stream file they were measured on: %s"
+                       % (len(missing), ", ".join("%s (%s)" % (record.label, record.domain)
+                                                  for record in missing)))
+                _print("pass --withheld-stream for %s; a source name does not name a file, and guessing one "
+                       "would re-check the objection on whatever sampling happens to be at that path."
+                       % ", ".join(sorted({"%s=<stream.json>" % domain_slug(record.domain)
+                                           for record in missing})))
+                return 2
+            if not pairs:
+                _print("no refusal has been recorded yet, so there is nothing to re-measure.")
+                return 0
         if pairs:
             if wanted:
                 _print("--withheld-stream re-measures refusals; --verify-version re-checks a promise. "
@@ -829,9 +860,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # so an objection can outlive every check that could have retired it. `--verify-withheld` asks it
         # directly, on this stream, with the deployment in force as the baseline.
         horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
-        recorded = [record for record in withheld_records(root)
-                    if str((record.stream or {}).get("source") or "") == str(domain)]
-        due = withheld_due(recorded, expiry_days=horizon)
+        # Round 46: the filter is `_refusals_on`, which compares slugs. The raw-string version here was the
+        # same silent miss round 45 fixed in `--withheld-stream`: a record stores "SMD", the stream says
+        # "SMD" today, but the moment either side is slugged the hint below stops firing and a due objection
+        # is never mentioned again.
+        due = withheld_due(_refusals_on(root, domain), expiry_days=horizon)
         if not promotions and not (args.verify_withheld and due):
             _print("no unverified promotions for %s: every version recorded on it has been re-checked."
                    % domain_slug(domain))
@@ -911,12 +944,6 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 note = shape_note(payload)
                 if note:
                     _print(note)
-        if args.verify_withheld:
-            # Round 44/45: the refusal family, re-measured on the footing the objection was raised on.
-            # Delegated so `--withheld-stream` and this mode share one implementation -- two copies of
-            # "measure the objection where it stood" would drift exactly where the defect was.
-            _recheck_withheld(root, domain, settings, streams, rules, horizon,
-                              from_default=args.from_default)
         _print("")
         _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain,
                                  expiry_days=args.expiry_days))
@@ -1065,6 +1092,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     claim_record: Dict[str, Any] = {}
     result = run_round(settings, streams, selected=selected, rules=rules, source=source,
                        proposal=proposal_record, claim=claim_record)
+    # Round 46: the round says which file it measured, so a refusal written from it can be re-checked
+    # without an operator remembering the path. Two files can carry the same dataset sampled differently,
+    # and a re-check on the other one measures a different quantity (rounds 26 and 44).
+    result.stream_path = str(args.stream_file or "")
     if owner is not None:
         verdict, reason = claim_check(owner.claim, result.baseline, rules,
                                       recorded_stream=owner.stream, checked_stream=stream_shape)

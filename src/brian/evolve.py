@@ -1625,6 +1625,14 @@ class RoundResult:
     about the promise, and the record has to say so.
     """
 
+    stream_path: str = ""
+    """The stream file this round measured, as the caller named it (round 46).
+
+    `stream` is a summary (source, windows, scored, cadence) and does not identify a file: `SMD` is two
+    files in this repo, sampled differently, and the same dataset name would otherwise let a later check
+    measure a different sampling and call the difference a result (rounds 26, 44).
+    """
+
     @property
     def accepted(self) -> List[str]:
         return [verdict.candidate for _c, _m, verdict in self.trials if verdict.accepted]
@@ -1634,6 +1642,11 @@ class RoundResult:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "stream": self.stream,
+            # Round 46: the summary says which dataset was measured, not which file it came from, and two
+            # files can hold the same dataset sampled differently (`data/smd/stream.json` is stride 10,
+            # `data/smd/stream-check.json` is stride 7). A record that cannot name its own file leaves the
+            # next check depending on the operator's memory.
+            "stream_path": self.stream_path or None,
             "rules": self.rules.to_dict(),
             # A round is evidence *for a ruleset*. Storing the numbers without saying which rules judged
             # them produces a record that looks authoritative and cannot be audited, which is the failure
@@ -1927,6 +1940,7 @@ def _write_withheld(root: Path, directory: Path, round_name: str,
             measured=measurement.to_dict(),
             reason=verdict.reason,
             rule=verdict.rule,
+            stream_path=result.stream_path,
         ).to_dict()
         path = folder / ("w%03d.json" % number)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -2059,6 +2073,10 @@ class Withheld:
     # must record what the re-measurement said, or the record answers "why wasn't this promoted" with a
     # number from a round that predates the configuration it is being asked about.
     checks: List[Dict[str, Any]] = field(default_factory=list)
+    # The stream file, not just the dataset name (round 46). `--verify-withheld` with no arguments finds
+    # each refusal's own stream from here; a record written before this field can only be re-checked by an
+    # operator who names the file, which is what boundary 101 is about.
+    stream_path: str = ""
 
     @property
     def domain(self) -> str:
@@ -2090,6 +2108,7 @@ class Withheld:
             "reason": self.reason,
             "rule": self.rule,
             "checks": [dict(check) for check in self.checks],
+            "stream_path": self.stream_path or None,
         }
 
     @classmethod
@@ -2108,6 +2127,7 @@ class Withheld:
             reason=str(payload.get("reason") or ""),
             rule=str(payload.get("rule") or "replicate"),
             checks=[dict(check) for check in (payload.get("checks") or [])],
+            stream_path=str(payload.get("stream_path") or ""),
         )
 
 
@@ -2127,6 +2147,24 @@ def withheld_records(root: Path) -> List[Withheld]:
             record.round = path.stem
         records.append(record)
     return sorted(records, key=lambda item: item.number)
+
+
+def withheld_streams(root: Path) -> Tuple[Dict[str, Path], List[Withheld]]:
+    """Which stream file each refusing domain was measured on, and the records that do not say (round 46).
+
+    The mapping is keyed by the domain as the record names it (`"SMD"`); callers slug it for display. A
+    record written before `stream_path` existed lands in the second list: it can still be re-checked, but
+    only by an operator who names the file, and pretending otherwise would let this command pick whatever
+    stream happened to be configured and report the comparison as a re-check of the objection.
+    """
+    paths: Dict[str, Path] = {}
+    missing: List[Withheld] = []
+    for record in withheld_records(root):
+        if not record.stream_path:
+            missing.append(record)
+            continue
+        paths.setdefault(record.domain, Path(record.stream_path))
+    return paths, missing
 
 
 def record_withheld_check(root: Path, name: str, check: Mapping[str, Any]) -> Optional[Path]:
@@ -2223,6 +2261,13 @@ def format_withheld(records: Sequence[Withheld], rules: Optional[EvolveRules] = 
         # credibility.
         lines.append("re-measured       %d of them have been measured again since the refusal"
                      % sum(1 for record in records if record.checks))
+    described = sum(1 for record in records if record.stream_path)
+    if described < len(records):
+        # Round 46: `--verify-withheld` re-measures a record on the stream it was measured on, and a record
+        # that does not name its file can only be re-checked by an operator who remembers it. Printing the
+        # coverage keeps "no arguments needed" from reading as a property of the whole family.
+        lines.append("stream files      %d of %d record(s) say which file they were measured on; the rest "
+                     "need --withheld-stream" % (described, len(records)))
     lines.append("")
     header = "%-6s %-24s %-22s %8s %8s %s" % ("id", "candidate", "domain", "bar", "loss", "whose gain it was")
     lines.append(header)
