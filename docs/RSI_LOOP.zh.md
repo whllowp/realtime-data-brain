@@ -2235,6 +2235,56 @@ recorded round(s) carry a different ruleset fingerprint`；把容忍度放到 0.
 读成同一个。
 
 
+## 3.48 一次拒绝有多依赖那个假设：按域做的敏感度表
+
+3.47 把容忍度写进了记录，但账本里还是只有一个数：`2 candidate(s) are refused for replicate today`。
+读者看不出这两条拒绝是"标签结论"还是"容忍度结论"。这一轮把它算出来——不重测，只把存下来的测量在几个
+不同的 bar 下重判一遍：
+
+```
+$ brian evolve --sensitivity
+current rules     bddd4506b43c
+bar in force      0.050
+refused           2 candidate(s) are refused for `replicate` today
+with numbers      1 of them record the loss and the bar, so a reader can re-decide them
+
+domain                  refused  with nums    0.050    0.100    0.200
+---------------------------------------------------------------------
+SMD                           2          1        0        0        2
+```
+
+四点读法。**第一列是控制组**：它就是当下在用的 bar，所以必须是 0——一个 bar 不能接受它刚刚拒绝的东西。
+这一列非零就说明表算错了，而不是说明数据有趣。**SMD 要到 0.200 才翻转**：记下来的损失是 0.1089，四倍于
+当前 bar，所以这两条拒绝不是"掉了一点点"，是真的在说标签。把 ladder 调到 0.110，两条立刻翻转——边界
+因此可以钉在 0.109 上，而不是含糊地说"大概两倍"。**`with nums` 是覆盖率**：两条里只有一条带 3.47 才有的
+`detail`，另一条是 round 40 之前写的，读者能重判它、但记录里没有它自己的数字。**没有任何东西被重新测量**：
+这不产生新证据，只把已有证据换个假设重读。
+
+反向也成立。把 bar 直接放到 0.20 再问，答案变成"没什么可问的"：
+
+```
+$ brian evolve --sensitivity --replication-tolerance 0.20
+bar in force      0.200
+refused           0 candidate(s) are refused for `replicate` today
+
+no surviving round refuses a candidate for `replicate`, so there is nothing to test.
+```
+
+这不是"敏感度消失了"，而是"这条拒绝在那个假设下不存在"。
+
+为什么不做成 `--campaign` 的一列？战役页的契约是"每个数字都是某一轮真的测出来的"，而敏感度表是**假设
+下的重读**——它属于诊断，不属于账本。`--audit` 之所以能在那一页，是因为它回答"今天的规则会怎么判"，
+那是当下真实在用的规则；敏感度表问的是"如果规则换成 X"，那个 X 从未生效过。两者放同一页会让读者分不清
+哪一栏是事实。
+
+**边界 89：把存下来的测量在假设的规则下重判，得到的不是新测量。** 敏感度表能说"这条拒绝依赖哪个 bar"，
+不能说"哪个 bar 是对的"；把它印成测量结论就是把假设当事实。
+
+**边界 90：只能重判一部分账本的表，必须印出它的覆盖率。** 只有带 per-recording 数字的记录能被这样重判，
+不带的那些（round 39 之前）根本不会触发这条规则。表若不写 `not replayable` / `with nums`，就会把它们当成
+"没有拒绝"，从而高估自己的域。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2411,3 +2461,8 @@ missing for the next level
 28. **让 `--campaign` 按域统计"有多少拒绝依赖默认容忍度"。** 现在要知道一条拒绝有多依赖那个假设，
     只能手工重跑 `--audit --replication-tolerance`。做法：报表里给出"在允许一台掉 ≤X% 的条件下，
     这个域会有多少条拒绝翻成接受"，把"每台机器的容忍度"从全局假设变成可被看见的域参数。
+
+29. **让版本承诺自己带上 bar。** 现在 `--verify` 用今天的规则复核一条承诺，而一条因 `replicate` 被挡住
+    的提升从来不写入版本文件——它的 bar 只活在 round 记录里。做法：让被 replication 拒绝的候选也写一份
+    "未提升"记录（含 bar 与损失），复核时按记录里的 bar 判，这样"当时为什么没上"和"现在还会不会被挡住"
+    用同一个数回答。

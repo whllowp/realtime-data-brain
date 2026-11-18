@@ -43,12 +43,14 @@ from .evolve import (
     format_audit,
     format_rejudge,
     format_round,
+    format_sensitivity,
     grade,
     history,
     label_free_cut,
     measure,
     persist,
     refusal_plan,
+    refusal_sensitivity,
     rejection_provenance,
     reader_scores,
     rejudge,
@@ -445,6 +447,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("wrote %s" % args.json_out)
         return _strict_exit(args.strict, result.moved, result.unreconstructable,
                             result.inconsistent)
+
+    if args.sensitivity:
+        rules = _rules_from_args(args)
+        bars = [value for value in (args.sensitivity_bar or [])] or None
+        try:
+            result = refusal_sensitivity(root, rules, bars=bars)
+        except OSError as error:
+            _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
+            return 2
+        _print(format_sensitivity(result))
+        if args.json_out:
+            Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
+            _print("")
+            _print("wrote %s" % args.json_out)
+        return 0
 
     if args.audit:
         rules = _rules_from_args(args)
@@ -1828,6 +1845,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="how far one recording's at-budget recall may fall while the pooled number "
                              "rises before a quality gain stops counting as replicated (default: the "
                              "quality bar); stored with the refusal so --rejudge can disagree with it")
+    evolve.add_argument("--sensitivity", action="store_true",
+                        help="for each stream, how many `replicate` refusals would become acceptances at a "
+                             "looser replication bar (re-decides stored measurements, no re-run), then exit")
+    evolve.add_argument("--sensitivity-bar", type=float, default=[], action="append", metavar="BAR",
+                        help="with --sensitivity: a bar to test (repeat the flag); default: the bar in "
+                             "force, 2x and 4x it")
     evolve.add_argument("--apply", action="store_true",
                         help="also write a version file per accepted change "
                              "(the round itself is always recorded)")

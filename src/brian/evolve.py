@@ -2615,6 +2615,157 @@ def format_audit(result: Audit) -> str:
     return "\n".join(lines)
 
 
+@dataclass
+class SensitivityRow:
+    """One stream's refusals, and how many of them a looser replication bar would accept."""
+
+    domain: str
+    refused: int = 0
+    recorded: int = 0
+    flips: Dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"domain": self.domain, "refused": self.refused, "recorded": self.recorded,
+                "flips": dict(self.flips)}
+
+
+@dataclass
+class Sensitivity:
+    """How much the `replicate` refusals depend on the bar that produced them (round 41).
+
+    A refusal is a judgement made at a tolerance, and round 40 stored the numbers behind it. This asks the
+    obvious next question without measuring anything: at a looser bar, which of those refusals would be
+    accepted? A refusal that flips at 1.5x the bar was never about the labels; one that needs 4x is.
+    """
+
+    bar: float
+    bars: List[float]
+    rules: EvolveRules
+    rounds: int = 0
+    rows: List[SensitivityRow] = field(default_factory=list)
+    unreadable: int = 0
+
+    @property
+    def refused(self) -> int:
+        return sum(row.refused for row in self.rows)
+
+    @property
+    def recorded(self) -> int:
+        """Refusals that carry the numbers behind them, so a reader can check them without re-measuring."""
+        return sum(row.recorded for row in self.rows)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "bar": self.bar,
+            "bars": list(self.bars),
+            "rounds": self.rounds,
+            "refused": self.refused,
+            "recorded": self.recorded,
+            "unreadable": self.unreadable,
+            "rows": [row.to_dict() for row in self.rows],
+        }
+
+
+def _bar_ladder(bar: float, bars: Optional[Sequence[float]] = None) -> List[float]:
+    """The bars to test: the one in force, then 2x and 4x it, deduped and ordered."""
+    values = list(bars) if bars else [bar, 2 * bar, 4 * bar]
+    out: List[float] = []
+    for value in values:
+        cleaned = round(float(value), 6)
+        if cleaned not in out:
+            out.append(cleaned)
+    return sorted(out)
+
+
+def refusal_sensitivity(root: Path, rules: Optional[EvolveRules] = None,
+                        bars: Optional[Sequence[float]] = None) -> Sensitivity:
+    """Re-decide every surviving `replicate` refusal at several bars, per stream, without measuring.
+
+    `replicate` only exists for records that carry per-recording recall, so a round written before round 39
+    contributes nothing here — and says so through `unreadable`, which counts trials that could not be
+    replayed at all. Computing a sensitivity table over only the rounds that can be replayed and *not*
+    saying how many could not would overstate its domain (boundary 90).
+
+    The first bar in `ladder` is the one in force, and every count there must be zero: a bar cannot accept
+    what it just refused. That is the table's own control.
+    """
+    active = rules if rules is not None else EvolveRules()
+    bar = active.replication_bar
+    ladder = _bar_ladder(bar, bars)
+    rows: Dict[str, SensitivityRow] = {}
+    unreadable = 0
+    rounds = 0
+    for record in history(root):
+        payload = dict(record)
+        rounds += 1
+        baseline = Measurement.from_dict(payload.get("baseline") or {})
+        domain = str((payload.get("stream") or {}).get("source") or "(unattributed)")
+        for trial in payload.get("trials") or []:
+            candidate = Candidate.from_dict(trial.get("candidate") or {})
+            measurement = Measurement.from_dict(trial.get("measurement") or {})
+            reference = recorded_reference(payload, measurement, baseline)
+            if reference is None:
+                unreadable += 1
+                continue
+            verdict = decide(reference, measurement, active, veto=candidate.veto)
+            if verdict.rule != "replicate":
+                continue
+            row = rows.setdefault(domain, SensitivityRow(domain=domain))
+            row.refused += 1
+            if (trial.get("verdict") or {}).get("detail"):
+                row.recorded += 1
+            for candidate_bar in ladder:
+                loosed = EvolveRules(**{**active.to_dict(), "replication_tolerance": candidate_bar})
+                again = decide(reference, measurement, loosed, veto=candidate.veto)
+                key = "%.3f" % candidate_bar
+                row.flips.setdefault(key, 0)
+                if again.accepted:
+                    row.flips[key] += 1
+    ordered = [rows[name] for name in sorted(rows)]
+    for row in ordered:
+        for key in ("%.3f" % value for value in ladder):
+            row.flips.setdefault(key, 0)
+    return Sensitivity(bar=bar, bars=ladder, rules=active, rounds=rounds, rows=ordered,
+                       unreadable=unreadable)
+
+
+def format_sensitivity(result: Sensitivity) -> str:
+    lines: List[str] = []
+    lines.append("=" * 96)
+    lines.append("brian evolve - how much a refusal depends on the replication bar")
+    lines.append("=" * 96)
+    lines.append("current rules     %s" % rules_fingerprint(result.rules))
+    lines.append("bar in force      %.3f" % result.bar)
+    lines.append("refused           %d candidate(s) are refused for `replicate` today"
+                 % result.refused)
+    lines.append("with numbers      %d of them record the loss and the bar, so a reader can re-decide them"
+                 % result.recorded)
+    if result.unreadable:
+        lines.append("not replayable    %d trial(s) could not be replayed at all, so they are not in the table"
+                     % result.unreadable)
+    lines.append("")
+    if not result.rows:
+        lines.append("no surviving round refuses a candidate for `replicate`, so there is nothing to test.")
+        return "\n".join(lines)
+    header = "%-22s %8s %10s" % ("domain", "refused", "with nums")
+    for value in result.bars:
+        header += " %8s" % ("%.3f" % value)
+    lines.append(header)
+    lines.append("-" * len(header))
+    for row in result.rows:
+        line = "%-22s %8d %10d" % (row.domain, row.refused, row.recorded)
+        for value in result.bars:
+            line += " %8d" % row.flips.get("%.3f" % value, 0)
+        lines.append(line)
+    lines.append("")
+    lines.append("A column is how many of the refused candidates would be *accepted* at that bar. The first")
+    lines.append("column is the bar in force, so it is zero by construction: a bar cannot accept what it")
+    lines.append("just refused. A refusal that flips at 2x was a judgement about a small loss; one that")
+    lines.append("needs 4x is a judgement about the labels. Nothing here is re-measured — which also means")
+    lines.append("nothing here says which bar is right (boundary 89).")
+    return "\n".join(lines)
+
+
 def _wrap(text: str, width: int) -> List[str]:
     """Greedy word wrap. Returns lines, because every caller appends them one by one.
 
