@@ -360,6 +360,30 @@ def _self_described_pairs(root: Path) -> Tuple[List[Tuple[str, Path]], List[With
     return pairs, missing
 
 
+def _promotion_stream(promotions: Sequence[Any]) -> Tuple[Optional[str], List[Any], Dict[str, List[Any]]]:
+    """The stream file the versions being checked name for themselves (round 47).
+
+    A promise is a statement about one recording, and `SMD` is two files here sampled differently (828 scored
+    windows at 3000 s against 1235 at 2100 s), so the file cannot be derived from the dataset name. It is read
+    from the record instead: every version a check would look at has to agree on one file, and a version whose
+    record predates the field has to be named by hand.
+
+    Returns the agreed path (or None), the versions that name no file, and the versions grouped by the file
+    they name -- so the caller can refuse with the list rather than pick one.
+    """
+    by_path: Dict[str, List[Any]] = {}
+    missing: List[Any] = []
+    for promotion in promotions:
+        path = str(getattr(promotion, "stream_path", "") or "")
+        if path:
+            by_path.setdefault(path, []).append(promotion)
+        else:
+            missing.append(promotion)
+    if missing or len(by_path) != 1:
+        return None, missing, by_path
+    return next(iter(by_path)), missing, by_path
+
+
 def _recheck_withheld(root: Path, domain: str, settings: Any, streams: Any, rules: EvolveRules,
                       horizon: float, *, from_default: bool) -> int:
     """Re-measure this domain's overdue refusals and return how many stopped holding (round 44/45).
@@ -845,6 +869,33 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    "next round that proposes the candidate; this command promotes nothing."
                    % (len(pairs), cleared_total))
             return 0
+        if not args.stream_file:
+            # Round 47: the promise records the file it was measured on, so a check should stand on it without
+            # the operator remembering, and must not fall back to the demo stream -- grading every version
+            # against a recording none of them was measured on is the kind of answer that looks like one.
+            known = [item for item in load_promotions(root)
+                     if item.version == wanted or (not wanted and item.due(days=args.expiry_days))]
+            if known:
+                resolved, missing, by_path = _promotion_stream(known)
+                if missing:
+                    _print("%d version(s) do not say which stream file they were measured on: %s"
+                           % (len(missing), ", ".join("v%03d" % item.version for item in missing)))
+                    _print("pass --stream-file; a dataset name does not name a file, and guessing one would "
+                           "grade the promise on whatever sampling happens to be at that path.")
+                    return 2
+                if len(by_path) > 1:
+                    _print("%d version(s) to check name %d different stream files: %s"
+                           % (len(known), len(by_path),
+                              ", ".join("%s (%s)" % (path, ", ".join("v%03d" % item.version
+                                                                     for item in group))
+                                        for path, group in sorted(by_path.items()))))
+                    _print("pass --stream-file for one of them, or --verify-version: picking one silently "
+                           "decides which promise gets graded.")
+                    return 2
+                if resolved:
+                    _print("stream file    %s  (named by %s)"
+                           % (resolved, ", ".join("v%03d" % item.version for item in by_path[resolved])))
+                    args.stream_file = resolved
         settings, streams, source, _overrides = _evolve_streams(args, settings)
         domain = source
         # A promise is a statement about one dataset (boundary 33), so a stream only re-checks the

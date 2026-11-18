@@ -2627,6 +2627,63 @@ w001.json -> data\smd\stream-check.json (windows 1355, scored 1235)
 **边界 102：缺输入时要拒绝，不要从名字推断。** 当一个数据集可能对应两个采样时，推断出的路径会静默地
 换掉采样，然后把差别当成结论 —— 而它看起来像一次正常的复核。
 
+### 3.54 承诺也要记住自己的流：一个数据集不是一个文件
+
+第 46 轮让**拒绝**记住自己被测量在哪个文件上；**版本**仍然只有一份数据集摘要。于是 `--verify-version 20`
+能不能立在承诺自己的录音上，取决于操作者还记不记得那是哪个文件 —— 而这个仓库里 `SMD` 是两个文件、采样不同
+（`data/smd/stream.json` 948 窗口 / 828 打分 / 3000 秒，`data/smd/stream-check.json` 1355 / 1235 / 2100 秒）。
+第 26 轮已经为此把 `v020` 判成 `unmeasurable` 一次：那次判定的主语其实不是承诺，是操作者选了哪个文件。
+
+**修法**：版本文件记 `stream_path`（`RoundResult.stream_path` 由 CLI 在 `run_round` 之后写入，因为轮次读不到
+CLI 参数），`Promotion.stream_path` 读回来；`--verify` 在**没有** `--stream-file` 时不再退回演示流，而是从记录
+里解析：所有待查版本同意同一个文件就用它，有人没记文件、或者记录们互相矛盾，就列出来并拒绝。
+
+```
+$ brian evolve --verify --verify-version 19
+1 version(s) do not say which stream file they were measured on: v019
+pass --stream-file; a dataset name does not name a file, and guessing one would grade the promise on
+whatever sampling happens to be at that path.                                     → 退出 2
+
+$ brian evolve --verify --verify-version 20          （没有任何流参数）
+stream file    data/smd/stream.json  (named by v020)
+verifying 1 promotion(s) from smd on SMD
+  v020  digest.scoring = 'auto', …, gate.rank_probability = 0.85  holds
+        recall 0.507 at the 10% budget against a promised 0.507, 3358 tokens per report against 3358
+```
+
+第二条命令是这一轮的目的：同一条承诺，第 26 轮要靠操作者写 `--stream-file data\smd\stream.json` 才能复现，
+现在它自己站对了地方，并且复现得分毫不差（0.507 / 3358 对 0.507 / 3358）。
+
+**旧记录**：`v020` 的摘要写着 948 窗口 / 828 打分，磁盘上恰好一个流文件是这个几何 —— 补字段的脚本按**几何**
+匹配、零个或多个匹配就什么都不写（`var/backfill_version_path.py`）。同一条路用在 `v019` 上却失败了：
+
+```
+$ python var/backfill_version_path.py var/evolve/versions/v019.json
+recorded       source='RCAEval RE1-OB' windows=543 scored=456
+  data/rcaeval/stream-holdout.json   windows=543  scored=456  cadence=60.0   match
+  data/rcaeval/stream.json           windows=543  scored=456  cadence=60.0   match
+no match: 2 file(s) have that geometry, so nothing is written
+```
+
+RCAEval 的原始流与留出流是同一批案例、同样的采样密度，几何完全一样 —— **几何也无法恢复文件**。这就是为什么
+字段必须在写记录的那一刻记下来，而不是事后补：能补的是运气，补不了的是常态。
+
+三条读法：
+
+1. **一个数据集不是一个文件。** 摘要里写 `SMD` 只说明承诺关于哪批机器，不说明它关于哪个采样；改采样就是改问题，
+   而 `unmeasurable` 会把它记成"承诺没通过"。
+2. **回退到演示流是最坏的一种"有答案"。** 没有 `--stream-file` 时旧实现跑合成演示流，于是每个版本都被拿去和
+   一段它从没见过的录音比 —— 报告里有数字、有判词，只是那句话不是关于这条承诺的。
+3. **补字段要按事实补，不能按名字猜。** 按几何匹配、零个或多个匹配不写，是这一条的可执行形式；猜一个路径的
+   脚本会把"我找不到"变成"就是它"，然后让一次复核看起来正常。
+
+**边界 103：一条承诺必须记住它立在哪个流文件上。** 只记数据集时，复核只能靠记忆，而 `unmeasurable` 记录的
+是操作者选了哪个文件，不是承诺本身；一个判词的主语错了，它就不该进账本。
+
+**边界 104：记录们对"该用哪个流"有分歧时，列出来并拒绝。** 挑一个不是效率，是偷偷决定哪条承诺被评判 —— 而
+读者会以为被评的是全部。拒绝要说出分歧本身：哪个文件、哪些版本。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -2826,3 +2883,6 @@ missing for the next level
     —— 这个家族缺的是同一样东西：版本记录里没有那份文件的路径。把 `stream_path` 写进版本/承诺记录，
     让 `--verify` 不带参数就能站回承诺被立下的那条流上。
 
+35. **（3.54 已完成）让承诺记住自己的流文件。** 第 46 轮让拒绝记住了，第 47 轮让版本记住了。剩下的是
+    `--campaign` / `--sensitivity`：它们把多个域的记录放在一张表上，却仍按"数据集"分组，读者无法知道同一域里
+    两个文件的结果属于哪一个 —— 下一步是让表按流文件分组（而不是按源名），或者在无法区分时明确写出"两个文件"。

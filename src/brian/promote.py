@@ -169,6 +169,10 @@ class Promotion:
     env: Dict[str, str]
     claim: Claim
     stream: Dict[str, Any] = field(default_factory=dict)
+    # Round 47: the summary names the dataset, and `SMD` is two files here sampled differently. A promise
+    # that does not say which file it was measured on can only be re-checked by whoever remembers, and a
+    # check against the wrong sampling reports `unmeasurable` about the operator's choice, not the claim.
+    stream_path: str = ""
     created_at: str = ""
     verification: Optional[Dict[str, Any]] = None
     reverted_at: str = ""
@@ -202,6 +206,7 @@ class Promotion:
             "env": dict(self.env),
             "claim": self.claim.to_dict(),
             "stream": dict(self.stream),
+            "stream_path": self.stream_path or None,
             "created_at": self.created_at,
             "verification": self.verification,
             "reverted_at": self.reverted_at,
@@ -250,6 +255,7 @@ def load_promotions(root: Path) -> List[Promotion]:
             env=_env_from_payload(payload),
             claim=Claim.from_dict(payload.get("measurement") or {}),
             stream=dict(payload.get("stream") or {}),
+            stream_path=str(payload.get("stream_path") or ""),
             created_at=str(payload.get("created_at") or ""),
             verification=payload.get("verification"),
             reverted_at=str(payload.get("reverted_at") or ""),

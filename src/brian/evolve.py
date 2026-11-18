@@ -1883,6 +1883,11 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
             # The stream the promise was measured on: verifying on a different one is a transfer test,
             # not a repetition, and the reader of the record has to be able to tell them apart.
             "stream": dict(result.stream),
+            # Round 47: the summary says which dataset, not which file -- and `SMD` is two files here,
+            # sampled differently (828 scored windows at 3000 s, 1235 at 2100 s). Without the path,
+            # `--verify` can only stand on the promise's stream if the operator remembers it, so a version
+            # whose check comes back `unmeasurable` may be reporting the operator's choice, not the claim.
+            "stream_path": result.stream_path or None,
             "verdict": verdict.to_dict(),
             "rollback": unset + "  # each restores one default",
         }
