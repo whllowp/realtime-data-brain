@@ -848,6 +848,46 @@ def _unrecorded_matters(root: Path,
     return out
 
 
+def _ceiling_matters(root: Path) -> List[Tuple[str, str, str, str]]:
+    """(domain, round, why, stream path) for rounds that named their file and still recorded no ceilings.
+
+    Round 73. Round 72's charge could only be aimed at rounds whose stream file was unknown, because those are
+    the rounds `--rerun-unrecorded` pays — but a round that recorded its `stream_path` and no ceilings is a debt
+    the queue never touches: the file is known and the ceiling is not, and nothing re-measured it. This is the
+    list that lets the queue reach those rounds too, so the payable count in the gate is the count of rounds a
+    command can actually lower.
+
+    The "still decides something" rule is `_unrecorded_matters`': a round matters when it wrote a version that is
+    still on the page, or when a candidate it refused is still held. Re-measuring a round that decided nothing
+    would spend minutes to answer a question nobody asks again.
+    """
+    provenance = rejection_provenance(root)
+    carried: Dict[str, List[str]] = {}
+    for candidate, verdict in provenance.items():
+        if verdict.get("accepted"):
+            continue
+        carried.setdefault(str(verdict.get("round") or ""), []).append(str(candidate))
+    out: List[Tuple[str, str, str, str]] = []
+    for record in history(root):
+        path = str(record.get("stream_path") or "")
+        if not path or record.get("limits"):
+            continue
+        name = str(record.get("round") or "")
+        why: List[str] = []
+        applied = record.get("applied")
+        if applied:
+            written = len(applied) if isinstance(applied, (list, tuple)) else int(applied or 0)
+            why.append("wrote %d version(s) still on the page" % written)
+        held = carried.get(name) or []
+        if held:
+            why.append("%d refusal(s) still carried" % len(held))
+        if not why:
+            continue
+        domain = str((record.get("stream") or {}).get("source") or "(unattributed)")
+        out.append((domain, name, "; ".join(why), path))
+    return out
+
+
 def _debt_by_domain(root: Path) -> List[Tuple[str, int, int, float, int]]:
     """(domain, rounds, without a file, share, re-runnable) per stream (round 57).
 
@@ -1348,11 +1388,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     ceiling_rounds = sum(int(row["rounds"]) for row in ceiling_rows)
     lacking_limits = {str(record.get("round") or ""): not record.get("limits")
                       for record in live_records}
+    ceiling_payable = 0
     try:
-        ceiling_payable = sum(1 for _domain, name, _why, files in _unrecorded_matters(root)
-                              if len(files) == 1 and lacking_limits.get(str(name), False))
+        ceiling_payable += sum(1 for _domain, name, _why, files in _unrecorded_matters(root)
+                               if len(files) == 1 and lacking_limits.get(str(name), False))
     except OSError:
-        ceiling_payable = 0
+        pass
+    # Round 73: a round that recorded its file and no ceilings was outside the queue's reach, so it was counted
+    # as unparyable and the gate could never be aimed at it. `--with-ceilings` gives the queue that path, so
+    # those rounds now count as payable -- the charge may only exist where a command can lower it (boundary 154).
+    ceiling_named = 0
+    try:
+        ceiling_named = len(_ceiling_matters(root))
+    except OSError:
+        ceiling_named = 0
+    ceiling_payable += ceiling_named
 
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
         written: List[Tuple[str, Optional[float], Optional[float], bool, bool]] = []
@@ -1529,6 +1579,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # its own `projection`/`limit` pair. Round 60 made the page and the command share the arithmetic; this
         # makes them share the words, so the reader recognises the command they were told to run.
         limit = _rerun_limit(args, len(ready))
+        # Round 73: the second family. A round that recorded its file and no ceilings cannot be paid by the
+        # unrecorded queue (its file is known, so `_unrecorded_matters` never lists it), and until now nothing
+        # re-measured it -- the gate's payable count said so correctly and the debt was unpayable. The file in
+        # the record is all the queue needs.
+        named_pending = _ceiling_matters(root)
+        ceiling_ready = named_pending if getattr(args, "with_ceilings", False) else []
+        ceiling_limit = _rerun_limit(args, len(ceiling_ready))
         budget = _queue_budget(root, limit=limit)
         _print("budget            %s" % budget_text(budget))
         # Round 68: the queue judges every round it pays, so it names the ceilings it judges by -- the same
@@ -1541,6 +1598,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # A drain still has to say *before the first measurement* that one broken round stops the rest: a
             # reader who asked for ten rounds should learn that at the top, not from a stack trace halfway down.
             _print("stops             at the first round that cannot be re-run; the rest keep their place")
+        if ceiling_ready:
+            _print("ceilings          %d round(s) name their file and never recorded their ceilings; "
+                   "re-measuring them here" % len(ceiling_ready))
+        elif named_pending:
+            _print("ceilings          %d round(s) name their file and never recorded their ceilings; "
+                   "add --with-ceilings to re-measure them" % len(named_pending))
         for domain, name, _why, files in blocked:
             _print("  skipped         %-32s %s" % (name, _candidate_label(files)))
         failures = 0
@@ -1552,7 +1615,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         largest_start = _largest_debt(root)
         paid_domains: Dict[str, int] = {}
         rules = _rules_from_args(args)
-        for domain, name, _why, files in ready[:limit]:
+        # Round 73: the per-round work is one function because a second family of rounds needs it -- the rounds
+        # that named their file and never recorded a ceiling. The queue reaches them through `--with-ceilings`,
+        # which is the only reason the gate may charge that debt (boundary 154).
+        def run_one(entry: Tuple[str, str, str, List[str], str]) -> Tuple[bool, bool]:
+            kind, domain, name, _why, files = entry
             target_file = files[0]
             record = next((row for row in history(root) if str(row.get("round")) == name), None) or {}
             recorded = _recorded_candidates(record)
@@ -1563,7 +1630,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # compared to something nobody wrote down. Retirement would return nothing.
                 _print("  this record keeps no candidate definitions, so there is nothing to measure again; "
                        "its totals stay where they are")
-                continue
+                return False, False
             clone = argparse.Namespace(**vars(args))
             clone.stream_file = target_file
             # A re-run is a measurement, not a deployment: it writes a round that names its file, and nothing
@@ -1581,9 +1648,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 58: the record of what this entry of the queue paid belongs in the round it paid, not in
             # the terminal that ran it. `largest_at_start` is the domain a reader would have expected this
             # command to aim at, so a later reader can tell an aimed payment from an incidental one.
-            result.queue = {"paid": domain, "paid_round": name,
-                            "largest_at_start": largest_start or {},
-                            "share_after": float(progress["share_after"])}
+            if kind == "file":
+                result.queue = {"paid": domain, "paid_round": name,
+                                "largest_at_start": largest_start or {},
+                                "share_after": float(progress["share_after"])}
             _print("")
             _print(format_round(result))
             written = persist(root, result, write_versions=False)
@@ -1592,23 +1660,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             if not fresh:
                 _print("")
                 _print("the re-run recorded nothing, so %s stays as it is" % name)
-                failures += 1
-                stopped = True
-                break
+                return False, True
             successor = str(fresh[0].get("round"))
             try:
                 mark = retire(root, name, re_measured_as=successor)
             except (OSError, ValueError) as error:
                 _print("")
                 _print("cannot retire %s: %s" % (name, error))
-                failures += 1
-                stopped = True
-                break
+                return False, True
             _print("")
             _print("recorded round %s" % written.get("round"))
             _print("retired %s (re-measured as %s)" % (name, successor))
-            paid_now += 1
-            paid_domains[domain] = paid_domains.get(domain, 0) + 1
             overlap = (mark or {}).get("overlap") or {}
             matches = overlap.get("matches") or []
             rest = overlap.get("not_repeated") or []
@@ -1624,10 +1686,40 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             else:
                 _print("  none of its %d trial(s) appear in the successor: this round is retired as a "
                        "question, not answered" % len(rest))
-            step = _rerun_progress(root)
-            _print("  progress         %d of %d re-measured; %d left, share %.0f%% -> %.0f%% if the rest run"
-                   % (step["paid"], step["paid"] + step["remaining"], step["remaining"],
-                      100.0 * step["share_now"], 100.0 * step["share_after"]))
+            if kind == "file":
+                step = _rerun_progress(root)
+                _print("  progress         %d of %d re-measured; %d left, share %.0f%% -> %.0f%% if the rest run"
+                       % (step["paid"], step["paid"] + step["remaining"], step["remaining"],
+                          100.0 * step["share_now"], 100.0 * step["share_after"]))
+            else:
+                _print("  ceilings         the successor records the ceilings it was judged under")
+            return True, False
+
+        for domain, name, _why, files in ready[:limit]:
+            paid, failure = run_one(("file", domain, name, _why, files))
+            if failure:
+                failures += 1
+                stopped = True
+                break
+            if paid:
+                paid_now += 1
+                paid_domains[domain] = paid_domains.get(domain, 0) + 1
+        paid_ceilings = 0
+        for domain, name, why, path in ceiling_ready[:ceiling_limit]:
+            if stopped:
+                break
+            paid, failure = run_one(("ceiling", domain, name, why, [path]))
+            if failure:
+                failures += 1
+                stopped = True
+                break
+            if paid:
+                paid_ceilings += 1
+        if ceiling_ready:
+            still = len(_ceiling_matters(root))
+            _print("")
+            _print("ceilings          %d of %d re-measured with their ceilings; %d still without"
+                   % (paid_ceilings, len(ceiling_ready), still))
         if ready:
             if stopped:
                 # A batch that keeps spending after a broken step is not a batch, it is a way to burn the
@@ -1811,7 +1903,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         budget = _queue_budget(root, limit=budget_limit)
         # Round 71/72: the shortfall and the queue's reach were computed once before the branches, so the page
         # and the gate cannot disagree about how many rounds lack ceilings or how many of them a re-run pays.
-        ceiling_note = format_ceiling_shortfall(ceiling_rows, payable=ceiling_payable)
+        ceiling_note = format_ceiling_shortfall(ceiling_rows, payable=ceiling_payable,
+                                                named=ceiling_named)
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
@@ -3538,6 +3631,10 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--rerun-limit", type=int, default=1, metavar="N",
                         help="with --rerun-unrecorded: how many rounds to re-run in this command (default 1, "
                              "because a round is minutes of measurement and the rest keep their place)")
+    evolve.add_argument("--with-ceilings", action="store_true",
+                        help="with --rerun-unrecorded: also re-measure the rounds that named their stream file "
+                             "but never recorded the wait ceilings they were judged under, so the ceiling debt "
+                             "those rounds represent can actually be paid")
     evolve.add_argument("--apply", action="store_true",
                         help="also write a version file per accepted change "
                              "(the round itself is always recorded)")

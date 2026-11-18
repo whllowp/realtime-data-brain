@@ -113,11 +113,28 @@ def test_the_gate_charges_on_a_ledger_the_queue_can_pay(tmp_path, monkeypatch, c
     assert "re-running the queue would leave none, so --strict exits 1 until it is paid." in text
 
 
-def test_a_round_that_named_its_file_but_not_its_ceilings_is_never_charged(tmp_path, monkeypatch, capsys):
-    """The queue re-runs rounds whose *file* is unknown; a round with a file and no ceilings cannot be paid."""
+def test_a_round_that_named_its_file_is_now_payable(tmp_path, monkeypatch, capsys):
+    """Round 73: a round with a recorded file and no ceilings is reachable by `--with-ceilings`.
+
+    Round 72 charged only rounds whose file was unknown, so this family was a debt with no command behind it
+    and correctly went uncharged. Once the queue can re-measure a named round, the same ledger owes what it
+    said it owed -- the charge follows the queue's reach, not the family's age.
+    """
     shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
     _write_round(tmp_path, "round-a.json", applied=["v020"], shape=shape,
                  stream_path="data/smd/stream-one.json")
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--audit", "--strict", "--max-ceiling-debt", "0.5",
+                     "--rerun-limit", "0"]) == 1
+    text = capsys.readouterr().out
+    assert "1 of 1 round(s) do not record the ceilings they were judged under (100%), above the 50% asked for:" in text
+    assert "re-running the queue would leave none, so --strict exits 1 until it is paid." in text
+
+
+def test_a_round_that_named_its_file_and_decides_nothing_is_not_charged(tmp_path, monkeypatch, capsys):
+    """A re-run pays a debt only when the round still decides something; otherwise it is history, not a debt."""
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-a.json", applied=[], shape=shape, stream_path="data/smd/stream-one.json")
     monkeypatch.chdir(tmp_path)
     assert cli.main(["evolve", "--audit", "--strict", "--max-ceiling-debt", "0.5",
                      "--rerun-limit", "0"]) == 0

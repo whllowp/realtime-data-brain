@@ -4096,6 +4096,60 @@ ceilings          every recorded round was judged under today's ceilings     # �
 **边界 155：`{}`（判的时候没有上限）与缺失（没说）必须在记录里分得开，并且在收费时被同等对待。** 区别在
 于付费方式：前者重跑之后仍然是 `{}`，所以它不进 payable；后者重跑一次就补上了。
 
+## 3.80 队列够不着的那一半：命了文件的轮也能被重跑
+
+第 71 轮把两种"缺上限"的轮数合进了一列：文件未知的，和命了文件却从没记录过判定上限的。第 72 轮只给
+第一种上了闸门，第二种被明确地判为"不收"，理由是一条命令能把它变小的欠账才配失败。那个判断在当时的代码里
+是对的，但它同时暴露了事实的另一半：**对第二种，没有任何命令能把它变小**。队列的重跑按"文件未知"来选轮，
+于是这些轮永远既不会被重测，也不会被收费 —— 它们只是被数着。
+
+这一轮给队列补上第二条路：`--with-ceilings`，把"命了文件、没记上限、而且今天还在决定什么"的轮用记录里
+自己的候选和文件重测一遍，写回上限。于是闸门对它们也开始收费，这时的收费是被允许的 —— 它能被付清。
+
+```
+$ brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0      （两种族各一条轮）
+candidates        1 of 1 round(s) have exactly one file; 0 cannot be placed
+ceilings          1 round(s) name their file and never recorded their ceilings; re-measuring them here
+---- re-running round-payable.json on data/smd/stream-one.json
+recorded round var\evolve\round-20261118T061536Z.json
+retired round-payable.json (re-measured as round-20261118T061536Z.json)
+---- re-running round-named.json on data/smd/stream-one.json
+recorded round var\evolve\round-20261118T061536Z-2.json
+retired round-named.json (re-measured as round-20261118T061536Z-2.json)
+  ceilings         the successor records the ceilings it was judged under
+ceilings          1 of 1 re-measured with their ceilings; 0 still without
+```
+
+第二条路的欠账现在能进闸门了：
+
+```
+$ brian evolve --campaign --strict --max-ceiling-debt 0.5 --rerun-limit 0   （只剩命了文件的那条轮）
+ceiling debt      1 of 1 round(s) do not record the ceilings they were judged under; re-running 1 of them would leave none, so the default --max-limit-drift cap would arm
+1 of 1 round(s) do not record the ceilings they were judged under (100%), above the 50% asked for:
+re-running the queue would leave none, so --strict exits 1 until it is paid.
+$ brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 1
+ceilings          1 of 1 re-measured with their ceilings; 0 still without
+$ brian evolve --campaign --strict --max-ceiling-debt 0.5      → 退出 0，没有 ceiling debt 行
+```
+
+### 运行才暴露的两个缺陷
+
+**一、同一秒内的两条记录是同一条。** 第一次跑双族重测时，两条轮写成了**同一个** `round-20261118T061510Z.json`：
+`persist` 用 `started_at` 到秒来命名记录，而队列一秒内能跑完两条短轮。后一条覆盖前一条，于是前一条轮被"退役"
+进了一个内容其实是第二条测量结果的后继。这不是显示问题 —— 一份记录是内容，不是时间戳。修法是 `persist` 在
+目标文件已存在时加后缀（`-2`、`-3`……），代价是零，因为下游一律按名字找文件，从不解析名字的形状。
+
+**二、"够不着"和"不值得"在页面上长得一样。** 第 71 轮那句 "N of M round(s) do not record the ceilings they
+were judged under, and none of them can be re-run" 把两件事压成了一件。现在页面会说
+"N of them name their file, so --with-ceilings can re-measure them"，而这句只在真有时才出现。
+
+**边界 156：只能付"文件未知"那一半的队列，等于留了一半够不着的欠账；够得着与否要跟着"缺的是什么"走，
+而不是跟着一种缺法走。**
+
+**边界 157：一条记录由内容标识，不由时间戳标识 —— 同一秒的两次测量是两条记录；后继文件被覆盖时，
+"退役"退进的是错误的证据。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4380,7 +4434,5 @@ missing for the next level
     同形：可付才收）。
 59. （3.79 已完成）把上限欠账做成可收费的一行。
 
-60. 让"队列够不着"真的够得着：`_unrecorded_matters` 目前只列文件未知的轮，但一条记录了
-    `stream_path` 的轮其实有据可查——它缺的只是上限，不是文件。给重跑队列加一条 `--with-ceilings` 路径：对
-    这些轮直接用记录里的文件名重跑一次，补上上限（154 说的"有人能付"就成立了），并让 `--campaign` 的
-    `ceiling debt` 行说明"其中 N 轮的文件已知、可直接补记录"。
+61. 把 `--campaign` 的 `ceiling debt` 行也做成命令形状的句子（像 `measure next`、`budget` 那样），
+并让 `--with-ceilings` 在"每个命了文件的轮都记了上限"之后成为默认。

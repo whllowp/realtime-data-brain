@@ -1852,6 +1852,14 @@ def persist(root: Path, result: RoundResult, *, write_versions: bool = True) -> 
 
     stamp = result.started_at.replace(":", "").replace("-", "").replace("+0000", "Z")
     round_path = directory / ("round-%s.json" % stamp)
+    # Round 73: two rounds that start in the same second must still be two records. `started_at` is written to
+    # the second, so a queue that re-measures two rounds back to back used to overwrite the first successor --
+    # and the retirement of the first round then named a file whose content was the second round's. A suffix
+    # keeps both; the ledger points at the file by name, so nothing downstream depends on the name's shape.
+    suffix = 2
+    while round_path.exists():
+        round_path = directory / ("round-%s-%d.json" % (stamp, suffix))
+        suffix += 1
     round_path.write_text(json.dumps(result.to_dict(), indent=2, sort_keys=False) + "\n",
                           encoding="utf-8")
 
@@ -3278,7 +3286,8 @@ def ceiling_shortfall(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
     return rows
 
 
-def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0) -> Optional[str]:
+def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0,
+                             named: int = 0) -> Optional[str]:
     """One sentence about the rounds that do not record their ceilings, and whether a command could change it.
 
     The number is only worth printing when it can move: `payable` is how many of the missing rounds the re-run
@@ -3292,14 +3301,21 @@ def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0
         return None
     text = "%d of %d round(s) do not record the ceilings they were judged under" % (missing, total)
     payable = max(0, min(int(payable), missing))
+    named = max(0, min(int(named), missing - payable))
+    # Round 73: a round that named its file is one the queue could not reach before (`_unrecorded_matters` lists
+    # only rounds whose *file* is unknown), so it was counted as unparyable and the sentence said so. The queue
+    # now has a path for it, and the sentence names how many of the remainder became reachable.
+    reachable = "; %d of them name their file, so --with-ceilings can re-measure them" % named if named else ""
     if not payable:
+        if named:
+            return text + ", and none of them can be re-run from the record as it stands" + reachable
         return text + ", and none of them can be re-run, so the default --max-limit-drift cap stays a warning"
     left = missing - payable
     if not left:
         return (text + "; re-running %d of them would leave none, so the default --max-limit-drift cap "
-                        "would arm" % payable)
+                        "would arm%s" % (payable, reachable))
     return (text + "; re-running %d of them would leave %d without one, so the default --max-limit-drift cap "
-                    "stays a warning" % (payable, left))
+                    "stays a warning%s" % (payable, left, reachable))
 
 
 def format_audit(result: Audit) -> str:
