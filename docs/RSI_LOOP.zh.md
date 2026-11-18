@@ -3618,6 +3618,72 @@ budget           at most 4 minute(s) for one queue run (from the deployment stat
 破坏 —— 页面照旧，而策略已经没了。**
 
 
+### 3.72 一次等多久，和排空要多久，是两句承诺
+
+第 64 轮把"一次队列运行可以为这条流等多久"记进了那条流的部署状态。但那只是**一次**的价格。
+"排空这条流的欠账要多久"是另一个数、另一句承诺：只收紧前者的读者，会在队列跑到一半时才发现后者，
+而那时钱已经花了。
+
+所以第 65 轮在同一个 `budget` 块里记第二个数：
+
+```
+$ brian evolve --set-domain-limit "rcaeval-re1-ob=10" --set-domain-drain "rcaeval-re1-ob=3"
+recorded          rcaeval-re1-ob: at most 10 minute(s) for one queue run
+recorded          rcaeval-re1-ob: at most 3 minute(s) to empty the queue
+```
+
+```json
+"budget": {
+  "max_minutes": 10.0,
+  "drain_minutes": 3.0
+}
+```
+
+两个写入各自只碰自己那个键：设排空上限不会顺手清掉昨天记的单次上限（边界 139 在一个更小的地方）。
+检查时两句承诺分别收费，因此"单次没问题、排空超了"能单独成为失败：
+
+```
+$ brian evolve --campaign --strict --rerun-limit 0
+emptying the queue would spend about 6.0 minute(s) on RCAEval RE1-OB, above the 3.0 asked for:
+raise the ceiling, or drain the queue over several runs with --rerun-limit.
+```
+
+版本页把两句都念出来：
+
+```
+budget           at most 10 minute(s) for one queue run (from the deployment state)
+drain            at most 3 minute(s) to empty the queue (from the deployment state)
+```
+
+**报告必须说自己按什么判的。** `--campaign --json-out` 现在多一个 `limits` 块，每个上限都带来源：
+
+```json
+"limits": {
+  "max_minutes_by_domain": {"rcaeval-re1-ob": 10.0},
+  "max_minutes_origin": {"rcaeval-re1-ob": "state"},
+  "max_drain_by_domain": {"rcaeval-re1-ob": 3.0},
+  "max_drain_origin": {"rcaeval-re1-ob": "state"}
+}
+```
+
+这条是写的过程中发现的缺陷：第一版按"这个域在状态里有没有数"来判断来源，于是命令行上传了
+`--max-drain-minutes "rcaeval-re1-ob=100"`（覆盖了记录里的 3）之后，报告仍然写着 `"state"`。
+一个**碰巧和策略同值**的命令行决定，会被读成"没有人覆盖任何东西"。现在来源按"这次有没有给这个域传旗标"
+判断，旗标覆盖即记 `"flag"` —— 即使两个数一样。
+
+三条读法：
+
+1. **等待有两个价格，两个都要能记录、能收费。** 只记一个，读者就会在另一个上超支。
+2. **文件里的两个承诺要各自归位。** 写一个不删另一个，这是第 64 轮的边界在一个更小的位置上重演。
+3. **报告里的每个上限都要有出处。** 政策是明天的、命令行是今天的；分不清这两者的报告没法复核。
+
+**边界 140：一次等待有两个价格 —— 一次运行、排空全程 —— 两句都要能记录、能被闸门单独收费；
+只收紧其中一个的读者，会在另一个上超支。**
+
+**边界 141：报告必须说明它按哪些上限判定，以及每个上限来自常驻策略还是本次命令行；两个数同值不等于
+没人覆盖，出处只能由"这次有没有传旗标"回答。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3883,4 +3949,7 @@ missing for the next level
 
 52. 让 `--set-domain-limit` 也能写"整队上限"和"每轮上限"两个值（现在只有一个总量），并让
 `--campaign --json-out` 把记录里的上限一起输出，这样一份报告能自己说明它按什么标准判的。
+
+53. 让 `--campaign` 的正文也念一句"按什么上限判定"（现在只在 JSON 里的 `limits` 块），
+并让 `--set-domain-limit`/`--set-domain-drain` 支持删除一个上限（现在只能写入，不能撤销）。
 

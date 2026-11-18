@@ -359,10 +359,24 @@ def state_budgets(root: Path) -> Dict[str, float]:
     make the whole state unreadable, and a ceiling that cannot be read is simply absent (the gate then charges
     nothing for that domain, which is what it did before this existed).
     """
+    return _state_budget_field(root, "max_minutes")
+
+
+def state_drains(root: Path) -> Dict[str, float]:
+    """The whole-queue wait ceiling each domain's own state records, keyed by slug (round 65).
+
+    Round 64 recorded "how long one queue run may wait for this domain". That is a different promise from "how
+    long emptying its queue may take": a reader who can only cap the first finds the second mid-queue, when the
+    money is already spent. Two numbers, one file, one spelling of the domain.
+    """
+    return _state_budget_field(root, "drain_minutes")
+
+
+def _state_budget_field(root: Path, field: str) -> Dict[str, float]:
     folder = _evolve_dir(root) / DOMAINS
-    ceilings: Dict[str, float] = {}
+    values: Dict[str, float] = {}
     if not folder.is_dir():
-        return ceilings
+        return values
     for path in sorted(folder.glob("*/" + CURRENT)):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -370,27 +384,36 @@ def state_budgets(root: Path) -> Dict[str, float]:
             continue
         if not isinstance(payload, Mapping):
             continue
-        value = (payload.get(BUDGET) or {}).get("max_minutes")
+        value = (payload.get(BUDGET) or {}).get(field)
         if value is None:
             continue
         try:
-            ceilings[str(path.parent.name)] = float(value)
+            values[str(path.parent.name)] = float(value)
         except (TypeError, ValueError):
             continue
-    return ceilings
+    return values
 
 
-def set_state_budget(root: Path, domain: str, minutes: float) -> Path:
-    """Record how long `domain` will let one queue run wait (round 64).
+def set_state_budget(root: Path, domain: str, minutes: Optional[float] = None, *,
+                     drain_minutes: Optional[float] = None) -> Path:
+    """Record how long `domain` will let a queue run wait, and how long emptying it may take (rounds 64-65).
 
     Only the budget block changes: the variables in force and the versions that own them are copied through,
     because writing a policy is not a reason to touch a deployment. The timestamp does move, so a reader
     comparing two states can see that one of them is newer — and the `sources` map still says which version
     owns each variable, which a budget never does.
+
+    Two ceilings, merged rather than replaced: setting the drain ceiling must not silently erase the per-run one
+    that a reader recorded yesterday (boundary 139, in a smaller place).
     """
+    if minutes is None and drain_minutes is None:
+        raise ValueError("set_state_budget wants a run ceiling, a drain ceiling, or both")
     state = current_state(root, domain)
     budget = dict(state.get("budget") or {})
-    budget["max_minutes"] = float(minutes)
+    if minutes is not None:
+        budget["max_minutes"] = float(minutes)
+    if drain_minutes is not None:
+        budget["drain_minutes"] = float(drain_minutes)
     _write_state(root, {"env": state["env"], "sources": state["sources"], "budget": budget}, domain)
     return state_path(root, domain)
 
@@ -810,6 +833,9 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
         if ceiling.get("max_minutes") is not None:
             lines.append("budget           at most %g minute(s) for one queue run (from the deployment state)"
                          % float(ceiling["max_minutes"]))
+        if ceiling.get("drain_minutes") is not None:
+            lines.append("drain            at most %g minute(s) to empty the queue (from the deployment state)"
+                         % float(ceiling["drain_minutes"]))
         lines.append("")
     if not promotions:
         lines.append("no version files yet: run a round with --apply to record one.")

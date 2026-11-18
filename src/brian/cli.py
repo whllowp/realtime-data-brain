@@ -91,6 +91,7 @@ from .promote import (
     revert_promotion,
     set_state_budget,
     state_budgets,
+    state_drains,
     version_label,
     CLAIM_EXPIRY_DAYS,
     rescale_hint,
@@ -263,7 +264,11 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  budget_minutes: Optional[float] = None,
                  max_minutes: Optional[float] = None,
                  minutes_by_domain: Optional[Mapping[str, Any]] = None,
-                 max_minutes_by_domain: Optional[Mapping[str, Any]] = None) -> int:
+                 max_minutes_by_domain: Optional[Mapping[str, Any]] = None,
+                 drain_minutes: Optional[float] = None,
+                 max_drain: Optional[float] = None,
+                 drain_by_domain: Optional[Mapping[str, Any]] = None,
+                 drain_ceilings: Optional[Mapping[str, Any]] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -400,11 +405,61 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("the next queue run would spend about %.1f minute(s), above the %.1f asked for:"
                % (budget_minutes, max_minutes))
         _print("lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.")
+    # Round 65: the whole queue has a price of its own. "Four minutes a run" and "twenty minutes to empty it"
+    # are different promises, and a reader who can only cap the first will discover the second mid-queue.
+    drain_ceilings = {domain_slug(str(name)): float(value)
+                      for name, value in (drain_ceilings or {}).items()}
+    drain_over: List[Tuple[str, float, float]] = []
+    for domain, minutes in sorted((drain_by_domain or {}).items()):
+        ceiling = drain_ceilings.get(domain_slug(str(domain)), max_drain)
+        if ceiling is not None and float(minutes) > float(ceiling):
+            drain_over.append((str(domain), float(minutes), float(ceiling)))
+    if drain_over:
+        minutes_capped = True
+        _print("")
+        for domain, minutes, ceiling in drain_over:
+            _print("emptying the queue would spend about %.1f minute(s) on %s, above the %.1f asked for:"
+                   % (minutes, domain, ceiling))
+        _print("raise the ceiling, or drain the queue over several runs with --rerun-limit.")
+    elif max_drain is not None and drain_minutes is not None and drain_minutes > max_drain:
+        minutes_capped = True
+        _print("")
+        _print("emptying the queue would spend about %.1f minute(s), above the %.1f asked for:"
+               % (drain_minutes, max_drain))
+        _print("raise the ceiling, or drain the queue over several runs with --rerun-limit.")
     # A check must not fail for something it does not print: the rise is only chargeable when it is large
     # enough to be printed at all, or the reader would get exit 1 with no paragraph explaining it.
     rose = max_rise is not None and trend_rise > max_rise and trend_rise > trend_tolerance
     capped = max_unrecorded is not None and unrecorded_share > max_unrecorded
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped) else 0
+
+
+def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
+                 run_from_flag: Mapping[str, float], drain_all: Optional[float],
+                 drain_by_domain: Mapping[str, float],
+                 drain_from_flag: Mapping[str, float]) -> Dict[str, Any]:
+    """The wait ceilings this page was judged against, each with the place it came from (round 65).
+
+    A reader comparing two reports needs to know whether a ceiling was recorded in a deployment state or typed
+    on the command line: the first is a policy that will still be there tomorrow, the second was today's
+    decision. Printing only the numbers makes the two indistinguishable, which is how a report becomes
+    unreviewable without anyone noticing.
+
+    The origin is read from the flags that were given, not from "does the state also have a number": a flag that
+    overrides a recorded policy is today's decision even when both carry the same value, and attributing it to
+    the state would tell a later reader that nobody overrode anything.
+    """
+    def origin(name: str, from_flag: Mapping[str, float]) -> str:
+        return "flag" if domain_slug(str(name)) in from_flag else "state"
+
+    return {
+        "max_minutes": run_all,
+        "max_minutes_by_domain": {str(name): float(value) for name, value in run_by_domain.items()},
+        "max_minutes_origin": {str(name): origin(name, run_from_flag) for name in run_by_domain},
+        "max_drain_minutes": drain_all,
+        "max_drain_by_domain": {str(name): float(value) for name, value in drain_by_domain.items()},
+        "max_drain_origin": {str(name): origin(name, drain_from_flag) for name in drain_by_domain},
+    }
 
 
 def _domain_name(root: Path, typed: str) -> str:
@@ -1146,11 +1201,22 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 2
     # Round 64: a ceiling recorded in a domain's own state applies without being retyped; an explicit flag for
     # the same domain wins, because today's operator is allowed to disagree with yesterday's policy.
+    state_run_ceilings: Dict[str, float] = {}
+    state_drain_ceilings: Dict[str, float] = {}
+    flag_run_ceilings: Dict[str, float] = dict(minute_ceilings)
     if not getattr(args, "ignore_state_limits", False):
-        minute_ceilings = {**state_budgets(root), **minute_ceilings}
+        state_run_ceilings = state_budgets(root)
+        # Round 65: the drain ceiling is a second promise in the same file, so it is merged the same way and by
+        # the same rule -- the flag for a domain answers today's question, the state answers the standing one.
+        state_drain_ceilings = state_drains(root)
+        minute_ceilings = {**state_run_ceilings, **minute_ceilings}
+    drain_ceiling, drain_ceilings = _minute_limits(getattr(args, "max_drain_minutes", None))
+    flag_drain_ceilings: Dict[str, float] = dict(drain_ceilings)
+    drain_ceilings = {**state_drain_ceilings, **drain_ceilings}
 
-    if getattr(args, "set_domain_limit", None):
-        for entry in args.set_domain_limit:
+    if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
+        written: List[Tuple[str, Optional[float], Optional[float]]] = []
+        for entry in getattr(args, "set_domain_limit", None) or []:
             name, _, number = str(entry).partition("=")
             try:
                 limit = float(number.strip())
@@ -1159,9 +1225,26 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             if not name.strip() or limit < 0.0:
                 _print("--set-domain-limit wants domain=minutes, got %r" % entry)
                 return 2
-            path = set_state_budget(root, _domain_name(root, name), limit)
-            _print("recorded          %s: at most %g minute(s) for one queue run"
-                   % (domain_slug(_domain_name(root, name)), limit))
+            written.append((name.strip(), limit, None))
+        for entry in getattr(args, "set_domain_drain", None) or []:
+            name, _, number = str(entry).partition("=")
+            try:
+                limit = float(number.strip())
+            except ValueError:
+                limit = -1.0
+            if not name.strip() or limit < 0.0:
+                _print("--set-domain-drain wants domain=minutes, got %r" % entry)
+                return 2
+            written.append((name.strip(), None, limit))
+        for name, run_limit, drain_limit in written:
+            domain = _domain_name(root, name)
+            path = set_state_budget(root, domain, run_limit, drain_minutes=drain_limit)
+            if run_limit is not None:
+                _print("recorded          %s: at most %g minute(s) for one queue run" % (domain_slug(domain),
+                                                                                        run_limit))
+            if drain_limit is not None:
+                _print("recorded          %s: at most %g minute(s) to empty the queue" % (domain_slug(domain),
+                                                                                         drain_limit))
             _print("                  %s" % path)
         return 0
 
@@ -1499,6 +1582,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload = result.to_dict()
             payload["debt_plan"] = _debt_plan(root)
             payload["budget"] = budget
+            # Round 65: a report that can be judged must say what it was judged against. Every ceiling that was
+            # in force while this page was printed appears here with where it came from, because a number whose
+            # origin is unknown cannot be reviewed -- and the state and the command line can disagree.
+            payload["limits"] = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
+                                             drain_ceiling, drain_ceilings, flag_drain_ceilings)
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
@@ -1519,7 +1607,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                             else float(budget["estimated_minutes_by_domain"])),
                             minutes_by_domain=budget.get("minutes_by_domain") or {},
                             max_minutes=minute_ceiling,
-                            max_minutes_by_domain=minute_ceilings)
+                            max_minutes_by_domain=minute_ceilings,
+                            drain_minutes=(None if budget.get("drain_minutes") is None
+                                           else float(budget["drain_minutes"])),
+                            drain_by_domain=budget.get("drain_by_domain") or {},
+                            max_drain=drain_ceiling,
+                            drain_ceilings=drain_ceilings)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -1604,7 +1697,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                             else float(audit_budget["estimated_minutes_by_domain"])),
                             minutes_by_domain=audit_budget.get("minutes_by_domain") or {},
                             max_minutes=minute_ceiling,
-                            max_minutes_by_domain=minute_ceilings)
+                            max_minutes_by_domain=minute_ceilings,
+                            drain_minutes=(None if audit_budget.get("drain_minutes") is None
+                                           else float(audit_budget["drain_minutes"])),
+                            drain_by_domain=audit_budget.get("drain_by_domain") or {},
+                            max_drain=drain_ceiling,
+                            drain_ceilings=drain_ceilings)
 
     if args.grade:
         try:
@@ -3127,6 +3225,12 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--set-domain-limit", action="append", default=None, metavar="DOMAIN=MINUTES",
                         help="record in that domain's own deployment state how long one queue run may wait for "
                              "it; later runs charge it without the flag, and --ignore-state-limits opts out")
+    evolve.add_argument("--set-domain-drain", action="append", default=None, metavar="DOMAIN=MINUTES",
+                        help="record in that domain's own deployment state how long emptying its queue may "
+                             "take; a different promise from one run, and recorded beside it")
+    evolve.add_argument("--max-drain-minutes", action="append", default=None, metavar="MINUTES",
+                        help="with --strict: fail when emptying the queue would spend more than this many "
+                             "minutes; takes a number, domain=minutes, or default=minutes, like --max-minutes")
     evolve.add_argument("--ignore-state-limits", action="store_true",
                         help="with --strict: do not read the per-domain wait ceilings recorded in the deployment "
                              "state, only the ones on this command line")
