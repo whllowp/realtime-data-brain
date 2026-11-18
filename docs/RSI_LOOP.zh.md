@@ -3276,6 +3276,59 @@ balance           no payable debt remains: every remaining unrecorded round keep
 
 **边界 127：会动手的队列必须把它付了什么、还剩什么写进它改过的那条记录，而不是只写进跑了它的那个终端。**
 
+### 3.66 说出欠账在哪，还要说出付它的那一步
+
+3.64/3.65 让页面点名"欠得最多的可付域"，并让 `--strict` 能按域扣分。但页面停在了**位置**上：
+读者看到 `debt … SMD 14 of 27 …`，知道该测哪里，却不知道**下一条命令是什么、跑完会怎样**。
+于是操作者按 `--rerun-limit 1` 跑一次、读 `balance`、再回到表格里用眼睛重排一次——
+**两步的动作被拆成了三次阅读**，而每一次阅读都是一次可以放弃的机会。
+
+修法：把队列自己的顺序印在债务旁边。
+
+```
+$ brian evolve --campaign                         # 两个可付欠账（var/steps59）
+file unknown      2 of 2 round(s) do not say which file they measured, so 100% of the totals above …
+queue             2 round(s) can be re-run from the record; 0 already re-measured; all of them would take the share 100% -> 0%
+debt              the largest payable debt is on RCAEval RE1-OB: 1 of 1 round(s) cannot be placed on a sampling (100%), 1 of them can be re-run from the record
+measure next      brian evolve --rerun-unrecorded --rerun-limit 1 pays RCAEval RE1-OB by one round; the command prints the balance at the end
+then              SMD: 1 of 1 round(s) unrecorded (100%), 1 re-runnable
+```
+
+跑一次之后，同一页自己改口：
+
+```
+$ brian evolve --rerun-unrecorded --rerun-limit 1
+debt              RCAEval RE1-OB   1 of 1 round(s) unrecorded (100%), 1 re-runnable
+debt              SMD              1 of 1 round(s) unrecorded (100%), 1 re-runnable
+---- re-running round-rcaeval-unrecorded.json on data/rcaeval/stream-one.json
+  progress         1 of 2 re-measured; 1 left, share 50% -> 0% if the rest run
+drained           1 round(s) retired in this invocation; 1 still in the queue; the unrecorded share 100% -> 50%
+paid              RCAEval RE1-OB x1
+balance           the largest payable debt is now SMD: 1 of 1 round(s) unrecorded (100%), 1 re-runnable
+
+$ brian evolve --campaign
+debt              the largest payable debt is on SMD: 1 of 1 round(s) cannot be placed on a sampling (100%), 1 of them can be re-run from the record
+measure next      brian evolve --rerun-unrecorded --rerun-limit 1 pays SMD by one round; the command prints the balance at the end
+```
+
+注意第二次**没有 `then` 行**：只剩一个可付欠账时，页面不该暗示还有第二步。`then` 的存在与否本身是信息。
+
+三条设计取舍：
+
+1. **plan 用的是队列的顺序，不是按份额重排。** `_debt_plan` 直接取 `_debt_by_domain` 里 `ready` 的行，
+   而 `_order_by_debt` 用的是同一个函数。页面说"下一次付 A"，命令就真的先付 A——**两套顺序会让那句话变成假话**
+   （边界 129）。测试里专门有一条：即便 plan[1] 的份额更大，`measure next` 也必须点名 plan[0]。
+2. **没有可付欠账时也要说话。** `measure next      nothing is payable by re-running: …`——否则读者看到
+   没有 `debt` 行，会以为页面没算出来，而不是"没有可付的账"（边界 100 在另一个方向上的应用）。
+3. **命令字符串来自同一处。** `measure next` 里的 `--rerun-limit 1` 与 `_rerun_limit` 的默认值是一个事实的
+   两个出口；改默认值时两处必须一起改，否则页面会教用户一条不再按预期起作用的命令。
+
+**边界 128：页面点名了一条债务，就必须点名付它的那一步——只写"欠在哪"的页面把"下一条命令是什么"
+留给读者重推，而重推的每一步都是可以放弃的地方。**
+
+**边界 129：页面里的"下一步"必须由命令真正使用的那个顺序生成；页面顺序与命令顺序不一致时，
+"下一步"这句话就是假的，而且它比没有这句话更坏，因为它看起来经过了计算。**
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -3516,3 +3569,8 @@ missing for the next level
 46. **（3.65 已完成）按域的比例进闸门，队列把付款写进记录。** 剩下的一半：让 page 的 `debt` 行同时
     点名第二大欠账户，这样 `--rerun-limit 1` 连跑两次就是可见的两步；并让 `--campaign` 直接列出
     "下一步该测哪一流"的名字，而不是让读者从一张按份额排序的表里自己数。
+
+
+47. **（3.66 已完成）页面点名下一条命令，并说出第二步。** 剩下的：让 `--campaign` 的 `measure next`
+    在可付欠账多于一轮时给出"这一条命令会跑几轮、预计份额落到多少"，即把 `queue` 行与 `plan` 行合成
+    一句可执行的预算，并在 `--json-out` 里给出同样的字段，供脚本读取而不必解析文本。

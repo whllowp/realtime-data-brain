@@ -641,6 +641,17 @@ def _debt_view(root: Path) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str,
     return _row_dict(rows[0] if rows else None), _largest_debt(root)
 
 
+def _debt_plan(root: Path) -> List[Dict[str, Any]]:
+    """Every payable debt in the order the queue pays them, biggest share first (round 59).
+
+    Round 57 made the page name the largest debtor, which answers "where is the debt?" but not "what happens
+    if I pay it?" — the operator runs `--rerun-limit 1`, reads `balance`, and has to work out the next step
+    from a table sorted by a different column. The plan is the queue's own order, so the second entry is what
+    the next invocation pays; an empty plan is a fact worth printing too.
+    """
+    return [_row_dict(row) for row in _debt_by_domain(root) if row[4]]
+
+
 def _largest_debt(root: Path) -> Optional[Dict[str, Any]]:
     """The domain whose share a round could still pay down, or None when nothing is payable (round 57).
 
@@ -1229,7 +1240,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             return 2
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
-                               trend=trend, debt=_largest_debt(root)))
+                               trend=trend, debt=_largest_debt(root), plan=_debt_plan(root)))
         worst, payable = _debt_view(root)
         if args.json_out:
             Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")

@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .evolve import (REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, rejection_provenance,
                      withheld_due, withheld_evidence_age, withheld_records, withheld_staleness)
@@ -500,7 +500,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS,
                     queue: Optional[Mapping[str, Any]] = None,
                     trend: Optional[Mapping[str, Any]] = None,
-                    debt: Optional[Mapping[str, Any]] = None) -> str:
+                    debt: Optional[Mapping[str, Any]] = None,
+                    plan: Optional[Sequence[Mapping[str, Any]]] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -602,6 +603,28 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                      % (debt.get("domain") or "?", int(debt.get("without") or 0),
                         int(debt.get("rounds") or 0), 100.0 * float(debt.get("share") or 0.0),
                         int(debt.get("ready") or 0)))
+    if plan is not None:
+        # Round 59: "where is the debt" and "what does paying it do" are different questions, and the second
+        # one is what an operator needs after `--rerun-limit 1`. The plan is the queue's own order, so the
+        # second entry is what the next invocation pays -- naming it turns two runs into a visible two-step
+        # instead of a table the reader has to re-sort by eye.
+        rest = [row for row in plan if row.get("ready")]
+        if rest:
+            lines.append("measure next      brian evolve --rerun-unrecorded --rerun-limit 1 pays %s by one "
+                         "round; the command prints the balance at the end"
+                         % (rest[0].get("domain") or "?"))
+            if len(rest) > 1:
+                following = rest[1]
+                lines.append("then              %s: %d of %d round(s) unrecorded (%.0f%%), %d re-runnable"
+                             % (following.get("domain") or "?", int(following.get("without") or 0),
+                                int(following.get("rounds") or 0),
+                                100.0 * float(following.get("share") or 0.0),
+                                int(following.get("ready") or 0)))
+        else:
+            # Nothing payable is a result, not a blank: the reader who sees no `debt` line must not conclude
+            # that the page failed to compute one (boundary 100, in the other direction).
+            lines.append("measure next      nothing is payable by re-running: every unrecorded round keeps no "
+                         "candidate definitions or no unique file")
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")
