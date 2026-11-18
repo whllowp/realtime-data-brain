@@ -386,9 +386,23 @@ def _from_stream(record: Mapping[str, Any], source: Optional[str]) -> bool:
     return str((record.get("stream") or {}).get("source") or "") == str(source)
 
 
+def _window_change(candidate: Candidate) -> Optional[int]:
+    """The window this candidate moves the configuration to, or `None` when it does not move it.
+
+    A candidate that changes the window has been measured at a geometry the baseline of its round may not
+    have shared; whether the round measured a reference at the same window is the test `_accepted_measurements`
+    applies, because the candidate alone cannot answer it.
+    """
+    for section, attribute, value in candidate.changes():
+        if section == "digest" and attribute == "rolling_window" and isinstance(value, int):
+            return value
+    return None
+
+
 def _accepted_measurements(rounds: Sequence[Mapping[str, Any]], source: Optional[str] = None,
                            rules: Optional[EvolveRules] = None,
-                           shape: Optional[Mapping[str, Any]] = None) -> List[Candidate]:
+                           shape: Optional[Mapping[str, Any]] = None,
+                           dropped: Optional[List[int]] = None) -> List[Candidate]:
     """Candidates accepted at least once on `source`, most recent first.
 
     "Accepted" is the ledger's opinion, not the reader's: an accepted change is the only measured claim
@@ -421,6 +435,17 @@ def _accepted_measurements(rounds: Sequence[Mapping[str, Any]], source: Optional
                 continue
             candidate = Candidate.from_dict(trial.get("candidate") or {})
             if candidate.name in seen:
+                continue
+            window = _window_change(candidate)
+            if window is not None and not (record.get("references") or {}).get(str(window)):
+                # Round 31: an acceptance of a window change, decided against a baseline measured at
+                # *another* window, is not evidence that the change moved anything -- that is the
+                # comparison boundary 68 forbids, and the record measured no reference at the candidate's
+                # own geometry to re-decide it against (rounds before 31 measured none). Round 30's three
+                # such acceptances made the next round grow neighbours around a configuration today's
+                # rules refuse as a tie, and every one of those neighbours cost a measurement.
+                if dropped is not None:
+                    dropped.append(window)
                 continue
             if rules is not None and baseline is not None:
                 try:
@@ -512,15 +537,25 @@ def propose(rounds: Sequence[Mapping[str, Any]], *, entries: Optional[Sequence[C
         return _from_catalogue(chosen.name, chosen.reason, catalogue_entries, active_space,
                                source or "", deployed, reshaped)
 
-    seeds = _accepted_measurements(rounds, source=source, rules=rules, shape=shape)
+    unmeasured: List[int] = []
+    seeds = _accepted_measurements(rounds, source=source, rules=rules, shape=shape,
+                                   dropped=unmeasured)
     if not seeds:
-        # Nothing has ever been accepted, so there is no measured point to search around; the catalogue
+        # Nothing usable has been accepted, so there is no measured point to search around; the catalogue
         # is still the only source of claims. Saying so is better than generating neighbours of values
-        # that have never moved anything.
+        # that have never moved anything -- but the sentence has to name *why* the acceptances are unusable,
+        # or a ledger full of them reads as a ledger with none.
         other_sampling = sum(
             1 for record in rounds
             if _from_stream(record, source) and not _same_shape(record.get("stream"), shape))
-        if other_sampling:
+        if unmeasured:
+            windows = ", ".join(str(window) for window in sorted(set(unmeasured)))
+            reason = (
+                "%s — but the %d accepted magnitude(s) at window(s) %s were decided against a baseline at "
+                "another geometry and their round measured no reference at their own, so they are not "
+                "measured points here and the catalogue stays the source"
+                % (chosen.reason, len(unmeasured), windows))
+        elif other_sampling:
             reason = (
                 "%s — but no change has been accepted here at this sampling%s: the %d recorded round(s) "
                 "measured a stream where a window covered other traffic, and a magnitude does not carry "

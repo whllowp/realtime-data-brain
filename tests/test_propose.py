@@ -26,10 +26,20 @@ from brian.propose import (
 
 
 def _record(*candidates: Candidate, accepted: bool = True, source: str = "SMD") -> dict:
+    # A round that measured a candidate changing the window also measured the deployment at that window
+    # (round 31); without it the acceptance cannot be re-decided at the geometry the change was made on,
+    # so it is not a seed. These fixtures record the reference the round would have taken.
+    references = {}
+    for candidate in candidates:
+        for section, field, value in candidate.changes():
+            if section == "digest" and field == "rolling_window" and isinstance(value, int):
+                references[str(value)] = {"candidate": "baseline@%d" % value,
+                                          "recall_at_budget": 0.10, "fpr_at_budget": 0.05}
     return {
         "finished_at": "2026-01-01T00:00:00+00:00",
         "stream": {"source": source},
         "accepted": [candidate.name for candidate in candidates] if accepted else [],
+        "references": references,
         "trials": [
             {"candidate": candidate.to_dict(),
              "verdict": {"candidate": candidate.name, "accepted": accepted, "rule": "cost",

@@ -1580,6 +1580,50 @@ x host-rolling-rank-0-85-200@hint286 reaches 0.427 of the promised 0.507 at the 
 
 ---
 
+### 3.38 同一几何才能相减
+
+第 31 轮要修的不是一个坏候选，而是**比较本身**。第 30 轮在 `data/smd/stream-check.json` 上接受了一个把窗口从 200 改到 286 的候选，理由是 recall@b 从 0.297 涨到 0.427（+44%）。但同一轮里那个只改窗口、什么都不动的 reshape 候选也测到 **0.427**——那 +44% 全在几何上，不在检测能力上。
+
+原因在 `run_round`：它对所有候选只测一次基线（`measure(settings, None, ...)`），`decide()` 就拿这个基线去比每一个候选。候选把窗口从 200 换成 286 时，基线仍然是 200 上的 0.297，于是"这个候选比基线好"实际在说"286 这个几何比 200 这个几何好"。
+
+修法只有一句：**用候选自己的几何去测基线**。`configuration_window(settings, candidate)` 把候选套到设置上读出滚动窗口；窗口不同就测一个 `baseline@<window>`（只改 `digest.rolling_window` 的候选），每个窗口只测一次，与候选一起写进轮次记录（`references`）。表里于是多出几行：
+
+```
+baseline                0.297   0.092     3356     11861     100% -
+baseline@143            0.219   0.097     3355     16164     100% reference
+baseline@286            0.427   0.080     3356      8170     100% reference
+baseline@572            0.135   0.054     3351     19973     100% reference
+```
+
+同一张表里，第 30 轮被接受的三个"邻居"（`@hint286-0-9`、`-0-8`、`-0-75`）在 286 的基线下全部变成平手，理由一致地是 `3356 -> 3356 tokens/report is below the 5% bar and recall at the budget did not rise by 5%`。它们从来不是三个改进，而是**同一次几何改动的三种写法**；差别只在 shipped 阈值那一列（0.260 / 0.417 / 0.536）。
+
+**第二处缺陷：种子。** 修好基线之后，下一轮仍然围着这三个"被接受的"邻居长出三个新候选，每个都要花一次测量。原因是 `_accepted_measurements()` 用记录里的基线重判——而记录里的基线还是 200 那个，于是旧的接受原样复现。修法是让这类接受不能当种子：候选改动了 `digest.rolling_window`、而它的记录里没有那个窗口的 `references`，它就不是"本几何下的测量点"，跳过；还要说清为什么，否则一份满是接受的账本会读成"这里什么都没被接受过"：
+
+```
+why the last round on SMD accepted host-rolling-rank-0-85-200@hint286-0-8-572, so those
+magnitudes are measured points — but the 10 accepted magnitude(s) at window(s) 286 were
+decided against a baseline at another geometry and their round measured no reference at
+their own, so they are not measured points here and the catalogue stays the source
+```
+
+**第三处：这一轮的基线测不了这条承诺。** 表格上方现在先印承诺本身，用的还是第 26 轮那条三结局判定：
+
+```
+in force          v020 promised recall 0.507 at the 10% budget
+on this stream    recall 0.297  unmeasurable
+                  the re-check measured 1235 scored windows against the 828 the claim was made on (1.49x) ...
+                  so this round's baseline is not the configuration the promise is about: a gain
+                  over it is a gain on this sampling, not a restored promise (boundary 68).
+```
+
+三处都进记录：轮次 JSON 有 `references` 与 `claim`（版本、承诺、本轮测到、裁决、原因、年龄、是否到期），所以下一轮能重放"当时用哪个几何比了什么"。修好之后同一条流上跑出两轮：第一轮（`round-20261118T012841Z.json`，references 143/286/572）只在 572 的基线下接受一个 `operational` 候选（92 → 114 告警/千窗，召回 0.073 → 0.115）；第二轮（`013236Z`，references 100/286）提议来源退回目录，15 个候选里接受 `events-8`（−27.2%）、`events-4`（−36.3%）、`host-features-3`（−13.4%）与两个成本出口（每事件 11861 → 11060 / 11007）。
+
+**边界 68：会移动测量几何的改动，只能记它在两边共同几何上的增量。** 一个候选把窗口从 200 换到 286 时，0.297 → 0.427 是采样密度的性质，不是候选的性质；基线取错，循环就会把几何记成检测收益。这与第 28 轮"62% 的缺口是几何"是同一件事的两面：那一轮证明**差距**可以由几何解释，这一轮证明**收益**也可以。
+
+**边界 69：在预算上打平的不是多个改进。** 三个邻居在 10% 预算下完全相同（0.427 / 0.080），差别只在 shipped 阈值（0.260 / 0.417 / 0.536），而 shipped 点是另一个决定（第 7 轮的 `operational` 出口）。把它们记成三次接受，账本会虚报改进数量——接受计数从此必须与"当时比较的基线是否同一几何"一起读。
+
+**边界 70：记录里没有本几何的参照基线，那次接受就不是测量点。** 一条旧接受是在"另一几何下的基线"上做出的；`--audit` 能说出"今天的规则会怎么判"，但重判需要那次没做过的测量。所以这类接受只能被排除在种子之外，不能被"重判为接受"——一个无法重建比较的记录，只能当历史，不能当证据。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -1722,3 +1766,4 @@ missing for the next level
 18. **（3.36 已完成）判词会过期，`--verify` 因此会回头再挑一次。** `verification_age_days` + `Promotion.due` + `--expiry-days`（默认 `CLAIM_EXPIRY_DAYS = 14`）把"从未复核"与"复核过期"合到同一条选择条件里，`format_promotions`/`--campaign` 打印年龄与 `expired N of them are older than X day(s)`。演示时发现并修掉第二个缺陷：不带 `--at-hint` 的普通复核会把 `shape` 写成 `null`，于是战役表上真被测出来的数字消失——现在携带旧 shape 并标 `shape_from`。边界 63（时效属于判词不属于版本）、64（复核不等于重新裁决）留下两条口径。剩下的路：**让提议器主动提出"按另一条流的密度折算"的形状**——`rescale_hint` 已经能算出 286，但循环还只会等人用 `--at-hint` 去问；以及**把到期做成一轮的输入**（到期版本自动进入下一轮候选，而不是等一次手动 `--verify`）。
 
 19. **（3.37 已完成）提示变成提案，并且按承诺而不是按基线判。** reshape 作为候选进入每一轮（`@hintN`，带 `promise` 与 `provenance`），`decide()` 用 `reshape` 规则回答"它还能不能兑现当初的承诺"：这一轮是 **reject**——0.427 对承诺 0.507，"恢复的是可比性，不是承诺"，在役配置不动；同一批邻居按 `quality` 被接受（0.297 → 0.427），两个理由都进账本。跑这一轮抓到五个缺陷：承诺只长在候选上而没随测量走、`from_dict` 丢掉承诺、种子来自旧规则的接受、跨密度的量级被当种子、以及换个名字的同一条改动绕过了承诺规则（边界 65/66/67）。剩下的路：**把到期做成一轮的输入**（§6 第 18 条的另一条路——到期版本自动进入候选，而不是等一次手动 `--verify`），以及**把接受范围绑到采样上**（现在一次接受属于哪条流靠 `source`，属于哪种密度靠 `_same_shape` 现场比，两者都不是记录里的一等字段）。
+20. **（3.38 已完成）同一几何才能相减。** `run_round` 现在按候选自己的窗口取基线（`baseline@<window>`，每个几何只测一次，写进 `references`），于是"把窗口从 200 换成 286"不再被记成 +44% 的检测收益：第 30 轮那三个"被接受的邻居"在 286 的基线下全部是平手，而 reshape 仍按承诺判为 reject（边界 68/69）。提议器同时学会不把"记录里没有本几何参照"的旧接受当种子（边界 70）。剩下的路：把几何写进 `RoundResult.baseline` 本身（`window`/`cadence_s` 与那个 `Measurement` 同层），让 `--audit` 能直接标出"这次的比较无法重建"，而不是靠推断。

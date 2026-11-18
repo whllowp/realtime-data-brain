@@ -143,6 +143,10 @@ def _round(*, stream, accepted_name="host-rolling-rank-0-85-200", rule="quality"
     return {
         "finished_at": "2026-11-18T00:03:10+00:00",
         "stream": dict(stream),
+        # Round 31: the round measured the deployment at the window the trial moves to, so the acceptance
+        # can be re-decided at the geometry the change was made on.
+        "references": {"286": {"candidate": "baseline@286", "recall_at_budget": trial_recall,
+                               "fpr_at_budget": 0.08}},
         "baseline": {"candidate": "baseline", "recall": 0.30, "fpr": 0.10, "precision": 0.6,
                      "reports": 100, "tokens_per_report": 3355.0, "tokens_per_window": 40.0,
                      "windows": stream.get("windows", 1),

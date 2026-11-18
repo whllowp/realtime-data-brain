@@ -1433,6 +1433,26 @@ class RoundResult:
     be told apart from two rounds that were asked different questions.
     """
 
+    references: Dict[str, Measurement] = field(default_factory=dict)
+    """Baselines measured at *other* windows, keyed by the window.
+
+    Round 31: a candidate that moves `digest.rolling_window` changes what a window means, so it cannot be
+    credited against the baseline measured at the old geometry -- that credits the geometry change rather
+    than the change the candidate makes. On a stream sampled differently from the one the deployment's
+    claim was made on, the whole "gain" can be the geometry: on SMD's 1.49x stream the in-force version
+    reads 0.297 at window 200 and 0.427 at the comparable window 286, and a candidate that merely moved
+    the window was accepted for 0.297 -> 0.427 while changing nothing about the promise.
+    """
+
+    claim: Dict[str, Any] = field(default_factory=dict)
+    """What the configuration in force promised, and whether this stream can test it.
+
+    Filled by the caller (the round cannot ask `promote` without a circular import): the version, the
+    promise, what this round measured, the verdict and its reason. A round whose baseline cannot be
+    compared with the promise is still a valid measurement of *this sampling*, but it is not evidence
+    about the promise, and the record has to say so.
+    """
+
     @property
     def accepted(self) -> List[str]:
         return [verdict.candidate for _c, _m, verdict in self.trials if verdict.accepted]
@@ -1456,6 +1476,9 @@ class RoundResult:
             ],
             "accepted": self.accepted,
             "ceiling": self.ceiling,
+            "references": {key: measurement.to_dict()
+                           for key, measurement in sorted(self.references.items())},
+            "claim": self.claim or None,
             # Absent in rounds written before the mechanism became mutable; `None` says "this round was
             # proposed by whatever the code did at the time", which is exactly what a reader should
             # conclude about them.
@@ -1478,12 +1501,34 @@ def rules_fingerprint(rules: EvolveRules) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
+def configuration_window(settings: Settings, candidate: Optional[Candidate] = None) -> Optional[int]:
+    """The rolling window this configuration measures with, or `None` when it does not roll.
+
+    One place decides what "the same geometry" means: the settings as they would be after applying the
+    candidate. Comparing window counts across configurations is the same mistake as comparing them
+    across streams (round 27), because the window *is* how much traffic a sample covers.
+    """
+    applied = candidate.apply(settings) if candidate is not None else settings
+    return getattr(applied.digest, "rolling_window", None)
+
+
+def _reference_candidate(window: int) -> Candidate:
+    """The deployment restricted to a different window: the baseline a geometry change is measured against."""
+    return Candidate(
+        name="baseline@%d" % window,
+        hypothesis="the deployment at the window a candidate changes to, so the comparison does not "
+                   "credit the geometry change to the candidate",
+        section="digest", field="rolling_window", value=window,
+    )
+
+
 def run_round(settings: Settings, streams: Sequence[Stream],
               selected: Optional[Sequence[Candidate]] = None,
               rules: Optional[EvolveRules] = None,
               source: str = "demo",
               on_candidate: Optional[Callable[[Candidate, Measurement, Verdict], None]] = None,
               proposal: Optional[Dict[str, Any]] = None,
+              claim: Optional[Mapping[str, Any]] = None,
               ) -> RoundResult:
     """One full pass: build the reference pool, measure the baseline, then each candidate.
 
@@ -1505,11 +1550,31 @@ def run_round(settings: Settings, streams: Sequence[Stream],
     baseline = measure(settings, None, streams, pool, budget=active_rules.fpr_budget,
                        alert_budget=active_rules.alert_budget)
 
+    base_window = configuration_window(settings)
+    references: Dict[str, Measurement] = {}
+
+    def baseline_for(candidate: Candidate) -> Measurement:
+        """The baseline this candidate must be compared against.
+
+        Same geometry: the deployment as it stands. Different window: the deployment *at that window*,
+        measured once per distinct window and kept in the record. A candidate is then credited only with
+        what it adds on the geometry both numbers share.
+        """
+        window = configuration_window(settings, candidate)
+        if window is None or window == base_window:
+            return baseline
+        key = str(window)
+        if key not in references:
+            references[key] = measure(settings, _reference_candidate(window), streams, pool,
+                                      budget=active_rules.fpr_budget,
+                                      alert_budget=active_rules.alert_budget)
+        return references[key]
+
     trials: List[Tuple[Candidate, Measurement, Verdict]] = []
     for candidate in chosen:
         trial = measure(settings, candidate, streams, pool, budget=active_rules.fpr_budget,
                         alert_budget=active_rules.alert_budget)
-        verdict = decide(baseline, trial, active_rules, veto=candidate.veto)
+        verdict = decide(baseline_for(candidate), trial, active_rules, veto=candidate.veto)
         trials.append((candidate, trial, verdict))
         if on_candidate is not None:
             on_candidate(candidate, trial, verdict)
@@ -1523,6 +1588,8 @@ def run_round(settings: Settings, streams: Sequence[Stream],
         trials=trials,
         ceiling=ceiling,
         proposal=dict(proposal or {}),
+        references=references,
+        claim=dict(claim or {}),
     )
 
 
@@ -1703,6 +1770,23 @@ def format_round(result: RoundResult) -> str:
         for reason_line in _wrap("why               "
                                  + (result.proposal.get("reason") or ""), 96):
             lines.append(reason_line)
+    if result.claim:
+        claim = result.claim
+        promise = claim.get("promise")
+        measured = claim.get("measured")
+        lines.append("in force          v%03d promised recall %s at the %.0f%% budget"
+                     % (int(claim.get("version") or 0),
+                        "n/a" if promise is None else "%.3f" % promise,
+                        100 * result.rules.fpr_budget))
+        lines.append("on this stream    recall %s  %s"
+                     % ("n/a" if measured is None else "%.3f" % measured,
+                        claim.get("verdict") or "?"))
+        for line in _wrap("                  " + (claim.get("reason") or ""), 96):
+            lines.append(line)
+        if claim.get("verdict") != "verified":
+            lines.append("                  so this round's baseline is not the configuration the promise")
+            lines.append("                  is about: a gain over it is a gain on this sampling, not a")
+            lines.append("                  restored promise (boundary 68).")
     lines.append("objective         accept a Pareto move: tokens/report down >= %.0f%%, recall at"
                  " <=%.0f%% false positives up >= %.0f%%, or a recorded configuration that becomes"
                  " deployable; never at a cost of another column"
@@ -1726,9 +1810,16 @@ def format_round(result: RoundResult) -> str:
         )
 
     lines.append(row(result.baseline, "baseline", "-"))
+    for key in sorted(result.references, key=lambda value: int(value)):
+        lines.append(row(result.references[key], "baseline@%s" % key, "reference"))
     for candidate, measurement, verdict in result.trials:
         lines.append(row(measurement, candidate.name, "accept" if verdict.accepted else "reject"))
     lines.append("")
+    if result.references:
+        lines.append("a candidate that changes the window is compared against 'baseline@<window>', not")
+        lines.append("against the deployment as it stands: the same configuration at another window is a")
+        lines.append("different amount of traffic per sample, and crediting that to the candidate would")
+        lines.append("report a geometry change as a detection gain (boundary 68).")
     lines.append("recall@b: best recall at <=%.0f%% false positives, the cut chosen per configuration, because"
                  % (100 * result.rules.fpr_budget))
     lines.append("an absolute threshold was calibrated on another domain and is not comparable here.")

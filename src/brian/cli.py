@@ -553,6 +553,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # promise instead of against a baseline it was never meant to beat.
     stream_shape = summarise(streams)
     reshaped = None
+    owner = None
     if not args.from_default and deployed:
         versions = {str(version) for version in sources.values() if version}
         owners = [item for item in promotions_for_domain(load_promotions(root), domain)
@@ -618,8 +619,25 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
            % (totals["streams"], totals["windows"], totals["scored"], totals["anomalous"],
               totals["events"]))
     _print("measuring baseline…")
+    # Round 31: the round states what the configuration in force promised and whether its own stream can
+    # test that promise. A round whose baseline is not comparable is a measurement of this sampling, not
+    # evidence about the claim, and the difference decides how a reader may use the table below.
+    claim_record: Dict[str, Any] = {}
     result = run_round(settings, streams, selected=selected, rules=rules, source=source,
-                       proposal=proposal_record)
+                       proposal=proposal_record, claim=claim_record)
+    if owner is not None:
+        verdict, reason = claim_check(owner.claim, result.baseline, rules,
+                                      recorded_stream=owner.stream, checked_stream=stream_shape)
+        age = verification_age_days(owner.verification)
+        result.claim = {
+            "version": owner.version,
+            "promise": owner.claim.recall_at_budget,
+            "measured": result.baseline.recall_at_budget,
+            "verdict": verdict,
+            "reason": reason,
+            "age_days": age,
+            "due": owner.due(days=args.expiry_days),
+        }
     _print("")
     _print(format_round(result))
 
