@@ -167,6 +167,8 @@ class Campaign:
     in_force_cleared: int = 0
     # Round 86: of those in force on a copied end, the ones the gate now charges.
     in_force_stale: int = 0
+    #: Round 89: clearings whose check ran and could not test the claim. Recorded, and answering nothing.
+    in_force_untested: int = 0
     #: Round 87: the clearings the store remembers, split by what cleared them. An unexplained clearing is a
     #: debt that stopped being visible, not a debt that was paid, so the two are never added together.
     in_force_history: Dict[str, Any] = field(default_factory=dict)
@@ -267,6 +269,7 @@ class Campaign:
             "in_force_cleared": self.in_force_cleared,
             "in_force_stale": self.in_force_stale,
             "in_force_cleared_history": dict(self.in_force_history),
+            "in_force_untested": self.in_force_untested,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -511,6 +514,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.in_force_cleared = len(report.in_force_cleared)
     result.in_force_stale = len(report.in_force_stale)
     result.in_force_history = dict(in_force_history or {})
+    result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
     # streams could see "7 verdicts would change today" and not know which one owes them.
@@ -895,11 +899,16 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                                   for item in result.in_force)))
     if result.in_force_stale:
         lines.append("links             %d of them have stood past the %.0f-day grace period with no verdict "
-                     "newer than the objection: --strict exits 1 until one is measured again"
+                     "that could test the claim: --strict exits 1 until one is measured again"
                      % (result.in_force_stale, IN_FORCE_GRACE_DAYS))
     if result.in_force_cleared:
         lines.append("links             %d version(s) in force were disputed earlier and no longer are"
                      % result.in_force_cleared)
+    if result.in_force_untested:
+        # Round 89: a comparison that compared nothing is recorded, and it answers nothing. Printed apart
+        # from the measured count so a failed comparison can never look like a paid debt.
+        lines.append("links             %d of those clearings rested on a check that could not test the "
+                     "claim: recorded, and they answer nothing" % result.in_force_untested)
     if result.in_force_history and int(result.in_force_history.get("total") or 0):
         record = result.in_force_history
         lines.append("links             %d dispute(s) left the in-force list: %d cleared by a re-measurement "

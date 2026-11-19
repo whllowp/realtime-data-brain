@@ -244,6 +244,26 @@ def _checked_at(promotions: Sequence["Promotion"]) -> Dict[int, Optional[datetim
     return moments
 
 
+def _tested_at(promotions: Sequence["Promotion"]) -> Dict[int, Optional[datetime]]:
+    """When each deployed version was last measured *in a way that could test the claim* (round 89).
+
+    `unmeasurable` is a statement about this build's ability to compare, not about the deployed version, so
+    it must not be able to answer an objection -- nor to displace the record of an earlier failed attempt.
+    """
+    moments: Dict[int, Optional[datetime]] = {}
+    for promotion in promotions:
+        verification = promotion.verification or {}
+        if str(verification.get("verdict") or "") == UNMEASURABLE:
+            continue
+        moment = _parse_moment(verification.get("checked_at"))
+        if moment is None:
+            continue
+        previous = moments.get(int(promotion.version))
+        if previous is None or moment > previous:
+            moments[int(promotion.version)] = moment
+    return moments
+
+
 def observe_in_force_disputes(root: Path, rows: Sequence[Mapping[str, Any]],
                               now: Optional[datetime] = None,
                               promotions: Sequence["Promotion"] = (),
@@ -263,6 +283,7 @@ def observe_in_force_disputes(root: Path, rows: Sequence[Mapping[str, Any]],
                str(item.get("kind") or ""))
         seen[key] = item
     checks = _checked_at(promotions)
+    tested_at = _tested_at(promotions)
     aged: List[Dict[str, Any]] = []
     for row in rows:
         key = (str(row.get("domain") or "default"), int(row.get("version") or 0), str(row.get("kind") or ""))
@@ -272,18 +293,30 @@ def observe_in_force_disputes(root: Path, rows: Sequence[Mapping[str, Any]],
         # A stored stamp that cannot be read is replaced by "now" rather than treated as old: guessing that a
         # dispute is ancient is how a warning turns into a charge nobody can explain.
         first_moment = _parse_moment(first) or moment
-        aged.append({
+        aged_row = {
             "domain": key[0], "version": key[1], "broken": bool(row.get("broken")),
             "kind": key[2], "detail": row.get("detail"),
             "first_seen": first, "last_seen": moment.isoformat(), "observations": observations,
             "age_days": round((moment - first_moment).total_seconds() / 86400.0, 2),
-        })
+        }
+        # Round 89: the fact that someone tried and could not compare belongs to the observation, not to the
+        # run that happened to notice it. It is dropped once a real measurement supersedes it.
+        attempt = dict((previous or {}).get("untested") or {})
+        if attempt:
+            attempt_moment = _parse_moment(attempt.get("at"))
+            answered = tested_at.get(key[1])
+            if attempt_moment is not None and (answered is None or answered < attempt_moment):
+                aged_row["untested"] = attempt
+        aged.append(aged_row)
     cleared: List[Dict[str, Any]] = []
     for key, item in seen.items():
         first = str(item.get("first_seen") or "") or moment.isoformat()
         first_moment = _parse_moment(first)
         checked = checks.get(key[1])
-        measured = checked is not None and (first_moment is None or checked >= first_moment)
+        # Round 89: only a verdict that could test the claim pays the debt; a failed comparison, however
+        # recent, leaves it exactly where it was.
+        answered = tested_at.get(key[1])
+        measured = answered is not None and (first_moment is None or answered >= first_moment)
         entry = {
             "domain": key[0], "version": key[1], "kind": key[2],
             "first_seen": first, "last_seen": str(item.get("last_seen") or ""),
@@ -317,7 +350,8 @@ def in_force_history(root: Path) -> Tuple[List[Dict[str, Any]], int]:
 
 
 def record_clearing(root: Path, version: int, now: Optional[datetime] = None, verdict: str = "",
-                    reason: str = "") -> List[Dict[str, Any]]:
+                    reason: str = "", tested: bool = True,
+                    attempt_reason: str = "") -> List[Dict[str, Any]]:
     """Write the clearing a measurement just earned, instead of waiting for a later audit to notice absence.
 
     Round 87 deduced every clearing from a comparison of timestamps, which means the fact exists only while the
@@ -327,6 +361,12 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
 
     Only a copied end is cleared. A contradiction is not answered by measuring the version -- the two books still
     disagree about which end is the evidence -- and it stays observed until someone fixes the records.
+
+    Round 89: a check that *could not test the claim* (`unmeasurable`) is recorded but answers nothing. It is a
+    statement about this build's ability to compare, not about the deployed version, so the observation keeps
+    its first sighting and keeps running -- otherwise a failed comparison would reset the clock and make an
+    unresolved debt look newly arrived (boundary 188). The attempt is stored on the row, so the page can say
+    what was tried and why it did not count.
     """
     moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
     observed, cleared_history, trimmed = _read_in_force_store(root)
@@ -351,11 +391,18 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             "checked_at": moment.isoformat(),
             "cited_by": CLEARED_CITED_BY_MEASUREMENT,
             "verdict": str(verdict or ""),
+            "tested": bool(tested),
         }
         if reason:
             entry["reason"] = str(reason)
         entries.append(entry)
         cleared_history.append(entry)
+        if not tested:
+            # Recorded, not answered: the row stays observed with its clock running (round 89).
+            attempted = dict(item)
+            attempted["untested"] = {"at": moment.isoformat(), "verdict": str(verdict or ""),
+                                     "reason": str(attempt_reason or reason or "")}
+            keep.append(attempted)
     if not entries:
         return []
     if len(cleared_history) > IN_FORCE_HISTORY_LIMIT:
@@ -388,9 +435,12 @@ def cleared_summary(entries: Sequence[Mapping[str, Any]], trimmed: int = 0) -> D
                                    {"measured": 0, "unexplained": 0})
         row["measured" if item.get("by") == CLEARED_BY_MEASUREMENT else "unexplained"] += 1
     written = sum(1 for item in entries if item.get("cited_by") == CLEARED_CITED_BY_MEASUREMENT)
+    # Round 89: a clearing whose check could not test the claim is its own count. Folding it into `measured`
+    # would let a failed comparison read as an answered objection.
+    untested = sum(1 for item in entries if item.get("tested") is False)
     return {"total": len(entries), "measured": len(measured), "unexplained": len(unexplained),
             "median_age_days": round(middle, 2), "trimmed": int(trimmed),
-            "written": written, "by_domain": dict(sorted(by_domain.items()))}
+            "written": written, "untested": untested, "by_domain": dict(sorted(by_domain.items()))}
 
 
 def stale_in_force_disputes(rows: Sequence[Mapping[str, Any]], promotions: Sequence["Promotion"],
@@ -412,7 +462,11 @@ def stale_in_force_disputes(rows: Sequence[Mapping[str, Any]], promotions: Seque
         first = _parse_moment(row.get("first_seen"))
         verification = checks.get(int(row.get("version") or 0))
         checked = _parse_moment((verification or {}).get("checked_at"))
-        if checked and (first is None or checked >= first):
+        # Round 89: only a verdict that tested the claim answers the objection. An `unmeasurable` check ran and
+        # compared nothing, so the debt is exactly as old as it was -- and re-running the same command on the
+        # same stream will compare nothing again.
+        tested = str((verification or {}).get("verdict") or "") != UNMEASURABLE
+        if checked and tested and (first is None or checked >= first):
             continue
         stale.append(dict(row))
     return stale

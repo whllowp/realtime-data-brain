@@ -176,8 +176,8 @@ def test_the_audit_page_marks_the_stale_row_and_says_so(tmp_path):
     rows, cleared = observe_in_force_disputes(tmp_path, _rows(tmp_path))
     stale = stale_in_force_disputes(rows, load_promotions(tmp_path))
     page = format_audit(audit(tmp_path, in_force=rows, in_force_cleared=cleared, in_force_stale=stale))
-    assert "[stale: no verdict newer than the objection]" in page
-    assert "1 copy(ies) have stood longer than 14 day(s) with no verdict newer than the" in page
+    assert "[stale: no verdict that could test the claim]" in page
+    assert "1 copy(ies) have stood longer than 14 day(s) with no verdict that could test the" in page
     assert "`--strict` asks for a re-measurement of the deployed version" in page
 
 
@@ -223,7 +223,7 @@ def test_the_campaign_prints_the_age_and_the_stale_line(tmp_path):
     assert payload["in_force_cleared"] == 0
     page = "\n".join(cli_lines(tmp_path, rows, cleared, stale))
     assert "v020 (20.0 day(s))" in page
-    assert "have stood past the 14-day grace period with no verdict newer than the objection" in page
+    assert "have stood past the 14-day grace period with no verdict that could test the claim" in page
 
 
 def cli_lines(root: Path, rows, cleared, stale):

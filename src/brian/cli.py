@@ -291,7 +291,7 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  ceiling_missing: int = 0, ceiling_rounds: int = 0, ceiling_payable: int = 0,
                  max_ceiling_debt: Optional[float] = None,
                  broken_links: int = 0, in_force: int = 0,
-                 in_force_stale: int = 0) -> int:
+                 in_force_stale: int = 0, in_force_untested: int = 0) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -346,9 +346,16 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("")
         _print("%d version(s) in force have sat on a copied record for longer than the %.0f-day grace period"
                % (in_force_stale, IN_FORCE_GRACE_DAYS))
-        _print("with no re-measurement newer than the objection, so --strict exits 1:")
+        _print("with no re-measurement that could test the claim, so --strict exits 1:")
         _print("`brian evolve --verify --verify-version <n> --stream-file <the file that version measured> --accept-copied`")
         _print("clears it, because the copy is about the record, not about the number.")
+        if in_force_untested:
+            # Round 89: the command above was already run on at least one of these, and it measured nothing
+            # comparable. Naming it again without saying so is the charge that can never be cleared.
+            _print("%d of them were measured and the check could not test the claim: measuring again on the"
+                   % in_force_untested)
+            _print("same stream will compare nothing again. Use the file that version recorded, or retire the")
+            _print("version whose claim cannot be checked (boundary 188).")
     if broken_links:
         return 2
     if unreconstructable:
@@ -2217,7 +2224,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             ceiling_payable=ceiling_payable,
                             max_ceiling_debt=getattr(args, "max_ceiling_debt", None),
                             broken_links=result.broken_links, in_force=in_force_broken,
-                            in_force_stale=len(in_force_stale_rows))
+                            in_force_stale=len(in_force_stale_rows),
+                            in_force_untested=sum(1 for row in in_force_stale_rows if row.get("untested")))
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -2351,7 +2359,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             ceiling_payable=ceiling_payable,
                             max_ceiling_debt=getattr(args, "max_ceiling_debt", None),
                             broken_links=result.broken_links, in_force=in_force_broken,
-                            in_force_stale=len(in_force_stale_rows))
+                            in_force_stale=len(in_force_stale_rows),
+                            in_force_untested=sum(1 for row in in_force_stale_rows
+                                                  if row.get("untested")))
 
     if args.grade:
         try:
@@ -2648,7 +2658,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         copied_measured: List[Tuple[str, str]] = []
         # Round 88: the versions this run actually measures, with the moment of the check. A version that was
         # skipped (a contradicted record, an expired definition) measured nothing and clears nothing.
-        measured_versions: List[Tuple[int, str, str]] = []
+        measured_versions: List[Tuple[int, str, str, str]] = []
         for promotion in promotions:
             block = provenance_block(root, promotion.version)
             if block is not None and block[0] == LINK_BROKEN:
@@ -2700,12 +2710,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # Retracting is not stacking, so a copied end does not block it.
                 revert_promotion(root, promotion, domain=domain)
                 write_verification(root, promotion, payload, reverted_at=_stamp())
-                measured_versions.append((promotion.version, payload["checked_at"], verdict))
+                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason))
                 _print("  v%03d  %s  FAILED and reverted: %s" % (promotion.version,
                                                                  promotion.change, reason))
             elif verdict == VERIFIED:
                 write_verification(root, promotion, payload)
-                measured_versions.append((promotion.version, payload["checked_at"], verdict))
+                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason))
                 if copied:
                     _print("  v%03d  %s  %s (not applied: the record's link was repaired from one end, and a "
                            "promise stacked on it would inherit that copy)"
@@ -2740,7 +2750,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                         "candidate": shape.describe(),
                     }
                 write_verification(root, promotion, payload)
-                measured_versions.append((promotion.version, payload["checked_at"], verdict))
+                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason))
                 _print("  v%03d  %s  unmeasurable: %s" % (promotion.version, promotion.change, reason))
                 hint = rescale_hint(promotion, promotion.stream, checked_stream)
                 if hint:
@@ -2749,17 +2759,31 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 if note:
                     _print(note)
         cleared_now: List[Dict[str, Any]] = []
-        for version, checked_at, verdict in measured_versions:
+        for version, checked_at, verdict, why in measured_versions:
             cleared_now.extend(record_clearing(root, version, now=checked_at, verdict=verdict,
-                                               reason="measured again by --verify"))
-        if cleared_now:
+                                               reason="measured again by --verify",
+                                               tested=verdict != UNMEASURABLE,
+                                               attempt_reason=why))
+        answered = [entry for entry in cleared_now if entry.get("tested") is not False]
+        attempted = [entry for entry in cleared_now if entry.get("tested") is False]
+        if answered:
             _print("")
-            _print("cleared         %d in-force observation(s) were answered by this check:" % len(cleared_now))
-            for entry in cleared_now:
+            _print("cleared         %d in-force observation(s) were answered by this check:" % len(answered))
+            for entry in answered:
                 age = entry.get("age_days")
                 _print("  %-16s v%03d  %-13s stood %s"
                        % (entry["domain"], int(entry["version"]), entry["kind"],
                           "an unknown time" if age is None else "%.1f day(s)" % float(age)))
+        if attempted:
+            _print("")
+            _print("not answered  %d in-force observation(s) were measured, but the check could not test"
+                   " the claim:" % len(attempted))
+            for entry in attempted:
+                _print("  %-16s v%03d  %-13s %s"
+                       % (entry["domain"], int(entry["version"]), entry["kind"],
+                          str(entry.get("reason") or "no reason recorded")))
+            _print("The row keeps its first sighting: a comparison that compared nothing is not an answer,")
+            _print("and it must not reset the clock it was supposed to close (boundary 188).")
             _print("A measurement answers the objection, not the copy: the record is unchanged, so the next")
             _print("audit observes it again with today's date, and this verdict is what keeps it out of the")
             _print("stale charge (boundary 185).")

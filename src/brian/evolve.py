@@ -3294,7 +3294,7 @@ class Audit:
     # Round 86: disputes this run no longer sees. A fact that stopped being true is reported once -- by name --
     # and then forgotten, so the page never remembers a standing debt that has cleared.
     in_force_cleared: List[Dict[str, Any]] = field(default_factory=list)
-    # Round 86: the copies that have stood past the grace period with no verdict newer than the objection. The
+    # Round 86: the copies that have stood past the grace period with no verdict that could test the claim. The
     # judgement is made once, by `stale_in_force_disputes`, and handed to both the page and the gate; deciding it
     # twice is how the page came to promise a charge the gate did not make.
     in_force_stale: List[Dict[str, Any]] = field(default_factory=list)
@@ -3727,17 +3727,30 @@ def _link_lines(result: Audit) -> List[str]:
                     "  [first seen %.1f day(s) ago, seen %d time(s)]"
                     % (float(age), int(item.get("observations") or 0)))
             if (str(item.get("domain") or "default"), int(item.get("version") or 0)) in stale_keys:
-                seen += "  [stale: no verdict newer than the objection]"
+                if item.get("untested"):
+                    seen += ("  [stale: a check on %s could not test the claim]"
+                             % str((item.get("untested") or {}).get("at")))
+                else:
+                    seen += "  [stale: no verdict that could test the claim]"
             lines.append("  %-16s v%03d  %-13s %s%s" % (item.get("domain") or "default",
                                                        int(item.get("version") or 0),
                                                        item.get("kind"), item.get("detail"), seen))
         lines.append("A version is deployed, so refusing to stack it is no longer available. A contradiction is")
         lines.append("still a build defect (`--strict` exits 2); a copied end is a debt, named here, not charged.")
         if result.in_force_stale:
-            lines.append("%d copy(ies) have stood longer than %.0f day(s) with no verdict newer than the"
+            lines.append("%d copy(ies) have stood longer than %.0f day(s) with no verdict that could test the"
                          % (len(result.in_force_stale), IN_FORCE_GRACE_DAYS))
-            lines.append("objection, so `--strict` asks for a re-measurement of the deployed version: that is the")
+            lines.append("claim about it, so `--strict` asks for a re-measurement of the deployed version: that is")
             lines.append("one command that clears it.")
+            untested = [item for item in result.in_force_stale if item.get("untested")]
+            if untested:
+                # Round 89: a comparison that could not compare is not an answer, and the remedy is a
+                # different measurement -- not the same command on the same stream.
+                lines.append("%d of them were measured and the check could not test the claim (%s):"
+                             % (len(untested), str((untested[0].get("untested") or {}).get("reason") or "")))
+                lines.append("measuring again on the same stream compares nothing again, so the remedy is the "
+                             "file that version recorded,")
+                lines.append("or retiring the version whose claim cannot be checked (boundary 188).")
     if result.in_force_cleared:
         lines.append("%d version(s) in force are no longer disputed, and the ledger forgets them now:"
                      % len(result.in_force_cleared))
@@ -3753,6 +3766,11 @@ def _link_lines(result: Audit) -> List[str]:
                          % (item.get("domain") or "default", int(item.get("version") or 0),
                             item.get("kind"), item.get("first_seen"),
                             "" if age is None else ", stood %.1f day(s)" % float(age), by))
+        attempted = [item for item in result.in_force_cleared if item.get("tested") is False]
+        if attempted:
+            lines.append("%d clearing(s) rested on a check that ran and could not test the claim, so they"
+                         % len(attempted))
+            lines.append("answer nothing: recorded, and counted apart on the campaign page (boundary 188).")
         if any(item.get("by") != "verification" for item in result.in_force_cleared):
             lines.append("A dispute that left the ledger without a measurement is not resolved, it is unobserved:")
             lines.append("counted apart on the campaign page, and charged by nothing (boundary 183).")
