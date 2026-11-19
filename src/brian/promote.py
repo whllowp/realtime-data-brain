@@ -225,7 +225,8 @@ def _evidence_state(root: Path, stream_path: str) -> str:
     return EVIDENCE_PRESENT if (root / path).is_file() else EVIDENCE_MISSING
 
 
-def clearing_evidence(entries: Sequence[Mapping[str, Any]], root: Path) -> Dict[str, Any]:
+def clearing_evidence(entries: Sequence[Mapping[str, Any]], root: Path,
+                      now: Optional[datetime] = None) -> Dict[str, Any]:
     """Read-time check: which named files can no longer be opened today.
 
     Round 90 made every citation name its file. A file can be deleted afterwards, and nothing writes that down --
@@ -234,6 +235,9 @@ def clearing_evidence(entries: Sequence[Mapping[str, Any]], root: Path) -> Dict[
     """
     present = missing = unnamed = 0
     missing_files: List[str] = []
+    oldest: Optional[Dict[str, Any]] = None
+    oldest_moment: Optional[datetime] = None
+    moment = _stamp_moment(now if isinstance(now, datetime) else now)
     for item in entries:
         path = str(item.get("stream_path") or "")
         if not path:
@@ -241,12 +245,21 @@ def clearing_evidence(entries: Sequence[Mapping[str, Any]], root: Path) -> Dict[
             continue
         if (root / path).is_file():
             present += 1
-        else:
-            missing += 1
-            if path not in missing_files:
-                missing_files.append(path)
+            continue
+        missing += 1
+        if path not in missing_files:
+            missing_files.append(path)
+        # Round 92: which dead link is the oldest is the question a reader actually has. A count says the
+        # books are incomplete; the oldest one says where the incompleteness started.
+        checked = _parse_moment(item.get("checked_at"))
+        if checked is None or (oldest_moment is not None and checked >= oldest_moment):
+            continue
+        oldest_moment = checked
+        oldest = {"checked_at": checked.isoformat(), "version": int(item.get("version") or 0),
+                  "stream_path": path,
+                  "age_days": round((moment - checked).total_seconds() / 86400.0, 2)}
     return {"present": present, "missing": missing, "unnamed": unnamed,
-            "missing_files": sorted(missing_files)}
+            "missing_files": sorted(missing_files), "oldest": oldest}
 
 
 
@@ -390,7 +403,8 @@ def in_force_history(root: Path) -> Tuple[List[Dict[str, Any]], int]:
 
 def record_clearing(root: Path, version: int, now: Optional[datetime] = None, verdict: str = "",
                     reason: str = "", tested: bool = True,
-                    attempt_reason: str = "", stream_path: str = "") -> List[Dict[str, Any]]:
+                    attempt_reason: str = "", stream_path: str = "",
+                    substituted_from: str = "") -> List[Dict[str, Any]]:
     """Write the clearing a measurement just earned, instead of waiting for a later audit to notice absence.
 
     Round 87 deduced every clearing from a comparison of timestamps, which means the fact exists only while the
@@ -415,6 +429,12 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
     Round 91: a citation is only as good as the file behind it. If `stream_path` names something this checkout
     cannot open, the entry is recorded as an attempt (`evidence: "missing"`, `tested: false`) and the row keeps
     running -- the check ran, but nobody can audit what it read (boundary 195).
+
+    Round 92: a check can be pointed at a file this checkout does not have while the record names one that is
+    here, and running there is the only way the debt ever gets answered. That substitution is part of the fact,
+    so the entry names what was asked for (`substituted_from`) beside what was read (`stream_path`): a verdict
+    is about a file, and a reader who cannot see the file changed will read one stream's answer as another's
+    (boundary 197).
     """
     moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
     observed, cleared_history, trimmed = _read_in_force_store(root)
@@ -443,6 +463,7 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             "evidence": evidence,
             "tested": bool(tested) and evidence != EVIDENCE_MISSING,
             "stream_path": str(stream_path or ""),
+            "substituted_from": str(substituted_from or ""),
             # Round 90: the ordinal counts what this version's chain already holds, so an attempt is a
             # position in a history rather than a loose fact.
             "attempt": 1 + sum(1 for prior in cleared_history

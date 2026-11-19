@@ -1702,12 +1702,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                           ", ".join(str(name) for name in evidence.get("missing_files") or [])))
             for version in sorted(chains):
                 for entry in sorted(chains[version], key=lambda item: str(item.get("checked_at") or "")):
+                    mark = ""
+                    path = str(entry.get("stream_path") or "")
+                    if path and not (root / path).is_file():
+                        mark = "  [evidence missing]"
+                    # Round 92: the entry names the file that was read; the file the caller asked for is a
+                    # different fact, and only the pair tells a reader whether the verdict describes the stream
+                    # they think it does (boundary 197).
+                    if entry.get("substituted_from"):
+                        mark += "  [substituted for %s]" % str(entry.get("substituted_from"))
                     _print("  v%03d  attempt %-2d %s  %-13s %s%s"
                            % (version, int(entry.get("attempt") or 0),
                               str(entry.get("checked_at") or ""), str(entry.get("verdict") or ""),
-                              str(entry.get("stream_path") or "(unnamed stream)"),
-                              "  [evidence missing]" if str(entry.get("stream_path") or "")
-                              and not (root / str(entry.get("stream_path"))).is_file() else ""))
+                              path or "(unnamed stream)", mark))
         for index, record in enumerate(rounds, start=1):
             baseline_row = record.get("baseline") or {}
             measured = baseline_row.get("tokens_per_report")
@@ -2642,17 +2649,43 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     _print("stream file    %s  (named by %s)"
                            % (resolved, ", ".join("v%03d" % item.version for item in by_path[resolved])))
                     args.stream_file = resolved
+        substituted_from = ""
         if args.stream_file and not Path(args.stream_file).is_file():
-            # Round 91: a citation is only as good as the file behind it. The promise records the file it was
-            # measured on, so the remedy can name one that exists instead of repeating the argument that just
-            # failed. A traceback here said "the file is missing" in the most expensive possible way.
-            _print("cannot read %s: no such file" % args.stream_file)
-            recorded = sorted({str(item.stream_path or "") for item in load_promotions(root)} - {""})
-            if recorded:
-                _print("the promise records the file it was measured on: %s" % ", ".join(recorded))
-            _print("a measurement on a file this checkout cannot open answers nothing, so nothing was cleared:")
-            _print("pass --stream-file naming a file that still exists, or restore the one above.")
-            return 2
+            # Round 91 said the file is missing. Round 92 asks the next question: does the record name one that
+            # is here? The promise records the file it was measured on, so the check can run there -- and must
+            # say that it did, because a verdict is about a file (boundary 197). Only when every version to
+            # check agrees on one recorded file: choosing between several would decide which promise gets
+            # graded, which round 47 already refuses to do by convenience.
+            named = str(args.stream_file)
+            known = [item for item in load_promotions(root)
+                     if item.version == wanted or (not wanted and item.due(days=args.expiry_days))]
+            recorded_path, unrecorded, _by_path = _promotion_stream(known) if known else ("", [], {})
+            usable = [recorded_path] if recorded_path and Path(recorded_path).is_file() else []
+            if len(usable) == 1 and not unrecorded:
+                _print("stream file    %s  (substituted: %s does not exist in this checkout)"
+                       % (usable[0], named))
+                substituted_from = named
+                args.stream_file = usable[0]
+            else:
+                _print("cannot read %s: no such file" % named)
+                # The diagnostic names the reason substitution failed, because "nothing to stand in" has three
+                # different fixes: pass a file (no version records one), restore a file (the recorded one is
+                # missing too), or resolve which promise is being graded (versions disagree or say nothing).
+                recorded = sorted({str(item.stream_path or "") for item in load_promotions(root)} - {""})
+                if unrecorded:
+                    _print("the recorded file cannot stand in: %d version(s) to check do not say which file "
+                           "they were measured on: %s"
+                           % (len(unrecorded), ", ".join("v%03d" % item.version for item in unrecorded)))
+                elif len(recorded) > 1:
+                    _print("the versions record different files, and picking one would decide which promise "
+                           "gets graded: %s" % ", ".join(recorded))
+                elif recorded:
+                    _print("the file the promise was measured on is also missing: %s" % recorded[0])
+                else:
+                    _print("no version records which file it was measured on, so there is nothing to stand in")
+                _print("a measurement on a file this checkout cannot open answers nothing, so nothing was cleared:")
+                _print("pass --stream-file naming a file that still exists, or restore the one above.")
+                return 2
         settings, streams, source, _overrides = _evolve_streams(args, settings)
         domain = source
         # A promise is a statement about one dataset (boundary 33), so a stream only re-checks the
@@ -2808,7 +2841,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             cleared_now.extend(record_clearing(root, version, now=checked_at, verdict=verdict,
                                                reason="measured again by --verify",
                                                tested=verdict != UNMEASURABLE,
-                                               attempt_reason=why, stream_path=checked_path))
+                                               attempt_reason=why, stream_path=checked_path,
+                                               substituted_from=substituted_from))
         answered = [entry for entry in cleared_now if entry.get("tested") is not False]
         attempted = [entry for entry in cleared_now if entry.get("tested") is False]
         if answered:

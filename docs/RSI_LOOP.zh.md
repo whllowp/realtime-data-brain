@@ -4993,6 +4993,63 @@ pass --stream-file naming a file that still exists, or restore the one above.
 **边界 196：命令的输入也是判断的一部分。** 一个不存在的输入必须在测量之前被报告，而不是以异常结束——异常既
 没有说出补救办法，又把"输入错了"和"检查没通过"混成同一个退出码。
 
+### 3.98 换一份凭据也要说出来：指名文件不见了怎么继续，以及坏链接有多旧
+
+第 91 轮让每一次清账都指名凭据，并且在写入时和读的时候各检查一次文件在不在。但检查结果只有两种：在，就照常记；不在，就报错退出。一条已经在生效的债务因此可能永远清不掉——凭据被人挪走、仓库换了检出、文件名改过，都不是"账算错了"，可是 `--verify` 连测都不肯测，`--strict` 于是永远红着（边界 185 的另一半：命令要能跑，还要跑得下去）。
+
+第 92 轮把"指名文件不在"拆成两条路：轮流**换一份凭据**，或者**说清楚为什么换不了**。换的判断只有一句：**每一个要检查的版本都指向同一份被记录的文件，并且那份文件在这个检出里存在**。
+
+```
+stream file    data/smd/stream-real.json  (substituted: data/smd/missing.json does not exist in this checkout)
+verifying 1 promotion(s) from smd on SMD
+  v020  digest.rolling_window = 200  backfilled end: round-new.json has no successor-side record of its own: …
+        measured, not applied: the record's end was copied, so the deployment is left alone
+  v020  digest.rolling_window = 200  FAILED and reverted: promised recall 0.507 at the 10% budget,
+        re-measured 0.060 (below 0.456)
+
+cleared         1 in-force observation(s) were answered by this check:
+  smd              v020  backfilled end stood 20.0 day(s), answered on data/smd/stream-real.json
+```
+
+替换这件事必须写在**它发生的地方**，也必须写进记录：`record_clearing(..., substituted_from=…)` 把这个来源存进条目，`--history` 于是同时印两件事：
+
+```
+clearings        2 recorded clearing(s); each names the measurement that earned it:
+  v020  attempt 1  2026-11-19T20:49:54+00:00  unmeasurable  data/smd/stream-one.json  [substituted for data/smd/missing.json]
+  v020  attempt 2  2026-11-19T20:55:13+00:00  failed        data/smd/stream-real.json  [evidence missing]  [substituted for data/smd/missing.json]
+```
+
+第二次之所以多一个 `[evidence missing]`，是因为演完"替换"之后把那份额外文件真的删掉了——记录里写的是"当时那份在"，读的时候再看一次"现在这份在不在"，两件事分开放（边界 194 的延续：今天的事实是算出来的，不是存下来的）。
+
+换不了的时候，理由要具体到能指出下一步。四条句子对应四种情形：
+
+- `the recorded file cannot stand in: 1 version(s) to check do not say which file they were measured on: v020`
+- `the versions record different files, and picking one would decide which promise gets graded: …`
+- `the file the promise was measured on is also missing: data/smd/stream-real.json`
+- `no version records which file it was measured on, so there is nothing to stand in`
+
+第一版只写了 `if usable:` 的那一支，"没有任何版本记录文件"时**一句话都不印**，测试一跑就露出来——回绝必须有一个能读的理由，而不是静默退出（边界 196 的同一件事：输入是判断的一部分）。
+
+坏链接还有第二个问题：它只被数了一次，没人说它有多旧。数量说明"账不完整"，日期才说明"从哪天起不完整"，而两者之间隔着好几个星期的时候，读者无从知道该先开哪一个。所以 `clearing_evidence(..., now=…)` 多带一个 `oldest`（最小 `checked_at`，含版本、文件、年龄），`--campaign` 在坏链接那一行下面把它印出来：
+
+```
+links             1 clearing(s) name a file this checkout cannot open: data/smd/stream-real.json
+links             the oldest of them was written 2026-11-19T20:55:13+00:00 (v020, 0.0 day(s) ago)
+```
+
+这条最旧的链接是"该先开哪一份"的答案，也是唯一一处没有别人能替你看的地方。
+
+本轮的两个过程缺陷也记在这里，因为它们是同一类错误的两面：
+
+- 第 91 轮把 `tests/test_clearing_evidence_file.py` 以 **CRLF** 提交了（本仓库只有 `src/brian/cli.py` 是 CRLF），原因是 `var/fix_endings.py` 用的是手写 `FILES` 清单，**新文件从来不在清单里**。改成遍历 `git ls-files`、按路径套约定之后，这类错误就与"有没有记得加进去"无关了。
+- 一次只替换 `def` 行的 `edit` 把两个测试并成了一个并截断了文件尾；恢复方式是 `git checkout --` 之后**整份脚本重建**。要重构的文件不要一块块打补丁。
+
+**边界 197：替换必须写在发生的地方。** 一次判定是关于某份文件的；输入被悄悄换掉，一个人会把一条流上的测量读成另一条流上的答案。
+
+**边界 198：兜底必须唯一。** 记录里有好几份文件时，挑一份就等于替读者决定"给哪个承诺打分"，所以回绝比挑更诚实。
+
+**边界 199：坏链接的年龄把"账不完整"变成"从哪天起不完整"。** 最旧的那一条就是读者该先打开的那一份，而且它没有任何别人能替他看。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5318,5 +5375,12 @@ missing for the next level
     下一个：让 `--verify` 在指名的文件消失时用记录里的文件重测（并把这次替换写进结账条目），以及让
     `--campaign` 打印"证据缺失最久的那一笔"。
 
-78. 让 `--verify` 在指名的文件消失时，用记录里写的那份文件重测（把"换了哪份凭据"写进结账条目），
-    并让 `--campaign` 打印"证据缺失最久的那一笔"——缺得最久的那一笔最可能是唯一没人看过的那一笔。
+78. 已完成：`--verify` 指名的文件不存在时改用记录里的文件重新测量（并打印 `(substituted: …)`，条目里存
+    `substituted_from`，`--history` 印 `[substituted for …]`；换不了的四种情形各有一句能读出下一步的回绝），
+    `clearing_evidence(..., now=…)` 多带 `oldest`，`--campaign` 印"坏链接里最旧的那一条"。见 §3.98 与边界 197/198/199。
+    顺带把 `var/fix_endings.py` 从手写清单改成遍历 `git ls-files`：新文件也要被约定覆盖。
+
+79. 让替换本身可追溯：`substituted_from` 目前只在条目里，`--campaign` 应当按被替换的文件分组统计（哪些文件反复
+    查不到、哪些只是改了名），并且当同一个版本连续两次以上靠替换才测出来时，把它当作"记录的文件路径已经失效"
+    报出来，让读者去修记录而不是继续替换。
+

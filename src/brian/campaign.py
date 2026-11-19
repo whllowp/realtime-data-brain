@@ -933,6 +933,14 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             lines.append("links             %d clearing(s) name a file this checkout cannot open: %s"
                          % (int(gone.get("missing") or 0),
                             ", ".join(str(name) for name in gone.get("missing_files") or [])))
+            oldest = gone.get("oldest")
+            if isinstance(oldest, Mapping) and oldest.get("checked_at"):
+                # Round 92: the oldest dead link is the one to open first, so it is named with its own age
+                # rather than left to be found by sorting the store by hand.
+                age = oldest.get("age_days")
+                lines.append("links             the oldest of them was written %s (v%03d, %s)"
+                             % (str(oldest.get("checked_at")), int(oldest.get("version") or 0),
+                                "an unknown time" if age is None else "%.1f day(s) ago" % float(age)))
         domains = record.get("by_domain")
         if isinstance(domains, Mapping) and len(domains) > 1:
             lines.append("links             clearings by domain: %s"
