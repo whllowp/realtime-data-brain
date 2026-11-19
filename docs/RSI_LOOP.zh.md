@@ -4589,6 +4589,69 @@ A copied end is a debt, not a defect: re-running the round writes a successor th
 边界 **177**：拒绝必须能被一次重测清掉 —— 只有矛盾是构建缺陷，抄来的那一端是欠账；把两者都记成 2，等于让修补过的账本永远红着，而没人会跑一个永远红的闸门。
 
 
+### 3.91 闸门只管叠承诺的那一刻，已经在跑的版本没人再问
+
+第 84 轮做了一件对的事：一个版本的产出记录如果两头对不上，或者它的端是修复补写的，就不许在它上面叠承诺。但那是一个**叠承诺那一刻**的拒绝。版本可以先被应用，账簿后来才动：
+
+- 某轮被retire、被重测，写下一个和后继对不上的关系；
+- 某个人用 `--repair-links` 给一个老记录补上缺失的端。
+
+两种情况下那个版本都还在跑，而没有任何命令会再问一次。`--audit` 只说"1 replacement link(s) disagree"，不说是哪个**在生效的版本**踩在上面；`--campaign` 只数链接和补写；`--verify` 根本没被调用。第 84 轮的 `provenance_block` 已经会回答"这个版本的产出记录还可信吗"，问题是没人问。
+
+**第 71 项的前提本身是错的。** 它写着"让 `--promote` 也走 `provenance_block`"，但 `brian evolve --help` 里没有 `--promote` 这个入口（只有 `--verify`、`--apply`、`--repair-links`、`--history`、`--rejudge`、`--audit`、`--retire`、`--campaign`、`--grade`）。真正漏掉的那一半不是"另一个入口绕过闸门"，而是**没人对已经在生效的东西发问**。所以这一轮把问题掉了个方向：不问"还能不能叠"，而问"已经在跑的是什么"。
+
+#### 部署状态是唯一知道这件事的地方
+
+`var/evolve/domains/<slug>/current.json` 里的 `sources` 把环境变量映射到拥有它的版本号——这是"一个进程启动时会拿什么"的唯一记录。三个新函数都从它出发：
+
+```
+_deployment_states(root)      -> [(slug, path)]    # 迁移前的全局 current.json 记作 ''（默认域）
+in_force_promotions(root)     -> [(slug, version)] # 去重：两个变量属于同一版本是一个版本，不是两个
+in_force_disputes(root)       -> [{domain, version, broken, kind, detail}]
+```
+
+`in_force_disputes` 对每个在生效的版本调一次第 84 轮的 `provenance_block`，把结果原样搬出来。`kind` 是给人看的标签（`broken link` / `backfilled end`），`broken` 是判断本身——因为这个判断只有同时认识两个标签的 `promote.py` 做得了。
+
+#### 页面、战役、闸门，三处都读到同一个事实
+
+`--audit`（以及 `--campaign` 里那张表）多出这一段，并且只在这里才说得出"在跑"：
+
+```
+1 version(s) in force sit on a record whose provenance the books dispute:
+  smd              v020  broken link   round-old.json is one of the records in a mismatch link: round-old.json
+                                       names round-new.json as its successor, but round-new.json says it replaced
+                                       round-other.json
+A version is deployed, so refusing to stack it is no longer available. A contradiction is
+still a build defect (`--strict` exits 2); a copied end is a debt, named here, not charged.
+```
+
+`--campaign` 的 `links` 段多一行 `links  1 version(s) in force sit on a record the books dispute: v020`，`--json-out` 里是 `in_force_disputed`（每条带 `domain`、`version`、`broken`、`kind`、`detail`）。真实账簿上是 `in force: [('', 19), ('rcaeval-re1-ob', 19), ('smd', 20)]`、`disputes: 0`：三个在生效的版本，没有一个踩在争议记录上。
+
+#### 两种争议，两个结论
+
+| 争议种类 | 含义 | `--strict` | 能不能清掉 |
+| --- | --- | --- | --- |
+| 断链（`broken link`） | 两头说的是不同的替换关系 | **exit 2** | 不能：没有哪次重测能决定哪一本账是对的 |
+| 补写端（`backfilled end`） | 端是修复从 retire 记录抄来的 | 报告，**不收费**（exit 0） | 不能：要重写那个端只能重跑那一轮，而那一轮已经在生效 |
+
+补写端不收费的理由和第 84 轮拒绝不了的原因一样，只是位置换了：版本已经在跑，副本并没有让它跑得更差，而"能修好它的命令"要求重跑一个已经在生效的轮次。一条永远清不掉的闸门，最后就是没人跑的闸门（边界 171）。断链仍然收费，因为它是一个**构建缺陷**：账簿互相矛盾这件事本身不会因为时间过去而变好。
+
+#### 两个由运行暴露的缺陷
+
+**一、把标签当成了种类。** 第一版 `in_force_disputes` 存 `"kind": block[0]`，而 `block[0]` 是 `"broken link"` / `"backfilled end"`；`Audit.in_force_broken` 却拿它去比 `LINK_DEFECTS = ("mismatch", "unretired", "dangling")`。一个值和它的取值域不相交，比较永远是假：页面上明明打印着 `broken link`，收费计数却是 0。修法不是让 `evolve` 也认识那两个标签（那会让 `evolve` 依赖 `promote`，而 `promote` 依赖 `evolve`），而是让行里带上判断本身：`"broken": block[0] == LINK_BROKEN`。**一个字段的含义，和读者以为它在比较的事实，必须一致**——这一轮的第 84、83 轮都栽在同一类地方。
+
+**二、同一个缺陷收了两次费。** 第一版在 `broken_links` 的 `return 2` 之后又写了一个 `if in_force: return 2`。这个分支永远不会单独触发：在生效版本踩的断链本来就是账簿里的一条断链，`broken_links` 已经数过它。第二个 `return 2` 不改变任何退出码，只会让读者以为这里有一道独立检查。删掉它，保留一句说明——"so a deployed configuration inherits the contradiction"——因为这个事实**值得说**，只是不值得再收一次费。这正是第 22 轮删掉"构造上不可达的分支"的同一个教训，换了个形状。
+
+#### 这一轮的边界
+
+**边界 178：叠承诺那一刻的拒绝，管不到已经部署的东西。** 一个版本的产出记录可以在它被应用之后才变得有争议（retire、重测、修复都可能后到）。所以"这个记录还可信吗"这个问题必须也对部署状态问一次，不能只在 `--verify` 里问。
+
+**边界 179：已经在生效的补写端只报告，不收费。** 没有任何命令能在版本继续生效的前提下重写那个端，收它的费就是立一条谁都清不掉的规矩；而"抄来的端"也不需要清掉才能让部署继续正确——它本来就在跑。
+
+#### 这一轮之后
+
+`--audit --strict` 现在对"在跑一个踩在断链上的版本"退出 2，对"在跑一个踩在补写端上的版本"只报告。第 72 项留给下一轮：把 `in_force_disputes` 的时间也记下来——同一个版本连续几轮都踩在争议记录上，应该像 `--verify` 的到期一样，从"报告"变成"该处理了"；否则它会安静地留在页面上，而页面上的警告最容易被读成"没关系"。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4892,4 +4955,5 @@ missing for the next level
 
 70. **（第 3.90 轮完成，2026-11-20）** 已经做出：`--campaign` 的 `links` 行把补写的端单列成 `N replacement link(s) were backfilled by a repair: their ends agree by copying, not as two witnesses`，`--json-out` 里是 `backfilled_links`；`--history` 在存在补写端时不再说"every link that has both ends agrees"。`--verify` 在循环最前面读 `provenance_block(root, version)`：断链记 `broken link` 并 **exit 2**，补写端记 `backfilled end` 并 **exit 1**，两者都不写验证记录，页面说明"每次都会再拦一次"。补写端不再被算作一次队列付款。`--promote` 的那一半留给第 71 项。
 
-71. 让 `--promote`（单独把某个版本设为生效配置的入口）也走 `provenance_block`：它现在是一条绕过 `--verify` 的捷径，能把一个 `--verify` 明确拒绝叠承诺的版本直接设成在生效；同时让 `--audit` 的 `links` 段落把"被拦住的版本"作为第四列（`unchecked`）列出，否则读者只看到断链，看不到断链挡住了什么。
+71. **（第 3.91 轮完成，2026-11-20）** 这一项的前提不成立：`brian evolve` 没有 `--promote` 入口。真正漏掉的是"没人对已经在生效的版本发问"。已经做出：`promote.in_force_promotions` 从每个部署状态的 `sources` 读出在跑哪些版本（迁移前的全局 `current.json` 记作默认域，两个变量属于同一版本只算一个），`promote.in_force_disputes` 对每个在生效版本调第 84 轮的 `provenance_block`，行里带 `domain`/`version`/`broken`/`kind`/`detail`；`Audit.in_force`、`in_force_broken`、`in_force_copied` 把它带进 `--audit` 的 `links` 段（逐行打印域名、版本、种类和细节），`--campaign` 的 `links` 段多一行 `N version(s) in force sit on a record the books dispute: v020`，`--json-out` 里是 `in_force_disputed`；`--strict` 对"在跑踩在断链上的版本"exit 2，对补写端只报告（exit 0）。真实账簿：三个在生效版本，零争议。
+72. 给 `in_force_disputes` 的每一行记下它第一次出现的时间，并像 `--verify` 的到期一样，让"同一个版本连续 N 轮踩在争议记录上"从报告变成该处理：现在它只在页面上说一次事实，而页面上的警告最容易被读成"没关系"。

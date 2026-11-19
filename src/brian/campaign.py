@@ -159,6 +159,9 @@ class Campaign:
     # Round 84: ends a repair wrote. Counted apart for the same reason `--audit` counts them apart: an
     # agreement that was copied is not a second witness.
     backfilled: int = 0
+    # Round 85: versions in force whose record the books dispute. Round 84 refused to stack these; a deployed
+    # version cannot be refused, so it is reported here (and charged when the two books contradict).
+    in_force: List[Dict[str, Any]] = field(default_factory=list)
     # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
     retired: int = 0
     # Refusals the loop still holds: the count `previously_rejected` would return, and how many of them
@@ -252,6 +255,7 @@ class Campaign:
                                      for domain, counts in sorted(self.paid_by_domain.items())},
             "queue_paid_unstated": self.paid_unstated,
             "backfilled_links": self.backfilled,
+            "in_force_disputed": list(self.in_force),
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -289,7 +293,8 @@ def _row_limits(limits: Mapping[str, Any], domain: str) -> Dict[str, Any]:
 def campaign(root: Path, rules: Optional[EvolveRules] = None,
              expiry_days: float = CLAIM_EXPIRY_DAYS, now: Optional[datetime] = None,
              refusal_expiry_days: float = REFUSAL_EXPIRY_DAYS,
-             limits: Optional[Mapping[str, Any]] = None) -> Campaign:
+             limits: Optional[Mapping[str, Any]] = None,
+             in_force: Optional[Sequence[Mapping[str, Any]]] = None) -> Campaign:
     """Summarise every recorded round, grouped by the stream each one measured.
 
     A round that does not say which stream it measured cannot be attributed to a domain, and is counted
@@ -476,7 +481,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.trials = sum(row.trials for row in result.rows)
     result.accepted = sum(row.accepted for row in result.rows)
     result.rejected = sum(sum(row.rejections.values()) for row in result.rows)
-    report = audit(root, rules)
+    report = audit(root, rules, in_force=in_force)
     result.moved = report.moved
     result.relabelled = report.relabelled
     result.unreconstructable = report.cross
@@ -487,6 +492,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.broken_links = report.broken_links
     result.link_legacy = report.link_legacy
     result.backfilled = len(report.backfilled)
+    result.in_force = list(report.in_force)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
     # streams could see "7 verdicts would change today" and not know which one owes them.
@@ -862,6 +868,10 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
     if result.backfilled:
         lines.append("links             %d replacement link(s) were backfilled by a repair: their ends agree by "
                      "copying, not as two witnesses" % result.backfilled)
+    if result.in_force:
+        lines.append("links             %d version(s) in force sit on a record the books dispute: %s"
+                     % (len(result.in_force),
+                        ", ".join("v%03d" % int(item.get("version") or 0) for item in result.in_force)))
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")

@@ -3283,6 +3283,10 @@ class Audit:
     # by copying is not agreeing as two witnesses, and an audit that folds them in makes its own repair look
     # like corroboration.
     backfilled: List[str] = field(default_factory=list)
+    # Round 85: versions the deployment states say are running whose producing record the books dispute or
+    # that a repair copied. Round 84 refused to *stack* a promise there; once a version is applied that refusal
+    # is not available, so the fact is reported here instead -- and charged when the two books contradict.
+    in_force: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def broken_links(self) -> int:
@@ -3293,6 +3297,21 @@ class Audit:
     def link_legacy(self) -> int:
         """Links whose successor end could not have been written (pre-round-78 records)."""
         return sum(1 for item in self.links if item.get("kind") == "legacy")
+
+    @property
+    def in_force_broken(self) -> int:
+        """Versions already deployed on a record whose two ends contradict each other (round 85)."""
+        return sum(1 for item in self.in_force if item.get("broken"))
+
+    @property
+    def in_force_copied(self) -> int:
+        """Versions already deployed on an end a repair copied (round 85): reported, never charged.
+
+        The copy does not make the deployed configuration worse -- it was running before the repair wrote the
+        missing end -- and no command can re-write that end while the version stays in force. Charging it would
+        be a gate nobody can clear (boundary 171).
+        """
+        return len(self.in_force) - self.in_force_broken
 
     @property
     def moved(self) -> int:
@@ -3331,7 +3350,8 @@ class Audit:
         return sum(1 for entry in self.entries for item in entry["cross"] if item["kind"] == "missing")
 
 
-def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
+def audit(root: Path, rules: Optional[EvolveRules] = None,
+          in_force: Optional[Sequence[Mapping[str, Any]]] = None) -> Audit:
     """Re-decide every stored round under `rules` and report what moves.
 
     No measurement is re-run and no Laya call is made: this answers "do the records still say what this
@@ -3393,7 +3413,8 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
     return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials,
                  entries=entries, retired=retired,
                  links=replacement_links(history(root, include_retired=True)),
-                 backfilled=backfilled_links(history(root, include_retired=True)))
+                 backfilled=backfilled_links(history(root, include_retired=True)),
+                 in_force=[dict(item) for item in (in_force or [])])
 
 
 def _limit_terms(limits: Optional[Mapping[str, Any]]) -> Optional[Tuple[Optional[float],
@@ -3665,6 +3686,18 @@ def _link_lines(result: Audit) -> List[str]:
         lines.append("Counted separately on purpose: a copied end is not a second witness, and the repair is "
                      "not evidence")
         lines.append("that the replacement happened.")
+    if result.in_force:
+        # Round 85: round 84 could refuse to stack a promise, because a version that is not yet in force can
+        # simply not be applied. A version that is already applied is running; the refusal is gone, and what
+        # remains is the fact plus the same split -- a contradiction is a defect, a copied end is a debt.
+        lines.append("%d version(s) in force sit on a record whose provenance the books dispute:"
+                     % len(result.in_force))
+        for item in result.in_force:
+            lines.append("  %-16s v%03d  %-13s %s" % (item.get("domain") or "default",
+                                                      int(item.get("version") or 0),
+                                                      item.get("kind"), item.get("detail")))
+        lines.append("A version is deployed, so refusing to stack it is no longer available. A contradiction is")
+        lines.append("still a build defect (`--strict` exits 2); a copied end is a debt, named here, not charged.")
     return lines
 
 

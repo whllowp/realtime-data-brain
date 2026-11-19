@@ -97,6 +97,68 @@ def provenance_block(root: Path, version: int) -> Optional[Tuple[str, str]]:
                                      "retirement, not written by the queue" % name)
     return None
 
+
+def _deployment_states(root: Path) -> List[Tuple[str, Path]]:
+    """Every deployment state on disk, as (domain slug, path) (round 85).
+
+    The legacy global `current.json` is the empty slug: round 22 stopped reading it, but a tree that has not
+    been migrated still runs from it, and a version in force there is in force somewhere.
+    """
+    directory = _evolve_dir(root)
+    states: List[Tuple[str, Path]] = []
+    legacy = directory / CURRENT
+    if legacy.is_file():
+        states.append(("", legacy))
+    for path in sorted((directory / DOMAINS).glob("*/" + CURRENT)):
+        states.append((path.parent.name, path))
+    return states
+
+
+def in_force_promotions(root: Path) -> List[Tuple[str, int]]:
+    """Which versions the deployment states say are running, as sorted (domain, version) pairs (round 85).
+
+    A state maps environment variable -> owning version in `sources`; that mapping is the only record of what a
+    process would take at start-up. A variable owned by two versions is one variable, so the pairs are deduped:
+    the question here is "which versions are deployed", not "how many variables each owns".
+    """
+    pairs: List[Tuple[str, int]] = []
+    for slug, path in _deployment_states(root):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        sources = payload.get("sources") if isinstance(payload, Mapping) else None
+        for version in sorted({str(item) for item in (sources or {}).values()}):
+            try:
+                number = int(version)
+            except (TypeError, ValueError):
+                # A source that is not a version number is not this function's business: it is reported by
+                # `in_force_overrides`, which knows what a refused setting is.
+                continue
+            pair = (slug, number)
+            if pair not in pairs:
+                pairs.append(pair)
+    return pairs
+
+
+def in_force_disputes(root: Path) -> List[Dict[str, Any]]:
+    """Versions in force whose producing record the books dispute or that a repair copied (round 85).
+
+    Round 84's guard is a refusal at stack time. Once a version is in force the refusal is not available -- it
+    is already running -- so the fact moves to the audit and the campaign, where a reader asks what the loop
+    claims, and where the same question can be asked again every time the books move.
+    """
+    rows: List[Dict[str, Any]] = []
+    for slug, version in in_force_promotions(root):
+        block = provenance_block(root, version)
+        if block is None:
+            continue
+        # `kind` is the label the reader sees; `broken` is the decision, made here because this is the only
+        # module that knows both labels. Comparing a label against LINK_DEFECTS is always false.
+        rows.append({"domain": slug or "default", "version": version, "broken": block[0] == LINK_BROKEN,
+                     "kind": block[0], "detail": block[1]})
+    return rows
+
 # How long a recorded verdict speaks for the claim. A check is evidence about the day it ran: a `holds`
 # from a year ago and an `unmeasurable` from last March are both statements nobody has tested since, and
 # `--verify` selected neither of them again. 14 days is deliberately short -- the measurement costs a few
