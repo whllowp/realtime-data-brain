@@ -1442,7 +1442,12 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
             note = "%s  (%d earlier check%s)" % (note, earlier, "" if earlier == 1 else "s")
         # Round 95: a verdict taken after a hand repair describes the repaired location, not the file the
         # promise was born with. Said next to the verdict, because that is the claim the verdict is about.
-        if int((promotion.verification or {}).get("stream_path_moves") or 0):
+        # Round 96: a check taken on the file the promise was born with is not the same evidence as one taken
+        # on the substitute, even when the two words ("holds", "failed") are identical (boundary 210) -- and the
+        # two marks are exclusive, because one verdict stood on exactly one file.
+        if (promotion.verification or {}).get("on_original_path"):
+            note = "%s  [measured on the original path]" % note
+        elif int((promotion.verification or {}).get("stream_path_moves") or 0):
             note = "%s  [measured on the repaired path]" % note
         moved_mark = ""
         if promotion.path_moves:
@@ -1582,6 +1587,21 @@ def dead_record_paths(root: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def same_stream_path(left: str, right: str) -> bool:
+    """Whether two recorded paths name the same file, ignoring separators and a leading `./` (round 96).
+
+    The same stream is spelled with a backslash by one command and a slash by another (round 54), so a byte
+    comparison would report a check on the original file as a check on the substitute.
+    """
+    def normal(value):
+        text = str(value or "").replace("\\", "/")
+        while text.startswith("./"):
+            text = text[2:]
+        return text.rstrip("/")
+
+    return bool(normal(left)) and normal(left) == normal(right)
+
+
 def repaired_paths(root: Path) -> List[Dict[str, Any]]:
     """Versions whose measured file has been rewritten by hand, with every move (round 94).
 
@@ -1617,11 +1637,16 @@ def repaired_paths(root: Path) -> List[Dict[str, Any]]:
         checks = [payload.get("verification")] + list(payload.get("checks") or [])
         after = sum(1 for item in checks
                     if isinstance(item, Mapping) and int(item.get("stream_path_moves") or 0) > 0)
+        origin = str(moves[0].get("from") or "")
         rows.append({"version": version,
                      "moves": moves,
-                     "first_from": str(moves[0].get("from") or ""),
+                     "first_from": origin,
                      "to": str(payload.get("stream_path") or moves[-1].get("to") or ""),
                      "at": str(moves[-1].get("at") or ""),
+                     # Round 96: a repair can stop being necessary. When the file the promise was originally
+                     # measured on is back in this checkout, the record can be pointed at it again and measured
+                     # there -- a fact an operator can act on, so the pages say it (boundary 209).
+                     "origin_exists": bool(origin) and (root / origin).is_file(),
                      "checks_on_repair": after,
                      "in_force": version in deployed})
     return rows

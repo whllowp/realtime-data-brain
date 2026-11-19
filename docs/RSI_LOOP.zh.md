@@ -5193,6 +5193,50 @@ stream path     v020  data/smd/stream-real.json -> data/smd/stream-moved.json
 **边界 208：** 计数要跟着被计数的东西走。`--campaign` 说"有 N 次检查是在修复之后取的"，而不是只把 N 条被修过的记录
 念一遍——修两次只验一次，和修一次验一次，证据的成色不同。
 
+### 3.102 补过一次的洞，可能自己长回去
+
+第 93–95 轮把人工修复做成了一条完整的链：命令（`--set-stream-path`）、记录（`stream_path_history`）、
+页面（`stream paths` 与 campaign）、以及**判断**（`stream_path_moves`、`[measured on the repaired path]`）。
+缺的是最后一步：这个修复**可能已经不需要了**。如果原件重新出现在检出里，记录仍然指着替身，而页面只说
+"路径被人工改过"——读者无法判断这条修复现在还需不需要，也无法知道有一个命令可以把它改回去。
+
+这一轮让"原件回来了"成为一个可行动的事实：
+
+1. `repaired_paths` 多报一个 `origin_exists`（原件在当前检出里是否存在）。
+2. `--history` 在迁移行尾补一句：
+
+   ```
+     v020  data/smd/stream-real.json -> data/smd/stream-moved.json  (1 move(s), last …)  (the original file is back: data/smd/stream-real.json)
+   ```
+
+3. `--campaign` 点名记录、文件与命令：
+
+   ```
+   links  v020's original file data/smd/stream-real.json is back in this checkout: the record can be pointed at it
+          again and measured there -- brian evolve --set-stream-path v020=data/smd/stream-real.json
+   ```
+
+   只告诉读者"原件回来了"而不给命令，等于只告诉他一个怀疑。
+
+4. `--verify` 会分清自己站在哪里：用原件跑时记 `on_original_path` 并改说法
+
+   ```
+         this check measures the original file the promise first named, while the record still points at the repair (boundary 209)
+   ```
+
+   版本表相应地标 `[measured on the original path]`，与 `[measured on the repaired path]` 互斥——一次判决只站在
+   一个位置上，两个标记同时出现是自相矛盾（这是本轮实现里先犯、后修的错）。
+
+实测（`var/demo95`，把第 93 轮被改名的原件复制回来）：`--campaign` 打出上面那行；`--history` 打出
+`(the original file is back: …)`；`--verify --stream-file data/smd/stream-real.json` 打出"原件"那句，
+`v020.json` 的 `verification` 里 `stream_path_moves == 1`、`on_original_path == true`，版本表标
+`[measured on the original path]` 且不再标 repaired。
+
+**边界 209：** 修好的洞可能自己长回去。当原件重新出现时，页面必须点名这件事并给出把记录指回去的命令；
+只说"修过"、不说"现在可以不改"，读者就无法判断这次修复还需不需要。
+**边界 210：** 同一句判决在两种位置上含义不同。`failed` 在原件上跑出来的意思是"这个承诺不成立"，在替身上跑出来
+可能是"替身与原件不同"——所以两种位置的判决必须能被分开读，而不是共用一个词和一个标记。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5542,7 +5586,12 @@ missing for the next level
     `[measured on the repaired path]` 与 `(path rewritten N time(s) by hand)`；`repaired_paths` 增加
     `checks_on_repair`，`--campaign` 打印 `links  N check(s) were taken after the repair …`。
 
+82. ✅ 让"原件回来了"成为可行动的事实：`repaired_paths` 增加 `origin_exists`；`--history` 在迁移行尾标
+    `(the original file is back: <file>)`；`--campaign` 点名记录、文件与命令
+    `brian evolve --set-stream-path v020=<原件>`；`--verify` 用原件跑时记 `on_original_path`，版本表标
+    `[measured on the original path]`（与 `[measured on the repaired path]` 互斥）（第 96 轮）。
 
-82. 让"原件回来了"成为一个可行动的事实：`repaired_paths` 记录 `origin_exists`，当原始文件在当前检出里重新出现时，
-    `--campaign` 与 `--history` 明说"可以把记录改回原件并重验"，而不是让读者自己发现；同时让 `--verify` 在记录被
-    修过、而它是用原件跑的时候，把 verdict 标成"回到原始位置"。
+
+83. 让"把记录指回原件"这一步本身留下痕迹：`--set-stream-path` 指回原件时在 `stream_path_history` 里注明这是一次
+    **回归**（`why` 由命令自己写，而不是调用者随手写），并在 `--history` 上把"迁移 -> 回归"读成一条完整的往返，
+    而不是两条无关的迁移；同时让 `--campaign` 说明这条记录现在站回原位、但**证据还没有**回到原位（除非之后重验过）。

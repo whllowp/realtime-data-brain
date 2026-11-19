@@ -919,6 +919,14 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         lines.append("links             %d record(s) have a rewritten stream path: %s -- the location is a repair,"
                      " not the original measurement, and `brian evolve --history` prints each move"
                      % (len(moves), named))
+        for item in moves:
+            if item.get("origin_exists"):
+                # Round 96: the repair may no longer be necessary. Naming the command matters, because a reader
+                # who is told "the original file is back" but not how to use it has been told a suspicion.
+                lines.append("links             v%03d's original file %s is back in this checkout: the record can "
+                             "be pointed at it again and measured there -- brian evolve --set-stream-path v%03d=%s"
+                             % (int(item.get("version") or 0), str(item.get("first_from") or ""),
+                                int(item.get("version") or 0), str(item.get("first_from") or "")))
         after = sum(int(item.get("checks_on_repair") or 0) for item in moves)
         if after:
             # Round 95: the verdicts taken after the move are the part of the evidence a reader would most

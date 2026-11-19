@@ -110,6 +110,7 @@ from .promote import (
     revert_promotion,
     set_state_budget,
     repaired_paths,
+    same_stream_path,
     set_stream_path,
     dead_record_paths,
     state_budgets,
@@ -1345,6 +1346,27 @@ def _promotion_stream(promotions: Sequence[Any]) -> Tuple[Optional[str], List[An
     return next(iter(by_path)), missing, by_path
 
 
+def format_history_paths(items: List[Mapping[str, Any]]) -> List[str]:
+    """The `stream paths` block of `--history` (round 94, extended in round 96).
+
+    Extracted so the block can be tested without measuring anything: both facts it prints -- that a hand repair
+    moved the measured file, and whether the file the promise was born with has come back -- are decided by the
+    ledger alone. A page about records should not need Laya to be checked.
+    """
+    if not items:
+        return []
+    lines = ["stream paths     %d record(s) have had their measured file rewritten by hand:" % len(items)]
+    for item in items:
+        back = "  (the original file is back: %s)" % str(item.get("first_from") or "") \
+            if item.get("origin_exists") else ""
+        lines.append("  v%03d  %s -> %s  (%d move(s), last %s)%s%s"
+                     % (int(item.get("version") or 0), str(item.get("first_from") or "(unrecorded)"),
+                        str(item.get("to") or "(unrecorded)"), len(item.get("moves") or []),
+                        str(item.get("at") or "unknown"),
+                        "  [in force]" if item.get("in_force") else "", back))
+    return lines
+
+
 def _recheck_withheld(root: Path, domain: str, settings: Any, streams: Any, rules: EvolveRules,
                       horizon: float, *, from_default: bool) -> int:
     """Re-measure this domain's overdue refusals and return how many stopped holding (round 44/45).
@@ -1728,15 +1750,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # belongs on this page: it changes what every later verdict is about, and a reader who cannot see the move
         # will read the promise as having been made on the file it now names (boundary 203).
         path_moves = repaired_paths(root)
-        if path_moves:
-            _print("stream paths     %d record(s) have had their measured file rewritten by hand:"
-                   % len(path_moves))
-            for item in path_moves:
-                _print("  v%03d  %s -> %s  (%d move(s), last %s)%s"
-                       % (int(item.get("version") or 0), str(item.get("first_from") or "(unrecorded)"),
-                          str(item.get("to") or "(unrecorded)"), len(item.get("moves") or []),
-                          str(item.get("at") or "unknown"),
-                          "  [in force]" if item.get("in_force") else ""))
+        for line in format_history_paths(path_moves):
+            _print(line)
         for index, record in enumerate(rounds, start=1):
             baseline_row = record.get("baseline") or {}
             measured = baseline_row.get("tokens_per_report")
@@ -2789,12 +2804,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 95: round 94 put the repair on the version table; the check has to say it too, and say it
             # before measuring, because the number it records (`stream_path_moves`) describes where it stood.
             path_moves = promotion.path_moves
+            checked_here = str(getattr(args, "stream_file", None) or "")
+            on_original = bool(path_moves) and same_stream_path(checked_here, promotion.path_origin)
             if path_moves:
                 _print("  v%03d  %s  path rewritten %d time(s) by hand: %s -> %s"
                        % (promotion.version, promotion.change, path_moves,
                           promotion.path_origin or "(unknown)", promotion.path_current or "(unknown)"))
-                _print("        this check measures the repaired location, not the file the promise first named "
-                       "(boundary 203)")
+                if on_original:
+                    # Round 96: the same page must not claim the check is standing on the repair when it is
+                    # standing on the file the promise was born with (boundary 190: the sentence and the
+                    # mechanism move together).
+                    _print("        this check measures the original file the promise first named, while the "
+                           "record still points at the repair (boundary 209)")
+                else:
+                    _print("        this check measures the repaired location, not the file the promise first "
+                           "named (boundary 203)")
             block = provenance_block(root, promotion.version)
             if block is not None and block[0] == LINK_BROKEN:
                 blocked.append(block)
@@ -2830,6 +2854,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     # Even a check that could not run stands on a location: the repair is a fact about the
                     # record, not about the verdict (boundary 205).
                     "stream_path_moves": path_moves,
+                    "on_original_path": on_original,
                 })
                 _print("  v%03d  %s  unmeasurable" % (promotion.version, promotion.change))
                 continue
@@ -2840,7 +2865,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                           checked_stream=checked_stream)
             payload = {"checked_at": _stamp(), "stream": source, "verdict": verdict,
                        "reason": reason, "measurement": measurement.to_dict(),
-                       "stream_path_moves": path_moves}
+                       "stream_path_moves": path_moves, "on_original_path": on_original}
             if copied:
                 payload["copied_end"] = {"kind": block[0], "detail": block[1]}
             if verdict == FAILED:

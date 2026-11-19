@@ -36,11 +36,9 @@ def _clean(root: Path) -> None:
 
 
 def _add_files(root: Path) -> None:
-    for relative in (OTHER, "data/smd/third.json"):
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"format": "brian.stream/1", "dataset": "SMD", "streams": []}),
-                          encoding="utf-8", newline="\n")
+    """The files a repair may point at have to be readable as streams, or a check on them fails to load."""
+    _stream(root, OTHER)
+    _stream(root, "data/smd/third.json")
 
 
 def _repaired(root: Path) -> None:
@@ -53,10 +51,10 @@ def _page(root: Path) -> str:
     return format_promotions(load_promotions(root), None, domain="SMD")
 
 
-def _verify(tmp_path, monkeypatch, *extra):
+def _verify(tmp_path, monkeypatch, *extra, path: str = FILE):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BRIAN_STATE_ROOT", str(tmp_path))
-    arguments = ["evolve", "--verify", "--verify-version", "20", "--stream-file", FILE]
+    arguments = ["evolve", "--verify", "--verify-version", "20", "--stream-file", path]
     return cli.main(arguments + list(extra))
 
 
@@ -90,11 +88,24 @@ def test_the_version_table_says_nothing_about_an_untouched_path(tmp_path):
 def test_verify_says_where_the_check_is_standing(tmp_path, monkeypatch, capsys):
     _repaired(tmp_path)
     monkeypatch.setattr(cli, "measure", lambda *args, **kwargs: _measurement())
-    code = _verify(tmp_path, monkeypatch)
+    code = _verify(tmp_path, monkeypatch, path=OTHER)
     out = capsys.readouterr().out
     assert code in (0, 1), out
     assert ("path rewritten 1 time(s) by hand: %s -> %s" % (FILE, OTHER)) in out
     assert "this check measures the repaired location, not the file the promise first named" in out
+
+
+def test_verify_says_when_it_stands_on_the_original_file(tmp_path, monkeypatch, capsys):
+    """Round 96: the same page must not claim the repair when the check runs on the file the promise named."""
+    _repaired(tmp_path)
+    monkeypatch.setattr(cli, "measure", lambda *args, **kwargs: _measurement())
+    code = _verify(tmp_path, monkeypatch, path=FILE)
+    out = capsys.readouterr().out
+    assert code in (0, 1), out
+    assert "this check measures the original file the promise first named" in out
+    assert "this check measures the repaired location" not in out
+    payload = json.loads((tmp_path / "var" / "evolve" / "versions" / "v020.json").read_text(encoding="utf-8"))
+    assert payload["verification"]["on_original_path"] is True
 
 
 def test_the_verification_records_the_moves(tmp_path, monkeypatch, capsys):
