@@ -4543,6 +4543,52 @@ ceilings          every recorded round was judged under today's ceilings; 1 roun
 
 **边界 175：能改写历史记录的命令，必须能在动手之前把要写的东西写出来给人看。** 计划与执行分开（`--repair-links` / `--repair-links --apply`），因为一旦写进账簿，"原来是什么样"就只剩读者手里的那句记忆。
 
+### 3.90 承诺只能叠在账簿还认的记录上
+
+第 81–83 轮让一条替换关系的两端可以互相核对，也让缺的那一端能被补上。但没有人问过晋升真正要问的那个问题：**产出这个版本的那一轮，现在还是一份别人能相信的记录吗？** 版本通过 `applied` 指名它的产出轮，所以只要那一轮是断链的参与者，这个版本就继承了那份断链。把承诺叠上去，等于把账簿自己都在争议的数字固定下来，而 `--audit` 也裁决不了（边界 170/173）。
+
+两种情形，两个退出码：
+
+| 情形 | 含义 | 有没有命令能清掉 | `--verify` |
+|---|---|---|---|
+| `broken link`（`mismatch` / `unretired` / `dangling`） | 两本账互相矛盾 | 没有：重新测量也决定不了哪本对 | 2（构建缺陷） |
+| `backfilled end`（第 83 轮的补写） | 这一端是抄来的 | 有：重跑那一轮，后继会自己指名前驱 | 1（欠账） |
+
+实测（`var/demo84/`，两个账本各一个版本）：
+
+```
+verifying 1 promotion(s) from smd on SMD
+  v020  digest.rolling_window = 200  broken link: round-old.json is one of the records in a mismatch link: round-old.json names round-new.json as its successor, but round-new.json says it replaced round-other.json
+        not checked: a promise stacked on this record would entrench numbers the ledger itself disputes
+...
+1 version(s) were left unchecked: 1 carry a replacement link the ledger contradicts, 0 were recorded on an end a repair copied.
+A contradiction is a build defect: no re-measurement settles which of the two books is right, so `--verify` exits 2. `--audit` names the link.
+No verification file was written for these versions, so they stay due on every run.
+```
+
+```
+  v020  digest.rolling_window = 200  backfilled end: round-new.json has no successor-side record of its own: the end was copied from the retirement, not written by the queue
+        not checked: a promise stacked on this record would entrench numbers the ledger itself disputes
+...
+A copied end is a debt, not a defect: re-running the round writes a successor that names its predecessor itself, and `--verify` exits 1 meanwhile.
+```
+
+三个设计决定：
+
+1. **守卫放在叠承诺的地方，不放在出轮的地方。** 一轮刚跑完、自己写下了记录，它的自评不会被自己的账本反驳；会出问题的是把一个旧版本重新当成"在生效的承诺"时。所以守卫在 `--verify` 的循环最前面，`--apply` 与自动接受都不必改变。
+2. **不写验证记录。** 写一条 `unmeasurable` 会让这个版本在 `CLAIM_EXPIRY_DAYS` 内不再被问，恰好是最不希望的结果：它必须在每次跑时都再拦一次，直到账簿自洽。页面因此说"No verification file was written for these versions, so they stay due on every run."
+3. **只有矛盾才是构建缺陷。** 抄来的那一端能靠重跑清掉（边界 154/171：清不掉的闸门没人跑），所以它记 1 而不是 2；而矛盾没有任何命令能裁决，记 2，与第 33 轮 `missing` / `legacy` 的分法一致。
+
+两个在实现与实测中发现的问题：
+
+- `Campaign.to_dict()` 从来没有序列化过 `broken_links`：第 82 轮设了字段、印在了页面上，脚本却看不到它。本轮补了 `backfilled_links`，也把这个事实记下来 —— **打印过的字段不等于导出过的字段**。
+- 补写出来的那一端被当成了一次队列付款。`var/demo84/copied` 上 `--campaign` 打出 `queue paid 0 round(s) were produced by the re-run queue but none of them names its family; 1 more say a queue paid them without naming the family`，而那个账本里唯一的 `queue` 块正是第 83 轮的补写写的（`paid` 为空、`family` 为空，因为补写不知道哪一族被收过费）。第 79 轮的计数器把"`queue` 存在但 family 为空"一律读成"有队列付过费但没说族"，于是修补动作给自己造了一笔不存在的付款。现在 `campaign()` 跳过带 `backfilled` 的 `queue` 块 —— 已经计入 `backfilled` 列，重复计入付款列会让两列互相矛盾。
+
+边界 **176**：承诺只能叠在账簿仍然一致的记录上 —— 一个版本继承它的产出轮，产出轮若是断链参与者，版本就继承了那份矛盾，此时写下的任何"持有/失效"都在替一份自己都不认的账背书。
+
+边界 **177**：拒绝必须能被一次重测清掉 —— 只有矛盾是构建缺陷，抄来的那一端是欠账；把两者都记成 2，等于让修补过的账本永远红着，而没人会跑一个永远红的闸门。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4844,4 +4890,6 @@ missing for the next level
 
 69. **（3.89 已完成）** → 只给 `legacy` 的一端补名（`mismatch` / `dangling` 不补：抄分歧的任一边等于选赢家）；`legacy_links()` 返回 `{retired, successor}` 对而不是去读发现的 `names` 列表；补写的端在 `queue` 里带 `backfilled`（`from` / `at` / `why` / `stream`），`paid` 与 `family` 故意为空；`--repair-links` 计划、`--repair-links --apply` 执行；`--history` / `--audit` 把补写的端单列，退出码仍为 0。`--verify` / `--promote` 拒绝在断链记录上叠加承诺的那一半留给第 70 项。
 
-70. → 让 `--campaign` 也把补写的端单列（`links` 那一行后面加 `N backfilled`），并让 `--verify` / `--promote` 拒绝在一份链接已断（`broken_links` 非空）或后端是补写的记录上叠加承诺——补写解决的是“缺一端”，不是“两端对得上”，后者才是承诺可以叠加的依据。
+70. **（第 3.90 轮完成，2026-11-20）** 已经做出：`--campaign` 的 `links` 行把补写的端单列成 `N replacement link(s) were backfilled by a repair: their ends agree by copying, not as two witnesses`，`--json-out` 里是 `backfilled_links`；`--history` 在存在补写端时不再说"every link that has both ends agrees"。`--verify` 在循环最前面读 `provenance_block(root, version)`：断链记 `broken link` 并 **exit 2**，补写端记 `backfilled end` 并 **exit 1**，两者都不写验证记录，页面说明"每次都会再拦一次"。补写端不再被算作一次队列付款。`--promote` 的那一半留给第 71 项。
+
+71. 让 `--promote`（单独把某个版本设为生效配置的入口）也走 `provenance_block`：它现在是一条绕过 `--verify` 的捷径，能把一个 `--verify` 明确拒绝叠承诺的版本直接设成在生效；同时让 `--audit` 的 `links` 段落把"被拦住的版本"作为第四列（`unchecked`）列出，否则读者只看到断链，看不到断链挡住了什么。

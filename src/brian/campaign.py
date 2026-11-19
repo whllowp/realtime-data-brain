@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from .evolve import (REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
+from .evolve import (BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
                      rejection_provenance, withheld_due, withheld_evidence_age, withheld_records,
                      withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, UNMEASURABLE, VERIFIED, current_state, domain_slug,
@@ -156,6 +156,9 @@ class Campaign:
     # and links whose successor end could not have been written because it predates round 78.
     broken_links: int = 0
     link_legacy: int = 0
+    # Round 84: ends a repair wrote. Counted apart for the same reason `--audit` counts them apart: an
+    # agreement that was copied is not a second witness.
+    backfilled: int = 0
     # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
     retired: int = 0
     # Refusals the loop still holds: the count `previously_rejected` would return, and how many of them
@@ -248,6 +251,7 @@ class Campaign:
             "queue_paid_by_domain": {domain: dict(sorted(counts.items()))
                                      for domain, counts in sorted(self.paid_by_domain.items())},
             "queue_paid_unstated": self.paid_unstated,
+            "backfilled_links": self.backfilled,
             "domains": [row.to_dict() for row in self.rows],
         }
 
@@ -343,7 +347,11 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
         # written by rounds 58-77 says a queue paid it but not which family, which is a third state and is
         # counted as one -- an older record's silence must not be read as "the file family".
         queue_entry = record.get("queue")
-        if isinstance(queue_entry, Mapping) and queue_entry:
+        # Round 84: a repaired end carries a `queue` block so the successor names its predecessor, but its
+        # `paid`/`family` are empty on purpose -- copying a claim is not knowing who paid. Counting it as
+        # "a queue paid this without naming the family" would make the repair invent a payment.
+        repaired = isinstance(queue_entry, Mapping) and isinstance(queue_entry.get(BACKFILL_KEY), Mapping)
+        if isinstance(queue_entry, Mapping) and queue_entry and not repaired:
             family = str(queue_entry.get("family") or "")
             if family:
                 result.paid_families[family] = result.paid_families.get(family, 0) + 1
@@ -478,6 +486,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     # this loop claim", which is exactly the question a link answers wrongly.
     result.broken_links = report.broken_links
     result.link_legacy = report.link_legacy
+    result.backfilled = len(report.backfilled)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
     # streams could see "7 verdicts would change today" and not know which one owes them.
@@ -845,8 +854,14 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             lines.append("links             %d more have no successor-side record (written before round 78) "
                          "and are reported, not charged" % result.link_legacy)
     elif result.link_legacy:
+        # Round 84: "every link that has both ends agrees" is true of a backfilled end too, and means the
+        # opposite there -- one end was copied. The clause is dropped whenever any end was repaired.
         lines.append("links             %d replacement link(s) have no successor-side record (written before "
-                     "round 78); every link that has both ends agrees" % result.link_legacy)
+                     "round 78)%s" % (result.link_legacy,
+                                      "" if result.backfilled else "; every link that has both ends agrees"))
+    if result.backfilled:
+        lines.append("links             %d replacement link(s) were backfilled by a repair: their ends agree by "
+                     "copying, not as two witnesses" % result.backfilled)
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")

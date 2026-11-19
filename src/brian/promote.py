@@ -42,9 +42,61 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .config import ENV_VARS, Settings
 from .deploy import overrides_from_state
-from .evolve import Candidate, EvolveRules, Measurement
+from .evolve import (LINK_DEFECTS, Candidate, EvolveRules, Measurement, backfilled_links,
+                     history, replacement_links)
 
 GEOMETRY_TOLERANCE = 0.25
+
+# Round 84: the two shapes of a record that cannot carry a new promise. They are not the same defect: a
+# broken link is two books contradicting each other, and no command can settle which one is right; a
+# backfilled end is a link this build copied, so the record is usable but its provenance is partly invented.
+LINK_BROKEN = "broken link"
+LINK_BACKFILLED = "backfilled end"
+
+
+def provenance_block(root: Path, version: int) -> Optional[Tuple[str, str]]:
+    """Why this version's record cannot carry a promise today, or None when it can (round 84).
+
+    Round 81 made the two ends of a replacement comparable and round 83 could write the missing one. Both
+    stopped short of the question a promotion asks: *is the record that produced this version still a record
+    anybody can believe?* A version is produced by a round (`applied` names it), and that round can be one
+    of the participants in a link finding -- the books contradict themselves about which round replaced
+    which. Stacking a promise on top of a contradictory record entrenches numbers whose provenance the
+    ledger itself disputes, and the next `--audit` cannot settle it either (boundary 170/173).
+
+    A backfilled end is the second, weaker case: the end was copied by round 83's repair, so it agrees by
+    construction. It is clearable -- re-running the round writes a successor that names its predecessor
+    itself -- which is why it is reported and charged (exit 1) rather than treated as a build defect (2).
+    """
+    label = "v%03d" % int(version)
+    rounds = history(root, include_retired=True)
+    produced: List[str] = []
+    for record in rounds:
+        applied = record.get("applied") or []
+        if not isinstance(applied, list):
+            # Round 71 met this shape: the ledger stores `applied` as a count while the round file stores
+            # names. A count cannot say which version a round produced, so it cannot block anything.
+            continue
+        if label in {str(item) for item in applied}:
+            produced.append(str(record.get("round") or ""))
+    if not produced:
+        return None
+    for item in replacement_links(rounds):
+        if item.get("kind") not in LINK_DEFECTS:
+            continue
+        participants = {str(item.get("round") or "")}
+        participants |= {str(name) for name in (item.get("names") or [])}
+        for name in produced:
+            if name in participants:
+                return (LINK_BROKEN, "%s is one of the records in a %s link: %s"
+                        % (name, item["kind"], item["detail"]))
+    backfilled = set(backfilled_links(rounds))
+    for name in produced:
+        if name in backfilled:
+            return (LINK_BACKFILLED, "%s has no successor-side record of its own: the end was copied from the "
+                                     "retirement, not written by the queue" % name)
+    return None
+
 # How long a recorded verdict speaks for the claim. A check is evidence about the day it ran: a `holds`
 # from a year ago and an `unmeasurable` from last March are both statements nobody has tested since, and
 # `--verify` selected neither of them again. 14 days is deliberately short -- the measurement costs a few

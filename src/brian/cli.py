@@ -86,6 +86,7 @@ from .deploy import reload_capable
 from .propose import Mode, Proposal, describe_proposal, format_proposal, propose, proposal_capable
 from .promote import (
     FAILED,
+    LINK_BROKEN,
     UNMEASURABLE,
     VERIFIED,
     apply_promotion,
@@ -97,6 +98,7 @@ from .promote import (
     legacy_state_note,
     load_promotions,
     promotions_for_domain,
+    provenance_block,
     revert_promotion,
     set_state_budget,
     state_budgets,
@@ -2577,7 +2579,22 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if promotions:
             _print("verifying %d promotion(s) from %s on %s"
                    % (len(promotions), domain_slug(domain), source))
+        # Round 84: a version is only as trustworthy as the round that produced it. That round's record
+        # names the version in `applied`, and rounds 81-83 made it possible to say whether the record's
+        # replacement link is contradicted or was copied. A promise stacked there would entrench numbers the
+        # ledger itself disputes -- and the check is skipped *without* writing a verdict, because an
+        # `unmeasurable` record would suppress re-checking until the claim expires, while this has to nag
+        # until the books agree.
+        blocked: List[Tuple[str, str]] = []
         for promotion in promotions:
+            block = provenance_block(root, promotion.version)
+            if block is not None:
+                blocked.append(block)
+                _print("  v%03d  %s  %s: %s"
+                       % (promotion.version, promotion.change, block[0], block[1]))
+                _print("        not checked: a promise stacked on this record would entrench numbers the "
+                       "ledger itself disputes")
+                continue
             if not promotion.pending:
                 age = verification_age_days(promotion.verification)
                 _print("  v%03d  re-checking: its last check is %s old (expiry %.0f day(s))"
@@ -2646,6 +2663,23 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("")
         _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain,
                                  expiry_days=args.expiry_days))
+        broken = sum(1 for kind, _detail in blocked if kind == LINK_BROKEN)
+        copied = sum(1 for kind, _detail in blocked if kind != LINK_BROKEN)
+        if blocked:
+            _print("")
+            _print("%d version(s) were left unchecked: %d carry a replacement link the ledger contradicts, "
+                   "%d were recorded on an end a repair copied." % (len(blocked), broken, copied))
+            if broken:
+                _print("A contradiction is a build defect: no re-measurement settles which of the two books "
+                       "is right, so `--verify` exits 2. `--audit` names the link.")
+            if copied:
+                _print("A copied end is a debt, not a defect: re-running the round writes a successor that "
+                       "names its predecessor itself, and `--verify` exits 1 meanwhile.")
+            _print("No verification file was written for these versions, so they stay due on every run.")
+        if broken:
+            return 2
+        if copied:
+            return 1
         return 0
 
     settings, streams, source, base_overrides = _evolve_streams(args, settings)
