@@ -4466,6 +4466,83 @@ links             1 more have no successor-side record (written before round 78)
 **边界 173：闸门可以因为某件事失败，但同一份输出里必须印出那件事。** 只靠退出码传递的失败，读者只能猜是哪一条规则触发的。
 
 
+### 3.89 补一次就不再有：`legacy` 端的修复，以及为什么修复必须自己招认
+
+第 81 轮把替换关系分成四类，其中 `legacy` 是唯一"补不回来"的一类：后继记录写于第 78 轮之前，`queue.paid_round` 这个字段还不存在，于是退休记录说"我由 round-new 重测"，而 round-new 一个字不说。第 82 轮把它标成"只印不收费"——诚实的做法，但代价是这笔账永远挂在页面最上面，读者每次打开都要重新读一遍。
+
+第 83 轮给它补了一次名，但只补这一种，且补完必须自己招认。
+
+**一、只补 `legacy`。** `mismatch` 与 `dangling` 不进修复：前者是两份记录的**分歧**，抄任何一边都等于在没有证据的情况下选一个赢家；后者连对方记录都不在账簿里，没有可抄的东西。这两类留给 `--audit --strict` 去收费（边界 173 已经在收）。`legacy` 不同：后继**什么都没说过**，所以没有可矛盾的对象，抄退休记录那一句不选赢家。修复按对生成，而不是从发现的 `names` 里取：
+
+```
+legacy_links(records) -> [{"retired": "round-old.json", "successor": "round-new.json"}]
+```
+
+这条修复本身带一个陷阱，第一次跑就踩到了：第 82 轮把 `names` 改成了**参与者列表**（一个缺陷可能牵涉三份记录），而修复的第一版写的是 `successor_name = str(item.get("names"))`，于是"文件名"变成了 `"['round-new.json', 'round-old.json']"`，哪个文件都不存在，`--repair-links` 对每一份链接都打印 `skipped … the successor has no round file to write to`，`0 of 1 legacy link(s) would be repaired.` 一行字都没写。**修好之后的第一条结论是：`names` 是给人读的集合，不是给程序取名的字段**——需要某一端时，从记录本身重新算。
+
+**二、补完的端必须写清"我是抄来的"。** 修复把 `queue.paid_round` 写进后继的**轮次文件**（不是 ledger：`history()` 先读轮文件、再让 ledger 覆盖，而 ledger 不带 `queue` 字段，所以写在文件上才看得见），并在同一块里加一个 `backfilled`：
+
+```json
+"queue": {
+  "paid": "",
+  "paid_round": "round-old.json",
+  "family": null,
+  "backfilled": {"from": "round-old.json", "at": "2026-11-20T00:00:00Z",
+                 "why": "the retirement mark was the only end of this replacement that existed",
+                 "stream": "SMD"}
+}
+```
+
+`paid` 故意留空：第 80 轮按 `queue.paid` 汇总"每个域付了哪一族"，而修复**不知道**当时的队列会把这笔账记在哪个域上；猜一个，就是把修复的想象写进那张表。`family` 同理留 `null`。
+
+没有这个标记，下一次 `--audit` 会读到两端一致，报告"every link agrees"——而那份一致是修复自己制造的。**让两份声明一致，和让两份声明互相印证，是两件不同的事**（边界 174）。
+
+```
+$ brian evolve --repair-links
+would write    round-old.json -> round-new.json  (marked `backfilled`, so the agreement is copied, not a second opinion)
+1 of 1 legacy link(s) would be repaired.
+
+nothing was written; add --apply to write these 1 end(s).
+
+$ brian evolve --repair-links --apply
+wrote          round-old.json -> round-new.json  (marked `backfilled`, so the agreement is copied, not a second opinion)
+1 of 1 legacy link(s) repaired.
+
+a repaired end records `backfilled`, so the two ends agree by copying; --audit counts these
+separately and does not treat them as independent confirmation.
+```
+
+**三、三个页面要同时改口。** 修完以后 `--history` 不再说"every replacement link agrees"，而是：
+
+```
+links             1 replacement link(s) were backfilled by a repair: the agreement is copied, not a second opinion
+```
+
+`--audit` 也把补写的端单列，而不是并进"没有缺陷"：
+
+```
+1 replacement link(s) were backfilled by a repair, so their two ends agree by copying:
+  round-new.json
+Counted separately on purpose: a copied end is not a second witness, and the repair is not evidence
+that the replacement happened.
+
+ceilings          every recorded round was judged under today's ceilings; 1 round(s) do not say which ceilings they were judged under
+```
+
+退出码仍然是 0：补写消除的是"缺一端"，不是"两端矛盾"，如果把它也算成缺陷，那么每修一次，闸门就红一次，修复永远无法让账簿变干净（与第 33 轮 `legacy` / `missing` 的拆分同一条理由）。
+
+**四、跑起来才发现的三个小缺陷。**
+
+1. **草稿把可修的链接印成 `skipped`。** `format_repairs` 用 `written` 判断"这行修了没有"，但 dry run 里 `written` 天生是 `False`，于是一份能修的链接被印成"跳过"，摘要还写 `0 of 1 … would be repaired`——**计划（would write）与实际（wrote）是两个事实**，行里必须各占一个字段。
+2. **`--repair-links` 不带 `--apply` 时不打印 "add --apply"。** 同一原因：它数的是 `written`，而计划里没人被写，于是提示数为 0，读者拿到的是一份没法执行的计划。
+3. **`--history` 明明有一端没写，却说"every replacement link agrees"。** 第 82 轮给 `--campaign` 加了 `legacy` 分支，`--history` 只加了"缺陷"和"一致"两条——**一个页面在两种状态之间只有两个分支时，第三种状态会被悄悄归到其中一边**，这里归到了"一致"。现在 `--history` 把"缺一端"和"补写的端"各印一行，两条都印不出来时才说"每一端都一致"。
+
+三个都是同一类：**判断句用的字段，和读者以为它在判断的事实，不是同一个**。前两个字段叫 `written`（做过），语义却是 `would_write`（能做）；第三个分支少了一条，缺省就落进"没问题"。
+
+**边界 174：一次让两份声明变一致的修复，必须在被修复的那一端记下"这是抄来的"**——否则"一致"就同时包含了"互相印证"和"自己抄自己"，而后者永远无法被读者区分出来。
+
+**边界 175：能改写历史记录的命令，必须能在动手之前把要写的东西写出来给人看。** 计划与执行分开（`--repair-links` / `--repair-links --apply`），因为一旦写进账簿，"原来是什么样"就只剩读者手里的那句记忆。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4765,5 +4842,6 @@ missing for the next level
 
 68. **（3.88 已完成）** → 链接校验的两处补齐：`replacement_links` 按"被声称的后继"分组、每个提名者单独判定，`names` 改成列表，`--history` / `--audit` / `--json-out` 都点名全部参与者；`--campaign` 页面把它已经计入 `--strict` 的 `broken_links` 印出来（历史那一端单独一行，标明"报告但不收费"）。
 
-69. → 让链接校验反过来也能被用起来：`--verify` / `--promote` 拒绝在一份链接已断（`broken_links` 非空）的记录上叠加承诺；`--rerun-unrecorded` 给 `legacy` 的一端正一次名（后继记录补写 `queue.paid_round`），把"补不回来"变成"补一次就不再有"，并让 `legacy` 计数随补写一起下降。
+69. **（3.89 已完成）** → 只给 `legacy` 的一端补名（`mismatch` / `dangling` 不补：抄分歧的任一边等于选赢家）；`legacy_links()` 返回 `{retired, successor}` 对而不是去读发现的 `names` 列表；补写的端在 `queue` 里带 `backfilled`（`from` / `at` / `why` / `stream`），`paid` 与 `family` 故意为空；`--repair-links` 计划、`--repair-links --apply` 执行；`--history` / `--audit` 把补写的端单列，退出码仍为 0。`--verify` / `--promote` 拒绝在断链记录上叠加承诺的那一半留给第 70 项。
 
+70. → 让 `--campaign` 也把补写的端单列（`links` 那一行后面加 `N backfilled`），并让 `--verify` / `--promote` 拒绝在一份链接已断（`broken_links` 非空）或后端是补写的记录上叠加承诺——补写解决的是“缺一端”，不是“两端对得上”，后者才是承诺可以叠加的依据。

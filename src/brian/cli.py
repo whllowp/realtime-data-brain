@@ -73,7 +73,10 @@ from .evolve import (
     withheld_evidence_age,
     withheld_records,
     withheld_streams,
-)
+    BACKFILL_KEY,
+    backfilled_links,
+    format_repairs,
+    repair_legacy,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
 from .laya.gate import explain_thresholds
@@ -1575,12 +1578,29 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # printed here (the retired row says what replaced it, the successor says what it replaced), so this
         # is the one page where a disagreement is visible to a reader who does not already suspect one.
         link_rows = replacement_links(rounds)
+        # Round 83: an end written by a repair agrees with the other side by construction, so it is counted
+        # apart from the links the queue wrote. "Every link agrees" is true of both, and means different
+        # things; a page that prints only the first sentence lets a copied statement read as a witness.
+        repaired_links = backfilled_links(rounds)
+        link_legacy = [item for item in link_rows if item.get("kind") == "legacy"]
         link_defects = [item for item in link_rows if item.get("kind") in ("mismatch", "unretired", "dangling")]
         if link_defects:
             _print("links             %d replacement link(s) disagree with their other end: %s"
                    % (len(link_defects), ", ".join(sorted({str(item["round"]) for item in link_defects}))))
         else:
-            _print("links             every replacement link agrees with the other end it names")
+            # Round 83: "every link agrees" is false when one end was never written, and it says nothing about
+            # how an agreement came about. Both are printed on their own line rather than folded into the
+            # sentence, because a reader who sees only "agrees" will trust a link that has one end (boundary
+            # 174's converse: silence about the missing end reads as completeness).
+            if link_legacy:
+                _print("links             %d replacement link(s) have no successor-side record (written before "
+                       "round 78) and are reported, not charged: %s"
+                       % (len(link_legacy), ", ".join(sorted({str(item["round"]) for item in link_legacy}))))
+            if repaired_links:
+                _print("links             %d replacement link(s) were backfilled by a repair: the agreement is "
+                       "copied, not a second opinion" % len(repaired_links))
+            if not link_legacy and not repaired_links:
+                _print("links             every replacement link agrees with the other end it names")
         _print("ceilings          %d of %d round(s) record the wait ceilings they were judged under; %d do not"
                % (len(recorded_limits), len(rounds), len(rounds) - len(recorded_limits)))
         history_rows: List[Dict[str, Any]] = []
@@ -2305,6 +2325,38 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("L4 comes from the proposal rule being selected from the ledger (bounded by a declared")
         _print("space); the objective, decide() and the evaluator stay outside. Each round records")
         _print("which rule proposed it, so 'the mechanism changed' is a fact with a fingerprint.")
+        return 0
+
+    if getattr(args, "repair_links", False):
+        # Round 83: a `legacy` end is repaired by copying the retirement's claim into the successor record.
+        # Without `--apply` this only prints what it would write: a command that edits recorded history has
+        # to be able to show the edit first (boundary 175).
+        rounds = history(root, include_retired=True)
+        try:
+            rows = repair_legacy(root, dry_run=not args.apply)
+        except (OSError, ValueError) as error:
+            _print("cannot repair the replacement links: %s" % error)
+            return 2
+        _print(format_repairs(rows, dry_run=not args.apply))
+        # `would_write` counts the links a plan could repair; `written` counts the ones an apply did. Asking a
+        # plan for `written` prints nothing and leaves the reader with a plan they cannot act on (round 83).
+        repairable = sum(1 for row in rows if row.get("would_write"))
+        written = sum(1 for row in rows if row.get("written"))
+        if not args.apply and repairable:
+            _print("")
+            _print("nothing was written; add --apply to write these %d end(s)." % repairable)
+        # A repaired end is not evidence: say so on the same page, so the next `--audit` line is not read as
+        # "the ledger corroborates itself". This is the whole point of the mark (boundary 174).
+        if written:
+            _print("")
+            _print("a repaired end records `%s`, so the two ends agree by copying; --audit counts these"
+                   % BACKFILL_KEY)
+            _print("separately and does not treat them as independent confirmation.")
+        json_out = getattr(args, "json_out", None)
+        if json_out:
+            target = Path(json_out)
+            target.write_text(__import__("json").dumps({"repairs": rows}, indent=2) + "\n",
+                              encoding="utf-8")
         return 0
 
     if args.propose:
@@ -3841,6 +3893,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "(the deployment state is the baseline by default)")
     evolve.add_argument("--grade", action="store_true",
                         help="print the L1-L5 grading and exit")
+    evolve.add_argument("--repair-links", action="store_true",
+                        help="write the missing end of a legacy replacement link; plan only without --apply")
     evolve.add_argument("--history", action="store_true",
                         help="print every round recorded so far and exit")
     evolve.add_argument("--rejudge", default="",

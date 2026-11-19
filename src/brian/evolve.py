@@ -2638,6 +2638,128 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
 
 LINK_DEFECTS = ("mismatch", "unretired", "dangling")
 
+# Round 83: the mark a repaired end carries. A `legacy` link is repaired by copying the retirement's claim
+# into the successor record, which makes both ends say the same thing -- so the mark has to say *how* they
+# came to agree, or the next audit will treat a copied statement as a second witness.
+BACKFILL_KEY = "backfilled"
+
+
+def legacy_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The `legacy` links as pairs: a retirement whose successor recorded no end of its own (round 83).
+
+    Round 82 made a finding's `names` a list of participants, because a finding can involve three records.
+    A repair needs the one successor to write to, not the participants, so this derives the pair from the
+    records instead of indexing a list whose order means something else (round 83's first attempt read
+    `names` as a string and skipped every link).
+    """
+    by_name = {str(record.get("round") or ""): record for record in rounds}
+    pairs: List[Dict[str, Any]] = []
+    for record in rounds:
+        retire = record.get("retired")
+        if not isinstance(retire, Mapping):
+            continue
+        successor_name = str(retire.get("re_measured_as") or "")
+        if not successor_name or successor_name not in by_name:
+            continue
+        link = by_name[successor_name].get("queue")
+        if isinstance(link, Mapping) and str(link.get("paid_round") or ""):
+            continue
+        pairs.append({"retired": str(record.get("round") or ""), "successor": successor_name})
+    return pairs
+
+
+def backfilled_links(rounds: Sequence[Mapping[str, Any]]) -> List[str]:
+    """Successors whose `queue` block was written by a repair rather than by the re-run queue (round 83)."""
+    found: List[str] = []
+    for record in rounds:
+        link = record.get("queue")
+        if isinstance(link, Mapping) and isinstance(link.get(BACKFILL_KEY), Mapping):
+            found.append(str(record.get("round") or ""))
+    return found
+
+
+def repair_legacy(root: Path, *, at: Optional[str] = None, dry_run: bool = False) -> List[Dict[str, Any]]:
+    """Write the successor-side end of every `legacy` link, marked as copied (round 83).
+
+    Only the `legacy` case is repaired. A `mismatch` or `dangling` link is a disagreement or a missing
+    record, and copying either side of a disagreement would pick a winner with no evidence; those stay for
+    a human (round 81 charges them). Repairing a `legacy` end picks no winner: the successor made no claim at
+    all, so there is nothing to contradict -- and the repaired block records who it was copied from, when,
+    and that the queue never wrote it.
+
+    `dry_run` reports the same rows without writing, because a command that edits recorded history has to be
+    able to show what it would write (boundary 175).
+    """
+    directory = root / EVOLVE_DIR
+    rounds = history(root, include_retired=True)
+    by_name = {str(record.get("round") or ""): record for record in rounds}
+    moment = at or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    repaired: List[Dict[str, Any]] = []
+    for item in legacy_links(rounds):
+        retired_name = str(item.get("retired") or "")
+        successor_name = str(item.get("successor") or "")
+        retired = by_name.get(retired_name) or {}
+        successor = by_name.get(successor_name) or {}
+        row = {"retired": retired_name, "successor": successor_name, "would_write": False,
+               "written": False, "reason": ""}
+        link = successor.get("queue")
+        if isinstance(link, Mapping) and str(link.get("paid_round") or ""):
+            row["reason"] = "the successor already names %s, so this is not a legacy end" % link.get("paid_round")
+            repaired.append(row)
+            continue
+        path = directory / successor_name
+        if not path.exists():
+            row["reason"] = "the successor has no round file to write to"
+            repaired.append(row)
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload.get("queue"), Mapping) and payload["queue"].get("paid_round"):
+            row["reason"] = "the round file on disk already names a predecessor"
+            repaired.append(row)
+            continue
+        source = (retired.get("stream") or {}).get("source") or ""
+        payload["queue"] = {
+            # Round 80 keys `paid by domain` on this field: a repair does not know which domain the queue
+            # would have charged, and guessing one would put the repair's invented domain into that table.
+            "paid": "",
+            "paid_round": retired_name,
+            "family": None,
+            BACKFILL_KEY: {
+                "from": retired_name,
+                "at": moment,
+                "why": "the retirement mark was the only end of this replacement that existed",
+                "stream": str(source),
+            },
+        }
+        # `would_write` and `written` are different facts: a plan says "this end can be repaired", an apply
+        # says "it was". Without the first, a dry run prints its repairable links as "skipped" (round 83
+        # printed `0 of 1 ... would be repaired` for a link it had just described as repairable).
+        row["would_write"] = True
+        row["written"] = not dry_run
+        if not dry_run:
+            path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        repaired.append(row)
+    return repaired
+
+
+def format_repairs(rows: Sequence[Mapping[str, Any]], dry_run: bool = False) -> str:
+    """One line per link the repair looked at, and what it did (round 83)."""
+    lines: List[str] = []
+    if not rows:
+        lines.append("no legacy link: every retired round either has a successor that named it back, or none")
+        return "\n".join(lines)
+    verb = "would write" if dry_run else "wrote"
+    for row in rows:
+        if row.get("would_write"):
+            lines.append("%-14s %s -> %s  (marked `%s`, so the agreement is copied, not a second opinion)"
+                         % (verb, row["retired"], row["successor"], BACKFILL_KEY))
+        else:
+            lines.append("%-14s %s -> %s  %s" % ("skipped", row["retired"], row["successor"], row["reason"]))
+    written = sum(1 for row in rows if row.get("would_write"))
+    lines.append("%d of %d legacy link(s) %s." % (written, len(rows), "would be repaired" if dry_run
+                                                  else "repaired"))
+    return "\n".join(lines)
+
 
 def _round_name(name: str) -> str:
     return name if name.endswith(".json") else "%s.json" % name
@@ -3157,6 +3279,10 @@ class Audit:
     # from `entries` because a broken link is not a verdict that moved: it says the books disagree with
     # each other, which no amount of re-deciding under today's rules can fix.
     links: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 83: successors whose end of a link was written by a repair. Counted on its own because agreeing
+    # by copying is not agreeing as two witnesses, and an audit that folds them in makes its own repair look
+    # like corroboration.
+    backfilled: List[str] = field(default_factory=list)
 
     @property
     def broken_links(self) -> int:
@@ -3266,7 +3392,8 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
             })
     return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials,
                  entries=entries, retired=retired,
-                 links=replacement_links(history(root, include_retired=True)))
+                 links=replacement_links(history(root, include_retired=True)),
+                 backfilled=backfilled_links(history(root, include_retired=True)))
 
 
 def _limit_terms(limits: Optional[Mapping[str, Any]]) -> Optional[Tuple[Optional[float],
@@ -3453,7 +3580,7 @@ def format_audit(result: Audit) -> str:
     lines.append("")
     if not result.entries:
         lines.append("every recorded verdict survives today's rules.")
-        if result.links:
+        if result.links or result.backfilled:
             lines.append("")
             lines.extend(_link_lines(result))
         return "\n".join(lines)
@@ -3496,7 +3623,7 @@ def format_audit(result: Audit) -> str:
             lines.append("All of them predate the geometry field: they cannot be replayed, but re-running "
                          "such a round")
             lines.append("writes a record that can be.")
-    if result.links:
+    if result.links or result.backfilled:
         lines.append("")
         lines.extend(_link_lines(result))
     return "\n".join(lines)
@@ -3528,6 +3655,16 @@ def _link_lines(result: Audit) -> List[str]:
             lines.append("  %-26s -> %s (%s)" % (item["round"], item["names"], item["detail"]))
         lines.append("Nothing is wrong with those records; the field did not exist. Re-running the round "
                      "writes both ends.")
+    if result.backfilled:
+        # Round 83: a repaired end agrees with the other side because it was copied from it. Printed apart
+        # from both the defects and the legacy list so that "every link agrees" never silently includes an
+        # agreement this build wrote (boundary 174).
+        lines.append("%d replacement link(s) were backfilled by a repair, so their two ends agree by copying:"
+                     % len(result.backfilled))
+        lines.append("  %s" % ", ".join(sorted(result.backfilled)))
+        lines.append("Counted separately on purpose: a copied end is not a second witness, and the repair is "
+                     "not evidence")
+        lines.append("that the replacement happened.")
     return lines
 
 
