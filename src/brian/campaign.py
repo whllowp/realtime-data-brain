@@ -21,7 +21,7 @@ from .evolve import (BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, hist
                      withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
                       current_state, domain_slug,
-                      load_promotions, shape_note)
+                      load_promotions, never_tested_at_origin, shape_note)
 
 __all__ = ["Campaign", "CampaignRow", "budget_text", "campaign", "format_campaign", "span_text"]
 
@@ -990,6 +990,27 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                 lines.append("links             v%03d holds a verdict it cannot place: %s (%s)"
                              % (int(item.get("version") or 0), str(row.get("at") or "?"),
                                 str(row.get("verdict") or "?")))
+        origin_queue = never_tested_at_origin(moves)
+        if origin_queue["records"]:
+            # Round 100: the population behind round 99's single-record sentence. A reader who learns that one
+            # record was never tested where it was made has to know whether that is one record or the whole
+            # book, and which file to open first (boundary 219).
+            files = origin_queue["by_file"]
+            if len(files) > 1:
+                lines.append("links  never tested at their origin: %s"
+                             % "; ".join("%s %d record(s)" % (name, count)
+                                         for name, count in sorted(files.items())))
+            first = origin_queue["versions"][0]
+            held = ("%d verdict(s), all elsewhere" % first["verdicts"] if first["verdicts"]
+                    else "no verdict at all")
+            if first["origin_exists"]:
+                next_step = (" -- start with brian evolve --verify --verify-version %03d --stream-file %s"
+                             % (first["version"], first["origin"]))
+            else:
+                next_step = " -- the file it was born with is not in this checkout, so it cannot be measured there"
+            lines.append("links             %d record(s) hold no verdict on the file their promise was born "
+                         "with: v%03d (%s)%s"
+                         % (origin_queue["records"], first["version"], held, next_step))
         after = sum(int(item.get("checks_on_repair") or 0) for item in moves)
         if after:
             # Round 95: the verdicts taken after the move are the part of the evidence a reader would most

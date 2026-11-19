@@ -5397,6 +5397,69 @@ links  v020 holds a verdict it cannot place: 2026-12-01T12:00:00+00:00 (unmeasur
 在当时那棵树上为真；第 99 轮一有原件侧判断，这句话就成了假话，而且假在读者最需要分清两种判断的地方。断言
 过去证据的句子要先查 `evidence_split`，数字变了句子跟着变（第 190 轮的规则用在句子的主语上）。
 
+### 3.106 一条记录的分裂是事实，"有多少条"是另一个事实：把孤儿承诺排成队列
+
+第 99 轮让 `--verify` 和 `--campaign` 会说：这一条判断是不是**第一次取在承诺出生的那个文件上**。那是一句关于
+单条记录的话。读者读完之后，下一个问题一定是："这样的记录有几条？" 页面答不出来——它能说 v020 的分裂，说不出
+账本上还有多少条承诺从未在出生地量过，也说不准先看哪一条。
+
+`never_tested_at_origin(rows)` 把这件事做成数字：遍历 `repaired_paths` 的行，凡是 `evidence["original"] == 0`
+的就算一条，按"第一次移动之前那个文件"分桶，并按版本号排好。两个细节：
+
+- **"从未测过"包含"一次都没查过"。** 一份记录可能连一条判断都没有；只统计"证据全在别处"的记录会把这种最弱的
+  记录从队列里漏掉，而队列的分母就因此变小了（第 79 轮：读不出状态的字段要算作自己的一类）。
+- **出生文件不是当前文件。** 用的是 `first_from`（第一次移动的 `from`），不是 `stream_path`；记录的当前值是
+  修复的结果，而队列问的是"这份承诺是在哪儿被许下的"。
+
+`--campaign` 因此多了两句话。只有一条时：
+
+```
+links  1 record(s) hold no verdict on the file their promise was born with: v020 (1 verdict(s), all elsewhere) -- start with brian evolve --verify --verify-version 020 --stream-file data/smd/stream-real.json
+```
+
+出生文件有多个时，先按文件分开数，再点名第一条：
+
+```
+links  never tested at their origin: data/smd/third.json 1 record(s); data/smd/stream-real.json 1 record(s)
+```
+
+原件不在本地时不假装能测：
+
+```
+links  1 record(s) hold no verdict on the file their promise was born with: v020 (no verdict at all) -- the file it was born with is not in this checkout, so it cannot be measured there
+```
+
+`--verify` 也补一句话：当这次检查不会碰到承诺出生的地方、而那个文件还在时——
+
+```
+        this check measures the repaired location, not the file the promise first named (boundary 203)
+        this promise has never been measured on the file it was born with (data/smd/stream-real.json), which exists here:
+        measuring there is what would test the promise where it was made (boundary 218)
+```
+
+这句话只是提示，不换文件：换文件是调用者的事（第 92/197 轮：替换必须自己说出来，不能悄悄换）。它修的是另一种
+沉默——在替代文件上再量一次、再失败一次，页面上会多一条"又检查过了"，而承诺本身从来没被碰过。
+
+量在原件上的那一次，历史里也认得出：
+
+```
+clearings        1 recorded clearing(s); each names the measurement that earned it:
+  v020  attempt 1  2026-11-19T23:13:23+00:00  failed        data/smd/stream-real.json  [first verdict at the origin]
+```
+
+`record_clearing` 因此多一个 `first_original` 字段，`--history` 的 `clearings` 块据此加标记。“第一次在原件上
+量”是结账链上的一个事件，不该只活在版本文件的一个布尔字段里。
+
+**边界 218：一次不测承诺的检查，要说清楚它没测。** 在替代文件上取的判决是"这份替代文件上的承诺不成立"，不是
+"这份承诺不成立"；页面不说这一点，读者会把"又查了一次"当成"承诺被反复检验"。指针换不换由调用者决定，但沉默
+不是选项。
+
+**边界 219：一条记录的分裂要配一个总体计数。** 单条记录的 `0 on its original file` 回答不了"这算多吗"；账本
+必须能给出队列的总量、按出生文件的分桶、以及第一条该打开哪一份——否则读者只能把它当成孤例。
+
+**边界 220："从未在出生地量过"包含"一次都没量过"。** 只数"证据全在别处"的记录会让队列小看自己，而被漏掉的
+恰恰是最弱的那几条（一条判断都没有的记录）；统计一个"从未做过的事"，要把"什么都没做"算进去。
+
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
@@ -5771,7 +5834,14 @@ missing for the next level
     运行中抓到第二个缺陷：第 97 轮那句"它已持有的判断都取在替代文件上"在同一份记录既有一份原件侧判断时是假
     的，改成"其中 N 条取在这里、M 条在别处"（边界 217）。
 
-86. 让 `--campaign` 按文件统计"从未在承诺出生的地方量过"的承诺有多少（一个队列：证据全在别处的记录），并让
-    `--verify` 在这种记录上优先选原件文件；现在页面能说出单条记录的分裂，说不出这种记录的**总量**，也就排不出
-    先查哪一个。另外把 `first_original_measurement` 接进 `--history` 的 `clearings` 链，让"第一次在原件上
-    量"在历史里也是可见的一行，而不只是版本文件里的一个字段。
+86. 已完成：把"孤儿承诺"排成队列。补丁加了 `never_tested_at_origin(rows)`（没有一条判断取在承诺出生文件上的
+    记录，含"一次都没查过"的那些，按出生文件分桶），`--campaign` 打出 `N record(s) hold no verdict on the file
+    their promise was born with: v020 (1 verdict(s), all elsewhere) -- start with brian evolve --verify
+    --verify-version 020 --stream-file <原件>`，原件不在本地时说"量不了"而不是给一条跑不通的命令；`--verify`
+    在"这次检查不会碰承诺出生的地方、而那个文件还在"时补一句"量那里才是测这份承诺"（边界 218）；
+    `record_clearing(..., first_original=)` 与 `--history` 的 `[first verdict at the origin]` 让"第一次在
+    原件上量"在历史里也是一行。数字上：1492 → 1506 个测试（`tests/test_origin_queue.py` 12 条），`pyflakes` 0。
+
+87. 让队列成为可执行动作：`--verify` 接受 `--from-queue N`（按 campaign 队列的顺序取前 N 条、各自用它出生的文件
+    去测），并把队列写进 `--campaign --json-out`，让"先查哪一个"从一句话变成一个命令；现在页面能排出顺序，但
+    执行这一步还要人抄一次版本号和文件名，而抄错一次就是又一次"量在别处"。

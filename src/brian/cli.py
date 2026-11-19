@@ -1753,6 +1753,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     # they think it does (boundary 197).
                     if entry.get("substituted_from"):
                         mark += "  [substituted for %s]" % str(entry.get("substituted_from"))
+                    # Round 100: the first verdict ever taken where the promise was made is a different
+                    # event from another re-check, and the chain is where a reader goes to see the order.
+                    if entry.get("first_original"):
+                        mark += "  [first verdict at the origin]"
                     _print("  v%03d  attempt %-2d %s  %-13s %s%s"
                            % (version, int(entry.get("attempt") or 0),
                               str(entry.get("checked_at") or ""), str(entry.get("verdict") or ""),
@@ -2816,7 +2820,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         copied_measured: List[Tuple[str, str]] = []
         # Round 88: the versions this run actually measures, with the moment of the check. A version that was
         # skipped (a contradicted record, an expired definition) measured nothing and clears nothing.
-        measured_versions: List[Tuple[int, str, str, str]] = []
+        measured_versions: List[Tuple[int, str, str, str, bool]] = []
         for promotion in promotions:
             # Round 95: round 94 put the repair on the version table; the check has to say it too, and say it
             # before measuring, because the number it records (`stream_path_moves`) describes where it stood.
@@ -2867,6 +2871,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 if on_original and prior_split["total"] and not prior_split["original"]:
                     _print("        this is the first verdict taken on the file the promise was born with: all "
                            "%d it holds were measured elsewhere (boundary 213)" % prior_split["total"])
+                elif not on_original and not prior_split["original"] and promotion.path_origin \
+                        and (root / promotion.path_origin).is_file():
+                    # Round 100: the queue, one record at a time. This check will not touch the place the
+                    # promise was made, and that place exists here, so the page names what measuring there
+                    # would buy instead of quietly recording another verdict somewhere else (boundary 218).
+                    _print("        this promise has never been measured on the file it was born with (%s), "
+                           "which exists here:" % promotion.path_origin)
+                    _print("        measuring there is what would test the promise where it was made "
+                           "(boundary 218)")
             block = provenance_block(root, promotion.version)
             if block is not None and block[0] == LINK_BROKEN:
                 blocked.append(block)
@@ -2932,12 +2945,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # Retracting is not stacking, so a copied end does not block it.
                 revert_promotion(root, promotion, domain=domain)
                 write_verification(root, promotion, payload, reverted_at=_stamp())
-                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason))
+                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason,
+                                          bool(payload.get("first_original_measurement"))))
                 _print("  v%03d  %s  FAILED and reverted: %s" % (promotion.version,
                                                                  promotion.change, reason))
             elif verdict == VERIFIED:
                 write_verification(root, promotion, payload)
-                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason))
+                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason,
+                                          bool(payload.get("first_original_measurement"))))
                 if copied:
                     _print("  v%03d  %s  %s (not applied: the record's link was repaired from one end, and a "
                            "promise stacked on it would inherit that copy)"
@@ -2972,7 +2987,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                         "candidate": shape.describe(),
                     }
                 write_verification(root, promotion, payload)
-                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason))
+                measured_versions.append((promotion.version, payload["checked_at"], verdict, reason, False))
                 _print("  v%03d  %s  unmeasurable: %s" % (promotion.version, promotion.change, reason))
                 hint = rescale_hint(promotion, promotion.stream, checked_stream)
                 if hint:
@@ -2985,12 +3000,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # open to audit the verdict. `--stream-file` may be empty (the demo stream), and an empty path is
         # recorded as empty rather than guessed.
         checked_path = str(getattr(args, "stream_file", None) or "")
-        for version, checked_at, verdict, why in measured_versions:
+        for version, checked_at, verdict, why, first_original in measured_versions:
             cleared_now.extend(record_clearing(root, version, now=checked_at, verdict=verdict,
                                                reason="measured again by --verify",
                                                tested=verdict != UNMEASURABLE,
                                                attempt_reason=why, stream_path=checked_path,
-                                               substituted_from=substituted_from))
+                                               substituted_from=substituted_from,
+                                               first_original=first_original))
         answered = [entry for entry in cleared_now if entry.get("tested") is not False]
         attempted = [entry for entry in cleared_now if entry.get("tested") is False]
         if answered:

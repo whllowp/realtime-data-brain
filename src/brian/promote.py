@@ -407,7 +407,8 @@ def in_force_history(root: Path) -> Tuple[List[Dict[str, Any]], int]:
 def record_clearing(root: Path, version: int, now: Optional[datetime] = None, verdict: str = "",
                     reason: str = "", tested: bool = True,
                     attempt_reason: str = "", stream_path: str = "",
-                    substituted_from: str = "") -> List[Dict[str, Any]]:
+                    substituted_from: str = "", first_original: bool = False
+                    ) -> List[Dict[str, Any]]:
     """Write the clearing a measurement just earned, instead of waiting for a later audit to notice absence.
 
     Round 87 deduced every clearing from a comparison of timestamps, which means the fact exists only while the
@@ -467,6 +468,9 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             "tested": bool(tested) and evidence != EVIDENCE_MISSING,
             "stream_path": str(stream_path or ""),
             "substituted_from": str(substituted_from or ""),
+            # Round 100: a clearing can be the first verdict ever taken where the promise was made, and the
+            # history page has to be able to say so -- the fact otherwise lives only in the version file.
+            "first_original": bool(first_original),
             # Round 90: the ordinal counts what this version's chain already holds, so an attempt is a
             # position in a history rather than a loose fact.
             "attempt": 1 + sum(1 for prior in cleared_history
@@ -1676,6 +1680,34 @@ def prior_evidence(promotion: "Promotion") -> List[Dict[str, Any]]:
     except (OSError, ValueError):
         return []
     return verification_evidence(payload)
+
+
+def never_tested_at_origin(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The records that hold no verdict on the file their promise was born with (round 100).
+
+    Round 99 taught one page to say "this is the first verdict taken on the file the promise was born with". That
+    is a statement about one record at one moment. A reader deciding what to measure next needs the population: how
+    many promises have never been tested where they were made, and which file each of them was born with -- a
+    record's split without the queue behind it answers "is this one rare?" with silence.
+
+    Records with no verdict at all are listed too, and counted: "never tested" includes "never checked", and a
+    page that silently omitted them would report the debt as smaller than it is (round 79's rule about a field a
+    reader cannot see being counted as its own state).
+    """
+    by_file: Dict[str, int] = {}
+    versions: List[Dict[str, Any]] = []
+    for row in rows:
+        evidence = row.get("evidence") if isinstance(row.get("evidence"), Mapping) else {}
+        if int(evidence.get("original") or 0):
+            continue
+        origin = str(row.get("first_from") or "")
+        key = origin or "(unrecorded)"
+        by_file[key] = by_file.get(key, 0) + 1
+        versions.append({"version": int(row.get("version") or 0), "origin": origin,
+                         "verdicts": int(evidence.get("total") or 0),
+                         "origin_exists": bool(row.get("origin_exists"))})
+    versions.sort(key=lambda item: item["version"])
+    return {"records": len(versions), "by_file": by_file, "versions": versions}
 
 
 def repaired_paths(root: Path) -> List[Dict[str, Any]]:
