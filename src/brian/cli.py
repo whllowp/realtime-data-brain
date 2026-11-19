@@ -1616,6 +1616,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # round at a time, and it is where a reader looks after asking "which file was that?".
             stream_file = str(record.get("stream_path") or "")
             mark += "  [%s]" % (stream_file or "no file recorded")
+            # Round 79: which book the queue paid when it produced this round. The record has said so since
+            # round 78; without this the fact was only readable by opening the JSON, and a page listing
+            # finished rounds is exactly where a reader asks "what paid for this one".
+            queue_entry = record.get("queue")
+            if isinstance(queue_entry, Mapping) and queue_entry.get("family"):
+                mark += "  [paid by the %s queue]" % queue_entry.get("family")
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
@@ -1636,6 +1642,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 "ceilings": record.get("limits") or None,
                 "ceilings_text": round_limits_text(recorded),
                 "ceilings_match_today": (not drift.get("differ")) if recorded else None,
+                # Round 79: the queue's verdict on this round, verbatim -- which family paid for it and the
+                # shape of the invocation that did (round 78's record). A script asking "was the ceiling
+                # family ever paid" should not have to parse this page's marks.
+                "queue": record.get("queue") or None,
             })
         if getattr(args, "json_out", None):
             Path(args.json_out).write_text(_json({
