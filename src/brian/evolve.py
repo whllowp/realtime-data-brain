@@ -2560,7 +2560,9 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
 
     Four outcomes, and only three are defects:
 
-    - `mismatch` — the successor says it replaced P, and P says it was re-measured as something else.
+    - `mismatch` — the successor says it replaced P, and P says it was re-measured as something else
+      (several rounds may name the same successor; each disagreeing nomination is its own finding, and
+      `names` carries every record involved, not just the one that happened to be iterated first).
     - `unretired` — the successor says it replaced P, and P carries no retirement mark at all.
     - `dangling` — a link names a round the ledger does not hold.
     - `legacy` — the retired round names a successor that records no `queue` block: successors written
@@ -2574,34 +2576,47 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
     by_name = {str(record.get("round") or ""): record for record in rounds}
     findings: List[Dict[str, Any]] = []
 
+    # Round 82: several rounds can name the same successor (a queue pays one re-run per round, so this
+    # happens whenever two rounds were re-measured into the same record). Grouping by the claimed successor
+    # first is what lets one finding name every participant instead of whichever came first in iteration.
+    nominators: Dict[str, List[str]] = {}
     for record in rounds:
-        successor = str(record.get("round") or "")
         retired = record.get("retired")
         if not isinstance(retired, Mapping):
             continue
         claimed = str(retired.get("re_measured_as") or "")
-        if not claimed:
-            continue
+        if claimed:
+            nominators.setdefault(claimed, []).append(str(record.get("round") or ""))
+
+    for claimed in sorted(nominators):
+        claimants = nominators[claimed]
         if claimed not in names:
-            findings.append({"round": successor, "names": claimed, "kind": "dangling",
+            findings.append({"round": claimants[0], "names": sorted({claimed} | set(claimants)),
+                             "kind": "dangling",
                              "detail": "the retired round names a successor the ledger does not hold"})
             continue
         # The successor's own end of the link, if it wrote one.
-        link = (by_name[claimed].get("queue") or {})
+        link = by_name[claimed].get("queue") or {}
         if not isinstance(link, Mapping) or not link:
-            findings.append({"round": successor, "names": claimed, "kind": "legacy",
+            findings.append({"round": claimants[0], "names": sorted({claimed} | set(claimants)),
+                             "kind": "legacy",
                              "detail": "the successor predates the queue's `paid_round` field"})
             continue
         named = str(link.get("paid_round") or "")
         if not named:
-            findings.append({"round": successor, "names": claimed, "kind": "legacy",
+            findings.append({"round": claimants[0], "names": sorted({claimed} | set(claimants)),
+                             "kind": "legacy",
                              "detail": "the successor was written by a command that did not record what "
                                        "it replaced"})
             continue
-        if named != successor:
-            findings.append({"round": claimed, "names": named, "kind": "mismatch",
-                             "detail": "the successor names %s, but %s names it as its successor"
-                                       % (named, successor)})
+        # One end of the link names exactly one predecessor; every other claimant disagrees with it.
+        for claimant in claimants:
+            if claimant == named:
+                continue
+            findings.append({"round": claimant, "names": sorted({claimant, claimed, named} - {""}),
+                             "kind": "mismatch",
+                             "detail": "%s names %s as its successor, but %s says it replaced %s"
+                                       % (claimant, claimed, claimed, named)})
 
     for record in rounds:
         successor = str(record.get("round") or "")
@@ -2612,11 +2627,11 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
         if not named:
             continue
         if named not in names:
-            findings.append({"round": successor, "names": named, "kind": "dangling",
+            findings.append({"round": successor, "names": sorted({successor, named}), "kind": "dangling",
                              "detail": "the successor names a round the ledger does not hold"})
             continue
         if not isinstance(by_name[named].get("retired"), Mapping):
-            findings.append({"round": successor, "names": named, "kind": "unretired",
+            findings.append({"round": successor, "names": sorted({successor, named}), "kind": "unretired",
                              "detail": "the successor says it replaced a round that was never retired"})
     return findings
 
@@ -3501,8 +3516,8 @@ def _link_lines(result: Audit) -> List[str]:
         lines.append("%d replacement link(s) disagree, so the two ends of the relation cannot both be true:"
                      % len(broken))
         for item in broken:
-            lines.append("  %-26s %-9s %s: %s" % (item["round"], item["kind"], item["names"],
-                                                  item["detail"]))
+            lines.append("  %-26s %-9s %s: %s" % (item["round"], item["kind"],
+                                                  ", ".join(item.get("names") or []), item["detail"]))
         lines.append("A link is written by a command; a broken one means the books contradict each other "
                      "and re-deciding")
         lines.append("under today's rules cannot settle it. `--strict` charges these as a build defect.")

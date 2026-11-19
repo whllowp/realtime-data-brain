@@ -1654,13 +1654,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # reader who starts at either row sees it without consulting the header.
             own_name = str(record.get("round") or record.get("finished_at") or "")
             for item in link_defects:
-                other = ""
-                if str(item.get("round")) == own_name:
-                    other = str(item.get("names"))
-                elif str(item.get("names")) == own_name:
-                    other = str(item.get("round"))
-                if other:
-                    mark += "  [broken link: %s with %s]" % (item.get("kind"), other)
+                participants = [str(name) for name in (item.get("names") or [])]
+                if own_name not in participants and own_name != str(item.get("round")):
+                    continue
+                # Round 82: `names` is every record the finding involves, so a reader landing on either the
+                # retired row, the successor or a second round that nominated the same successor all see it.
+                others = sorted({str(item.get("round"))} | set(participants))
+                others = [name for name in others if name and name != own_name]
+                if others:
+                    mark += "  [broken link: %s with %s]" % (item.get("kind"), ", ".join(others))
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))

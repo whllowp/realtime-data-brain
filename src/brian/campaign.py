@@ -835,6 +835,18 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # all, and whether the re-run queue could change that. A warning nobody can clear and a warning one
         # command could clear look identical on the page otherwise (boundary 151).
         lines.append("ceiling debt      %s" % ceiling_note)
+    if result.broken_links:
+        # Round 82: round 81 counted these so `--strict` could exit 2, and printed them only on `--audit`.
+        # A reader who runs the campaign page and sees a non-zero exit with no line to explain it has to
+        # guess which of the many `--strict` charges fired (round 56's complaint, one family on).
+        lines.append("links             %d replacement link(s) disagree with their other end: --audit names "
+                     "each one, and --strict charges them as a build defect" % result.broken_links)
+        if result.link_legacy:
+            lines.append("links             %d more have no successor-side record (written before round 78) "
+                         "and are reported, not charged" % result.link_legacy)
+    elif result.link_legacy:
+        lines.append("links             %d replacement link(s) have no successor-side record (written before "
+                     "round 78); every link that has both ends agrees" % result.link_legacy)
     lines.append("")
     if not result.rows:
         lines.append("no round recorded a stream, so there is no domain to report.")

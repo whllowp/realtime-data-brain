@@ -4416,6 +4416,56 @@ no re-deciding settles it, so --strict exits 2. `--audit` names each one.
 **边界 171：一端无法补写的不一致属于历史，不能进闸门——否则闸门永远是红的，然后没人再跑它。**
 
 
+
+### 3.88 缺陷有几个人，就要点几个人的名；闸门收费的事实必须出现在页面上
+
+第 81 轮让链接校验能发现"两端互相矛盾"，但它有两个没做完的地方，而且方向相反：**说得太少**，和**什么都不说**。
+
+**一、一个发现只点一个名。** 第 81 轮的 `replacement_links` 按"退休记录"的顺序遍历，遇到不一致就写一条 `{round: 后继, names: 某个被声称的前身}`。可三份记录可以同时参与一条关系：
+
+```
+round-old   → 我退休后由 round-new 重测
+round-other → 我退休后由 round-new 重测
+round-new   → queue.paid_round = round-other
+```
+
+只有一句话不可能为真：`round-old` 说它被 `round-new` 取代，`round-new` 却说它取代的是 `round-other`。但旧实现把发现记在 `round-new` 名下、只点名 `round-other`，真正的矛盾方 `round-old` 一个字都没提——页面上它那一行没有任何标记，而**没有标记的行默认读作"这行没问题"**。这不是漏印，是误导。
+
+第 82 轮先按"被声称的后继"分组（`nominators: Dict[str, List[str]]`），再对每个提名者单独判一次：后继只可能取代一个记录，其余提名者各得一条 `mismatch`，`names` 变成**列表**，把三个参与者都装进去：
+
+```
+ 1  …  [retired, re-measured as round-new.json]  [broken link: mismatch with round-new.json, round-other.json]
+ 2  …  [retired, re-measured as round-new.json]  [broken link: mismatch with round-new.json, round-old.json]
+ 3  …  [paid by the file queue]  [replacing round-other.json]  [broken link: mismatch with round-old.json, round-other.json]
+```
+
+三行都带标记，`--json-out` 的 `links` 同源，`--audit` 的明细也把它们全列出来：
+
+```
+  round-old.json             mismatch  round-new.json, round-old.json, round-other.json: round-old.json names round-new.json as its successor, but round-new.json says it replaced round-other.json
+```
+
+顺带修掉一个语义问题：发现现在记在**提出不可能那句话的那一轮**名下（`round-old`），而不是记在后继名下——前者才是"需要重新解释"的那份记录。
+
+**二、闸门收费，页面不提。** 第 81 轮把 `broken_links` 接进了 `--campaign --strict`（退出 2），也接进了 `Campaign` 的字段，却没有把它印到 `--campaign` 页面上；只有 `--audit` 会印。于是读者看到 2 退出、页面上找不到任何一行解释它——和第 56/58 轮"闸门收了一笔页面上不存在的费"是同一件事，只是换了一个族。第 82 轮补上：
+
+```
+links             1 replacement link(s) disagree with their other end: --audit names each one, and --strict charges them as a build defect
+links             1 more have no successor-side record (written before round 78) and are reported, not charged
+```
+
+只有历史那一端时（没有可收费的缺陷），句子反过来：`… have no successor-side record (written before round 78); every link that has both ends agrees`。两条分支都要有话说，因为"没有缺陷"和"缺陷都补不回来"在退出码上都是 0，在读者眼里却完全不同。
+
+两个读法：
+
+- **缺陷的参与者要全点名。** 读者在一行的位置判断这一行；没被点名的参与者会被默认读成清白。所以一条发现的 `names` 必须是集合，不是"顺手拿到的那个"（边界 172）。
+- **闸门不许收一笔页面上看不见的费。** 退出码是结论，不是证据：读者要能在同一屏上读到"为什么"，否则 2 只是一次无法质询的指控（边界 173）。
+
+**边界 172：一个缺陷涉及几个记录，就要点几个记录的名。** 只点名一部分，等于替其余部分宣布清白——而页面上一行没有标记，默认读法就是"这行没问题"。
+
+**边界 173：闸门可以因为某件事失败，但同一份输出里必须印出那件事。** 只靠退出码传递的失败，读者只能猜是哪一条规则触发的。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4713,5 +4763,7 @@ missing for the next level
 
 67. **（3.87 已完成）** → `--history` 的 `[replacing …]` 与 `[retired, re-measured as …]` 互相校验：`replacement_links()` 分 `mismatch` / `unretired` / `dangling` / `legacy` 四种，前三种由 `--audit --strict` 以退出码 2 计入账簿缺陷，`legacy`（第 78 轮之前写的后继无法补写）只印不收费；`--history` 标出发现涉及的两行，`--json-out` 带 `links`。
 
-68. → 让链接校验反过来也能被用起来：`--verify` / `--promote` 拒绝在一份链接已断（`broken_links` 非空）的记录上叠加承诺；`--rerun-unrecorded` 给 `legacy` 的一端正一次名（后继记录补写 `queue.paid_round`），把"补不回来"变成"补一次就不再有"；并把 `replacement_links` 的 `names` 改成列表，让被同一个后继取代的**所有**提名者都被标出来（§3.87 末尾的含糊）。
+68. **（3.88 已完成）** → 链接校验的两处补齐：`replacement_links` 按"被声称的后继"分组、每个提名者单独判定，`names` 改成列表，`--history` / `--audit` / `--json-out` 都点名全部参与者；`--campaign` 页面把它已经计入 `--strict` 的 `broken_links` 印出来（历史那一端单独一行，标明"报告但不收费"）。
+
+69. → 让链接校验反过来也能被用起来：`--verify` / `--promote` 拒绝在一份链接已断（`broken_links` 非空）的记录上叠加承诺；`--rerun-unrecorded` 给 `legacy` 的一端正一次名（后继记录补写 `queue.paid_round`），把"补不回来"变成"补一次就不再有"，并让 `legacy` 计数随补写一起下降。
 
