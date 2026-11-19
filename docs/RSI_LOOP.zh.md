@@ -5286,6 +5286,48 @@ links             v020's record is back on its original file data/smd/stream-rea
 2. **位置复原 ≠ 证据复原。** 记录指回原件后，它历史里的 `verification` 仍是在替代件上取的；`--campaign` 如果只说"已经回到原位"，读起来就是"又重新回答过了"。所以那句话必须把两件事分开说，并且**在没有任何检查站上去时点名那条命令**（边界 185：诊断指名的命令必须真的能跑）。
 3. **判定不能同时属于两个位置。** `checks_on_repair` 原本把任何带 `stream_path_moves` 的检查都算进去，包括站在原件上的那次；同一条判定被两边各数一次，读者就会以为替代件也被验证过。现在原件上的检查只进 `checked_after_return`。
 
+### 3.104 一份记录的证据，要按"取在哪个文件上"分开数
+
+第 96 轮分开了"量在修复位置上"和"量在原件上"，第 97 轮说清了一次往返的终点。仍然糊在一起的是**数量**：`stream_path_moves` 只说明某次检查站的位置不是记录最初的文件，却不说它站在哪个文件上。于是一旦来回走过，页面只能重复"1 check(s) were taken after the repair"——一个没有分母、也没有地点的计数，读者没法回答"这条承诺的证据里，有几份来自原件"。
+
+**改了什么。**
+
+1. `verification_evidence(payload)`：把记录持有的每一份判定逐条展开成 `{at, verdict, path, source}`。`source` 是三态：`written`（第 98 轮之后写的检查自己记了 `checked_path`）、`deduced`（老检查只记了当时的迁移次数，`stream_path_moves = k` 恰好意味着它站在第 k 次迁移的目标上——这是从记录里**精确推导**出来的，不是猜）、空（两边都推不出来，算"无法定位"）。
+2. `evidence_split(evidence, origin)`：数出 `original / elsewhere / unplaced / total`，并列出 `elsewhere_files`。用 `elsewhere` 而不是 "the substitute"：一条记录可能经过好几个文件，数字能支撑的说法只有"不是原件"；无法定位的一律单列，不折进任何一边（边界 166）。
+3. `--verify` 写入的 payload 多两个字段：`checked_path`（这次站在哪个文件上）与 `prior_evidence_paths`（**写之前**记录里已有哪些判定、各自在哪）。判定的句子于是自带前提，读者不必从版本文件的键序去还原时间线。
+4. `--campaign` 每条有迁移的记录多一行：`v020 holds 2 verdict(s) on file: 1 on its original file, 1 on another file (data/smd/stream-moved.json), 0 it cannot place`。
+
+**实测（`var/demo98`，在 `var/demo95` 的基础上注入一份只记了迁移次数的旧判定）。**
+
+```
+$ python -m brian.cli evolve --verify --verify-version 20 --stream-file data/smd/stream-real.json --accept-copied
+...
+v020  digest.rolling_window = 200  FAILED and reverted: promised recall 0.507 at the 10% budget, re-measured 0.060 (below 0.456)
+```
+
+写进 `v020.json` 的判定里：
+
+```
+checked_path: data/smd/stream-real.json
+prior_evidence_paths: [{"at": "2026-11-19T21:57:50+00:00", "verdict": "failed",
+                        "path": "data/smd/stream-real.json", "source": "deduced"}]
+```
+
+`--campaign`：
+
+```
+links             v020's record is back on its original file data/smd/stream-real.json, and a check has measured it there since the return (2026-11-19T22:12:38+00:00)
+links             v020 holds 2 verdict(s) on file: 1 on its original file, 1 on another file (data/smd/stream-moved.json), 0 it cannot place
+links             1 check(s) were taken after the repair: their verdict describes the repaired location, not the file the promise first named
+```
+
+**三个读数。**
+
+1. **"N 次检查"不是证据的组成。** 同一个 N 可以是"全在原件上"也可以是"全在替代件上"，而这两种记录对读者的含义相反。所以数字必须带地点才有用，这就是这一轮的最小改动：让每份判定记下自己站的文件。
+2. **推导出来的事实要自己说是推导的。** 老检查没有 `checked_path`，但 `stream_path_moves = k` 与 `stream_path_history` 一起**唯一确定**它站在哪——这不是猜测，是从记录里算出来的。可它与"检查自己写下"仍不是一回事：一个是当时的证词，一个是事后的算术（边界 187 的分野，挪一个字段）。所以 `source` 分开记，页面在需要时可以把两种混着数，但读者能看见比例。
+3. **数不出来就说数不出来。** 既没有 `checked_path`、迁移次数又超出已知历史（比如记录被手改过）的判定，计入 `unplaced` 而不是归到最近的一边。把无法定位的折进任何一侧，都是让沉默替读者选答案（边界 166 的第二次应用）。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5646,5 +5688,10 @@ missing for the next level
     `--campaign` 把"位置复原了"和"证据还没复原"分开说。**已完成（第 97 轮）**：实测见 §3.103。
 
 84. 让 `--verify` 在一条往返记录上区分"这次判定取在原件上"和"这条承诺此前只有替代件上的证据"：
-    `verification` 里除了 `on_original_path`，再记录 `prior_evidence_paths`（此前判定分别取在哪些文件上），
-    并让 `--campaign` 说清"回到原位之后，这条承诺的证据有几份来自原件、几份来自替代件"。
+    `verification` 记录 `checked_path` 与 `prior_evidence_paths`，页面上按"取在哪个文件上"把证据分开数。
+    **已完成（第 98 轮）**：`verification_evidence` / `evidence_split`，实测见 §3.104。
+
+85. 让 `--verify` 在写入前检查自己的**前置证据是否够用**：如果这条承诺此前的判定全部取在替代件上
+    （`evidence_split["original"] == 0`），就在页面与 `verification` 里都注明"这次是这条承诺第一次在原件上被量"，
+    并让 `--campaign` 把"回到原位后第一次量"与"回到原位后又量了一次"分开；顺带把 `unplaced` 的判定逐条列出
+    （时间 + 判定词），让读者能手工追查，而不是只看到一个数。

@@ -1612,6 +1612,70 @@ def same_stream_path(left: str, right: str) -> bool:
     return bool(normal(left)) and normal(left) == normal(right)
 
 
+def verification_evidence(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Every verdict a record holds, with the file each one was taken on (round 98).
+
+    Round 96 separated "measured on the repair" from "measured on the original"; what stayed folded together is
+    *how many* verdicts came from each. Two sources of truth exist and they are not equal: a check written from
+    round 98 on records `checked_path` itself (a written citation), while older checks only recorded how many
+    moves the record had at the time, from which the file can be deduced exactly -- the k-th move's target
+    (boundary 187: a citation written at the moment it happened must say so, because one deduced later from
+    timestamps can vanish with the ledger). Anything else is returned with an empty path and counted as
+    unplaceable rather than guessed.
+    """
+    moves = [dict(item) for item in (payload.get("stream_path_history") or []) if isinstance(item, Mapping)]
+    rows: List[Dict[str, Any]] = []
+    for item in [payload.get("verification")] + list(payload.get("checks") or []):
+        if not isinstance(item, Mapping) or not item.get("verdict"):
+            continue
+        written = str(item.get("checked_path") or "")
+        source = "written" if written else ""
+        if not written:
+            index = int(item.get("stream_path_moves") or 0)
+            if 0 < index <= len(moves):
+                written = str(moves[index - 1].get("to") or "")
+                source = "deduced" if written else ""
+        rows.append({"at": str(item.get("checked_at") or ""),
+                     "verdict": str(item.get("verdict") or ""),
+                     "path": written,
+                     "source": source})
+    return rows
+
+
+def evidence_split(evidence: Sequence[Mapping[str, Any]], origin: str) -> Dict[str, Any]:
+    """How a record's verdicts divide between the file it was born with and everything else (round 98).
+
+    "Elsewhere" rather than "the substitute", because a record may have been moved through several files and the
+    only claim the numbers can support is "not the original". A path the record cannot place is counted apart
+    instead of being folded into either side (boundary 166: silence must not pick the answer).
+    """
+    original = 0
+    elsewhere = 0
+    unplaced = 0
+    files: List[str] = []
+    for row in evidence:
+        path = str(row.get("path") or "")
+        if not path:
+            unplaced += 1
+        elif same_stream_path(path, origin):
+            original += 1
+        else:
+            elsewhere += 1
+            if path not in files:
+                files.append(path)
+    return {"original": original, "elsewhere": elsewhere, "unplaced": unplaced,
+            "total": len(evidence), "elsewhere_files": files}
+
+
+def prior_evidence(promotion: "Promotion") -> List[Dict[str, Any]]:
+    """What the record held *before* this check, read from the version file itself (round 98)."""
+    try:
+        payload = json.loads(promotion.path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return verification_evidence(payload)
+
+
 def repaired_paths(root: Path) -> List[Dict[str, Any]]:
     """Versions whose measured file has been rewritten by hand, with every move (round 94).
 
@@ -1670,5 +1734,9 @@ def repaired_paths(root: Path) -> List[Dict[str, Any]]:
                      "returned_at": returned_at,
                      "checked_after_return": checked_after_return,
                      "checks_on_repair": after,
+                     # Round 98: the verdicts this record holds, split by where they were taken. The line says
+                     # "N verdict(s) on file" and not "N checks", because the two differ once a re-check was
+                     # deduplicated (round 28).
+                     "evidence": evidence_split(verification_evidence(payload), origin),
                      "in_force": version in deployed})
     return rows

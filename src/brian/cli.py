@@ -110,6 +110,7 @@ from .promote import (
     revert_promotion,
     set_state_budget,
     repaired_paths,
+    prior_evidence,
     same_stream_path,
     set_stream_path,
     dead_record_paths,
@@ -2820,6 +2821,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # before measuring, because the number it records (`stream_path_moves`) describes where it stood.
             path_moves = promotion.path_moves
             checked_here = str(getattr(args, "stream_file", None) or "")
+            # Round 98: the verdict about to be written says where it stands and where the evidence stood
+            # before it, so a reader never has to infer either from the order of the file's keys.
+            prior_paths = [row for row in prior_evidence(promotion) if row.get("path") or row.get("at")]
             on_original = bool(path_moves) and same_stream_path(checked_here, promotion.path_origin)
             # Round 97: after a return the record names the original again, so "origin -> current" prints the
             # same file twice. The chain of the trip is the honest description, and whether the trip is closed
@@ -2883,6 +2887,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     # record, not about the verdict (boundary 205).
                     "stream_path_moves": path_moves,
                     "on_original_path": on_original,
+                    # Round 98: a verdict is about a file, so it names the file it stood on and what the
+                    # record held before it. Without this the pages can only count "on the repair" twice over.
+                    "checked_path": checked_here,
+                    "prior_evidence_paths": prior_paths,
                 })
                 _print("  v%03d  %s  unmeasurable" % (promotion.version, promotion.change))
                 continue
@@ -2893,7 +2901,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                           checked_stream=checked_stream)
             payload = {"checked_at": _stamp(), "stream": source, "verdict": verdict,
                        "reason": reason, "measurement": measurement.to_dict(),
-                       "stream_path_moves": path_moves, "on_original_path": on_original}
+                       "stream_path_moves": path_moves, "on_original_path": on_original,
+                       "checked_path": checked_here,
+                       "prior_evidence_paths": prior_paths}
             if copied:
                 payload["copied_end"] = {"kind": block[0], "detail": block[1]}
             if verdict == FAILED:

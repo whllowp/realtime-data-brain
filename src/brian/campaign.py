@@ -957,6 +957,20 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                              "be pointed at it again and measured there -- brian evolve --set-stream-path v%03d=%s"
                              % (int(item.get("version") or 0), str(item.get("first_from") or ""),
                                 int(item.get("version") or 0), str(item.get("first_from") or "")))
+        # Round 98: after a round trip "1 check on the repair" is not the whole story -- the reader needs to
+        # know how the verdicts divide between the file the promise was born with and every other file. A path
+        # the record cannot place is counted, not guessed (boundary 166).
+        for item in moves:
+            evidence = item.get("evidence")
+            if not isinstance(evidence, Mapping) or not int(evidence.get("total") or 0):
+                continue
+            elsewhere = [str(name) for name in evidence.get("elsewhere_files") or []]
+            detail = (", ".join(elsewhere) if elsewhere else "none named")
+            lines.append("links             v%03d holds %d verdict(s) on file: %d on its original file, %d on "
+                         "another file (%s), %d it cannot place"
+                         % (int(item.get("version") or 0), int(evidence.get("total") or 0),
+                            int(evidence.get("original") or 0), int(evidence.get("elsewhere") or 0),
+                            detail, int(evidence.get("unplaced") or 0)))
         after = sum(int(item.get("checks_on_repair") or 0) for item in moves)
         if after:
             # Round 95: the verdicts taken after the move are the part of the evidence a reader would most
