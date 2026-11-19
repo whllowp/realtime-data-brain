@@ -351,7 +351,7 @@ def in_force_history(root: Path) -> Tuple[List[Dict[str, Any]], int]:
 
 def record_clearing(root: Path, version: int, now: Optional[datetime] = None, verdict: str = "",
                     reason: str = "", tested: bool = True,
-                    attempt_reason: str = "") -> List[Dict[str, Any]]:
+                    attempt_reason: str = "", stream_path: str = "") -> List[Dict[str, Any]]:
     """Write the clearing a measurement just earned, instead of waiting for a later audit to notice absence.
 
     Round 87 deduced every clearing from a comparison of timestamps, which means the fact exists only while the
@@ -367,6 +367,11 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
     its first sighting and keeps running -- otherwise a failed comparison would reset the clock and make an
     unresolved debt look newly arrived (boundary 188). The attempt is stored on the row, so the page can say
     what was tried and why it did not count.
+
+    Round 90: the citation must name its evidence. An entry now carries the stream file the check read
+    (`stream_path`) and the ordinal of that attempt in this version's chain. Without the file, "cleared by
+    a re-measurement on 2026-11-19" is a claim a reader can neither open nor refute; without the ordinal, a
+    chain that was cleared, re-disputed and cleared again reads exactly like one cleared once.
     """
     moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
     observed, cleared_history, trimmed = _read_in_force_store(root)
@@ -392,6 +397,11 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             "cited_by": CLEARED_CITED_BY_MEASUREMENT,
             "verdict": str(verdict or ""),
             "tested": bool(tested),
+            "stream_path": str(stream_path or ""),
+            # Round 90: the ordinal counts what this version's chain already holds, so an attempt is a
+            # position in a history rather than a loose fact.
+            "attempt": 1 + sum(1 for prior in cleared_history
+                               if int(prior.get("version") or 0) == int(version)),
         }
         if reason:
             entry["reason"] = str(reason)
@@ -401,7 +411,8 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             # Recorded, not answered: the row stays observed with its clock running (round 89).
             attempted = dict(item)
             attempted["untested"] = {"at": moment.isoformat(), "verdict": str(verdict or ""),
-                                     "reason": str(attempt_reason or reason or "")}
+                                     "reason": str(attempt_reason or reason or ""),
+                                     "stream_path": str(stream_path or "")}
             keep.append(attempted)
     if not entries:
         return []
@@ -438,9 +449,16 @@ def cleared_summary(entries: Sequence[Mapping[str, Any]], trimmed: int = 0) -> D
     # Round 89: a clearing whose check could not test the claim is its own count. Folding it into `measured`
     # would let a failed comparison read as an answered objection.
     untested = sum(1 for item in entries if item.get("tested") is False)
+    # Round 90: which file did the answering. A count per stream is the same reason round 80 split the
+    # paid families: a total over two streams cannot say which one stopped being measured.
+    by_file: Dict[str, int] = {}
+    for item in measured:
+        key = str(item.get("stream_path") or "(unnamed)")
+        by_file[key] = by_file.get(key, 0) + 1
     return {"total": len(entries), "measured": len(measured), "unexplained": len(unexplained),
             "median_age_days": round(middle, 2), "trimmed": int(trimmed),
-            "written": written, "untested": untested, "by_domain": dict(sorted(by_domain.items()))}
+            "written": written, "untested": untested, "by_domain": dict(sorted(by_domain.items())),
+            "by_file": dict(sorted(by_file.items()))}
 
 
 def stale_in_force_disputes(rows: Sequence[Mapping[str, Any]], promotions: Sequence["Promotion"],

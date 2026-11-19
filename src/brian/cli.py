@@ -1679,6 +1679,23 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         history_command = _ceiling_command(ceiling_file_payable, ceiling_named) if ceiling_rows else None
         if history_command and any(int(row["missing"]) for row in ceiling_rows):
             _print("  measure         %s" % history_command)
+        # Round 90: the campaign counts clearings; this page is where a reader asks which measurement earned
+        # one. The chain is printed per version because that is the unit a reader can act on: re-check it, or
+        # stop trusting it. The rows are the ones the pre-branch already loaded, so the two pages cannot
+        # disagree about what the store holds.
+        clearing_rows: List[Dict[str, Any]] = list(in_force_history_rows)
+        if clearing_rows:
+            chains: Dict[int, List[Dict[str, Any]]] = {}
+            for entry in clearing_rows:
+                chains.setdefault(int(entry.get("version") or 0), []).append(entry)
+            _print("clearings        %d recorded clearing(s); each names the measurement that earned it:"
+                   % len(clearing_rows))
+            for version in sorted(chains):
+                for entry in sorted(chains[version], key=lambda item: str(item.get("checked_at") or "")):
+                    _print("  v%03d  attempt %-2d %s  %-13s %s"
+                           % (version, int(entry.get("attempt") or 0),
+                              str(entry.get("checked_at") or ""), str(entry.get("verdict") or ""),
+                              str(entry.get("stream_path") or "(unnamed stream)")))
         for index, record in enumerate(rounds, start=1):
             baseline_row = record.get("baseline") or {}
             measured = baseline_row.get("tokens_per_report")
@@ -1772,6 +1789,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             Path(args.json_out).write_text(_json({
                 "rounds": history_rows,
                 "links": link_rows,
+                "in_force_clearings": clearing_rows,
                 "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
                              "payable": ceiling_payable, "by_domain": ceiling_rows},
             }), encoding="utf-8")
@@ -2759,11 +2777,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 if note:
                     _print(note)
         cleared_now: List[Dict[str, Any]] = []
+        # Round 90: the entry names the file this run measured, because that is the file a reader has to
+        # open to audit the verdict. `--stream-file` may be empty (the demo stream), and an empty path is
+        # recorded as empty rather than guessed.
+        checked_path = str(getattr(args, "stream_file", None) or "")
         for version, checked_at, verdict, why in measured_versions:
             cleared_now.extend(record_clearing(root, version, now=checked_at, verdict=verdict,
                                                reason="measured again by --verify",
                                                tested=verdict != UNMEASURABLE,
-                                               attempt_reason=why))
+                                               attempt_reason=why, stream_path=checked_path))
         answered = [entry for entry in cleared_now if entry.get("tested") is not False]
         attempted = [entry for entry in cleared_now if entry.get("tested") is False]
         if answered:
@@ -2771,9 +2793,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cleared         %d in-force observation(s) were answered by this check:" % len(answered))
             for entry in answered:
                 age = entry.get("age_days")
-                _print("  %-16s v%03d  %-13s stood %s"
+                _print("  %-16s v%03d  %-13s stood %s, answered on %s"
                        % (entry["domain"], int(entry["version"]), entry["kind"],
-                          "an unknown time" if age is None else "%.1f day(s)" % float(age)))
+                          "an unknown time" if age is None else "%.1f day(s)" % float(age),
+                          entry.get("stream_path") or "(unnamed stream)"))
         if attempted:
             _print("")
             _print("not answered  %d in-force observation(s) were measured, but the check could not test"

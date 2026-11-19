@@ -3755,17 +3755,22 @@ def _link_lines(result: Audit) -> List[str]:
         lines.append("%d version(s) in force are no longer disputed, and the ledger forgets them now:"
                      % len(result.in_force_cleared))
         for item in result.in_force_cleared:
-            by = ("a re-measurement on %s" % str(item.get("checked_at"))
+            # Round 90: the citation names the evidence. "(unnamed)" is printed rather than omitted, because a
+            # blank field reads as "no measurement was needed" (boundary 193).
+            by = ("a re-measurement on %s of %s"
+                  % (str(item.get("checked_at")), str(item.get("stream_path") or "(unnamed stream)"))
                   if item.get("by") == "verification" else
                   "no measurement: the ledger no longer reproduces it")
             if item.get("by") == "verification" and item.get("cited_by") == "measurement":
                 # Round 88: written by the check that earned it, not deduced from timestamps afterwards.
                 by += " (written by that measurement)"
             age = item.get("age_days")
-            lines.append("  %-16s v%03d  %-13s (first seen %s%s, cleared by %s)"
+            attempt = int(item.get("attempt") or 0)
+            lines.append("  %-16s v%03d  %-13s (first seen %s%s, cleared by %s%s)"
                          % (item.get("domain") or "default", int(item.get("version") or 0),
                             item.get("kind"), item.get("first_seen"),
-                            "" if age is None else ", stood %.1f day(s)" % float(age), by))
+                            "" if age is None else ", stood %.1f day(s)" % float(age), by,
+                            "" if not attempt else ", attempt %d" % attempt))
         attempted = [item for item in result.in_force_cleared if item.get("tested") is False]
         if attempted:
             lines.append("%d clearing(s) rested on a check that ran and could not test the claim, so they"

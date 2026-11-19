@@ -918,6 +918,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         if int(record.get("written") or 0):
             lines.append("links             %d of those clearings were written by the measurement itself; the "
                          "rest were deduced later from the ledger" % int(record.get("written") or 0))
+        files = record.get("by_file")
+        if isinstance(files, Mapping) and files:
+            lines.append("links             clearings by stream file: %s"
+                         % "; ".join("%s %d" % (name, int(count))
+                                     for name, count in sorted(files.items())))
         domains = record.get("by_domain")
         if isinstance(domains, Mapping) and len(domains) > 1:
             lines.append("links             clearings by domain: %s"

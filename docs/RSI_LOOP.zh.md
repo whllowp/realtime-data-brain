@@ -4857,6 +4857,79 @@ $ brian evolve --audit --strict                       # 退出 0：债被真正�
 格说"该换文件、还是该退版本"。
 
 
+### 3.96 一次清账必须说出是凭哪份测量清的
+
+第 87 轮让"债还清了"这句话带上它是被谁清的（复核 / 只是账本不再复现）。那句话里有一个时间戳，但
+没有证据：`record_clearing` 没有流文件这个字段，存储里的每条 `cleared` 都是一行匿名的"已清"。于是
+`--campaign` 能说"这笔债被复核答掉了"，读者却打不开那份让人们相信它的测量——这正是第 87 轮修过的
+同一个缺陷，往下落一层：**判决本身也是一个主张，它必须说出自己凭的是什么。**
+
+```
+$ brian evolve --verify --verify-version 20 --stream-file data/smd/stream-real.json --accept-copied
+  v020  digest.rolling_window = 200  FAILED and reverted: promised recall 0.507 at the 10% budget, re-measured 0.060 (below 0.456)
+cleared         1 in-force observation(s) were answered by this check:
+  smd              v020  backfilled end stood 20.0 day(s), answered on data/smd/stream-real.json
+```
+
+`answered on …` 是"结账"的那一页；链本身在 `--history` 上，`stream_path` 与第几次清账并排列出：
+
+```
+$ brian evolve --history
+clearings        1 recorded clearing(s); each names the measurement that earned it:
+  v020  attempt 1  2026-11-19T20:23:08+00:00  failed        data/smd/stream-real.json
+```
+
+`--campaign` 按证据所在的那份流文件分开计数，理由和第 80 轮把付款按流拆开一样——合计说不出是哪一份
+停了：
+
+```
+$ brian evolve --campaign
+links             1 dispute(s) left the in-force list: 1 cleared by a re-measurement (median 20.0 day(s)), 0 with no measurement on file
+links             1 of those clearings were written by the measurement itself; the rest were deduced later from the ledger
+links             clearings by stream file: data/smd/stream-real.json 1
+```
+
+旧条目（字段出现之前写的）没有文件，页面必须把它印成"没有名字"，而不是留空——一个空字段读起来是
+"当时不需要测量"：
+
+```
+$ brian evolve --audit
+1 version(s) in force are no longer disputed, and the ledger forgets them now:
+  smd   v020  backfilled end (first seen 2026-10-30T20:23:55…, stood 20.0 day(s), cleared by a
+              re-measurement on 2026-11-19T19:23:55… of (unnamed stream))
+
+$ brian evolve --campaign
+links             clearings by stream file: (unnamed) 1
+```
+
+三条读法。
+
+1. **同一件事在三个页面上有三个主语。** `--verify` 是"这一次结账"，它说这次凭哪份测量；`--history` 是
+   这条版本的历史，它说第几次、什么时候、什么判决、哪份文件；`--campaign` 是全账汇总，它按文件分开
+   数。第 85 轮的教训在这里翻了个面：那时是"页面升级了、闸门没升级"，这次是"存储升级了、**结账那一页
+   没升级**"——`record_clearing` 收到了 `stream_path`，而 `--verify` 的收尾行仍旧只说 `stood N day(s)`，
+   证据只活在存储里（边界 191）。
+2. **ordinal 是链条的一部分。** 没有 `attempt`，"清过两次"和"清过、又被重新异议、再清一次"是同一句
+   话；而这两种情况对读者的意义完全相反：前者说明同一个测量被重复接受，后者说明异议还在反复出现
+   （边界 192）。
+3. **空白必须被印成空白。** `(unnamed stream)` 不是占位符，它是第 87 轮之前的历史事实：那些条目确实
+   没有记录文件。把它省略，页面就在替旧记录说谎（边界 193）。
+
+一个实现上的发现：`--audit` 的清账块印的是**这一次观察**（行在这一跑里消失），已写下的清账在任何一次
+后续 `--audit` 里都不会再出现——所以"这条清账凭的是哪份测量"如果只挂在 `--audit` 上，它只会出现在
+恰好经过的那一刻。这也是为什么上面那三页要各说各的主语，以及为什么本轮最后又给 `--verify` 的收尾行
+补了文件名：链条不能只存在于存储里。
+
+**边界 191：清账的判决本身是一个主张，必须点名它凭的证据（文件与时间）。** 一个只说时间、不说文件
+的"已清"，读者无法核验，也无法区分"复核了这份流"和"复核了另一份流"。
+
+**边界 192：ordinal 是链条的一部分。** 没有序号，"清过两次"与"清过、被重新异议、再清一次"是同一行
+文字。
+
+**边界 193：没有名字的测量必须被印成"没有名字"。** 空字段会被读成"当时不需要测量"，而那是页面替旧
+记录编出来的事实。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5171,7 +5244,11 @@ missing for the next level
 或者退掉这个版本）。另外修了两处：补丁脚本把 `cli.py` 写成 LF 造成的 8470 行 diff，以及页面把记账短语
 当成了失败原因的措辞缺陷。剩下的路见第 76 项。
 
-76. 让"这条异议被谁答的"也能被审计：现在 `--verify --accept-copied` 记的 `cleared` 条目只在存储里，落进
-`--campaign` 的合计数；下一步让每条在役版本带上它的清账链（第几次复核、判决、是当场写的还是推出来的），
-并让 `--history` 的 `links` 行能顺着这条链查到具体那一次复核的 `checked_at` 与流文件——审计一个"债还清了"
-的判断时，要能一路读到当时的那份测量。
+76. 已完成：每条 `cleared` 带 `stream_path` 与第几次清账（`attempt`），`--verify` 结账时写进存储并
+在收尾行点名文件，`--history` 印出整条链，`--campaign` 按流文件分开计数，旧条目印 `(unnamed stream)`
+而不是留空。见 3.96 节与边界 191/192/193。
+
+77. 让清账链能被"证据还在不在"驱动：现在每条 `cleared` 记着它凭的 `stream_path` 与 `attempt`，但没人
+    检查那份文件是否还躺在磁盘上。下一步在 `--verify` 结账前先确认路径存在（不存在就记成"证据缺失"
+    而不再算"已清"），并让 `--campaign` 给每份流文件印出"最后一次凭它结账"的时间，好看出哪份证据已经
+    很久没人用。
