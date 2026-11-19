@@ -1032,6 +1032,24 @@ def _ceiling_command(payable: int, named: int) -> Optional[str]:
     return None
 
 
+def _queue_entry(kind: str, domain: str, name: str, largest_start: Optional[Mapping[str, Any]],
+                 progress: Mapping[str, Any], shape: Mapping[str, Any]) -> Dict[str, Any]:
+    """What one invocation of the re-run queue records in the round it paid (round 58, extended in round 78).
+
+    The record lives in the round because the terminal is gone by the time a reader asks why the ledger moved.
+    Round 78 adds two facts a reader cannot recover otherwise: which family this entry paid (`file` or
+    `ceiling`), and the shape of the invocation that paid it -- number of families and rounds per family, which
+    is not the same as the number of rounds (boundary 163: "two families of one round" and "one family of two
+    rounds" push different books).
+    """
+    entry: Dict[str, Any] = {"paid": domain, "paid_round": name, "family": kind, "shape": dict(shape)}
+    if kind == "file":
+        # Only the file family moves the unrecorded share, so only it has a before/after share and an aim.
+        entry["largest_at_start"] = dict(largest_start or {})
+        entry["share_after"] = float(progress.get("share_after") or 0.0)
+    return entry
+
+
 def _queue_budget(root: Path, limit: Optional[int] = None,
                   ceiling_limit: Optional[int] = None) -> Dict[str, Any]:
     """What one invocation of the queue would spend and what it would leave behind (round 60, cost in round 61).
@@ -1678,6 +1696,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                % (int(budget.get("families") or 0), int(budget.get("rounds") or 0),
                   (", %d from the ceiling queue" % int(budget.get("ceiling_rounds") or 0))
                   if int(budget.get("ceiling_rounds") or 0) else ""))
+        # Round 78: the header said what it pays and left the rest unsaid. A reader who passed
+        # `--without-ceilings` was told the dimensions of the file family only, and "not this time" again read
+        # as "nothing there" (boundary 162). The line below also names the command that would pay it, so the
+        # refusal comes with its remedy and not with a second round of guesswork.
+        skipped_family = int(budget.get("ceilings_skipped") or 0)
+        if skipped_family:
+            _print("leaves            %d round(s) that named their file and never recorded their ceilings; "
+                   "measure them with %s"
+                   % (skipped_family, _ceiling_command(0, skipped_family)))
+        queue_shape = {"families": int(budget.get("families") or 0),
+                       "file_rounds": int(budget.get("rounds") or 0),
+                       "ceiling_rounds": int(budget.get("ceiling_rounds") or 0),
+                       "ceilings_skipped": skipped_family}
         # Round 68: the queue judges every round it pays, so it names the ceilings it judges by -- the same
         # sentence the page and `--audit` print, from the same function, so the three cannot drift apart.
         queue_limits_text = _limits_text(_limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
@@ -1739,10 +1770,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 58: the record of what this entry of the queue paid belongs in the round it paid, not in
             # the terminal that ran it. `largest_at_start` is the domain a reader would have expected this
             # command to aim at, so a later reader can tell an aimed payment from an incidental one.
-            if kind == "file":
-                result.queue = {"paid": domain, "paid_round": name,
-                                "largest_at_start": largest_start or {},
-                                "share_after": float(progress["share_after"])}
+            # Round 78: the record also says which family this entry paid and what the invocation opened --
+            # a round paid by the ceiling queue and one paid by the file queue are different work, and the
+            # record is the only place that survives the terminal (boundary 163).
+            result.queue = _queue_entry(kind, domain, name, largest_start, progress, queue_shape)
             _print("")
             _print(format_round(result))
             written = persist(root, result, write_versions=False)

@@ -275,3 +275,45 @@ def test_the_queue_header_names_the_families_and_their_rounds(tmp_path, monkeypa
     cli.main(["evolve", "--rerun-unrecorded", "--rerun-limit", "1", "--with-ceilings"])
     out = capsys.readouterr().out
     assert "families          2: 1 round(s) from the file queue, 1 from the ceiling queue" in out
+
+
+def test_the_header_says_what_the_command_leaves_undone(tmp_path, monkeypatch, capsys):
+    """Round 78: a refused family must carry its remedy in the command's own header, not only on the page."""
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-unrecorded.json", applied=["v020"], shape=shape)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["evolve", "--rerun-unrecorded", "--rerun-limit", "1", "--without-ceilings"])
+    out = capsys.readouterr().out
+    assert ("leaves            1 round(s) that named their file and never recorded their ceilings; "
+            "measure them with brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0") in out
+
+
+def test_the_header_does_not_claim_to_leave_what_it_pays(tmp_path, monkeypatch, capsys):
+    shape = _stream(tmp_path, "data/smd/stream-one.json", "smd", 3, 1)
+    _write_round(tmp_path, "round-unrecorded.json", applied=["v020"], shape=shape)
+    _write_round(tmp_path, "round-named.json", applied=["v020"], shape=shape,
+                 stream_path="data/smd/stream-one.json")
+    monkeypatch.chdir(tmp_path)
+    cli.main(["evolve", "--rerun-unrecorded", "--rerun-limit", "1", "--with-ceilings"])
+    out = capsys.readouterr().out
+    assert "leaves            " not in out
+
+
+def test_a_queue_entry_records_the_family_it_paid_and_the_shape():
+    """Boundary 163: a notice of "1 round" hides whether the invocation opened one family or two."""
+    shape = {"families": 2, "file_rounds": 1, "ceiling_rounds": 1, "ceilings_skipped": 0}
+    progress = {"share_after": 0.25}
+    file_entry = cli._queue_entry("file", "SMD", "round-a.json", {"domain": "SMD", "ready": 1},
+                                  progress, shape)
+    ceiling_entry = cli._queue_entry("ceiling", "SMD", "round-b.json", {"domain": "SMD", "ready": 1},
+                                     progress, shape)
+    assert file_entry["family"] == "file"
+    assert file_entry["largest_at_start"] == {"domain": "SMD", "ready": 1}
+    assert file_entry["share_after"] == 0.25
+    assert ceiling_entry["family"] == "ceiling"
+    assert "largest_at_start" not in ceiling_entry
+    assert "share_after" not in ceiling_entry
+    assert ceiling_entry["shape"] == shape
+    assert file_entry["shape"] is not shape  # a copy, so a later mutation cannot rewrite the record

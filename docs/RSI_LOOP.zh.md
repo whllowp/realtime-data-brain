@@ -4256,6 +4256,44 @@ families          2: 1 round(s) from the file queue, 1 from the ceiling queue
 **边界 163：一次调用的形状是族数加每族的轮数，不是总轮数。**只报总数会把"两族各一轮"和"一族两轮"报成同一种活，而它们推的不是同一本账。
 
 
+### 3.84 拒绝要带着补救走：命令头自己说出少做的那一族，记录写下这次的形状
+
+第 76 轮让页面对被留下的上限族说了一句话，但队列命令自己的头没有：跑一次 `--without-ceilings`，读者只能看到家族那一行写着 `1: 1 round(s) from the file queue`，少掉的那一族只剩 `--campaign` 页面上的一句。两处输出于是对"这次没做什么"知道得不一样多。
+
+这一轮补两件事，都落在命令自己的输出与记录里：
+
+1. 命令头新增 `leaves` 行，并把补救命令写在同一句里：
+
+```
+families          1: 1 round(s) from the file queue
+leaves            1 round(s) that named their file and never recorded their ceilings; measure them with brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0
+```
+
+2. `RoundResult.queue` 不再只写"付了哪个域的那一轮"，还写这次付的是哪一族、这次调用开了什么形状：
+
+```
+{"family": "file",    "paid": "SMD", "paid_round": "round-unrecorded.json",
+ "shape": {"families": 2, "file_rounds": 1, "ceiling_rounds": 1, "ceilings_skipped": 0},
+ "largest_at_start": {...}, "share_after": 0.0}
+{"family": "ceiling", "paid": "SMD", "paid_round": "round-named.json",
+ "shape": {"families": 2, "file_rounds": 1, "ceiling_rounds": 1, "ceilings_skipped": 0}}
+```
+
+只有文件族有 `largest_at_start` 与 `share_after`：只有它推动"未记录份额"。构造这段记录的代码被抽成 `_queue_entry(kind, domain, name, largest_start, progress, shape)`，因为在此之前它只能在跑过 Laya 的整条命令里被观察到——一个只能靠终端才能观察的事实，等于没有测试过。
+
+实测（`var/queue78`，两族各一轮，全部真跑）：`drained 2 round(s) …`, `paid SMD x2`, 两份记录如上；再跑 `--campaign` 时上限欠账行消失。
+
+三条读法：
+
+- **拒绝要带补救**。一句"我少做了一族"而没有下一步命令，等于把推断工作推回给读者；补救命令就在同一句里，成本是零。
+- **记录要能回答"这次调用做了什么形状"**。"付了一轮"在两族各一轮和一族两轮下是两种事实（边界 163 的记录侧）。
+- **抽出来才可测**。记录的形状一旦只能在端到端跑动里看见，它就会在下一次重构里悄悄消失，而没有任何测试会失败。
+
+**边界 164：一条命令省掉的工作，必须在它自己的输出里带着补救命令。**只说"留下了"而不说"用什么补"，读者仍要做第二次推断，而第二次推断正是本循环反复出错的地方。
+
+**边界 165：记录必须写明产出它的那次调用的形状。**"付了一轮"在"两族各一轮"和"一族两轮"下是两种事实；没有形状的记录只能被读成它最常见的那一种。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4545,4 +4583,6 @@ missing for the next level
 
 63. **（3.83 已完成）** 让 `--rerun-unrecorded` 在排队时也打印 `families` 与每一族的轮数，并把 `--without-ceilings` 的页面预算写成"本次不碰上限族"一句话，而不是沉默。
 
-64. 让 `--rerun-unrecorded` 在 `--without-ceilings` 时也打印被留下的轮数与下一句命令（现在页面有这句、命令头没有），并让 `--auto` 类批处理在拒绝一族时把拒绝写进 `queue` 记录。
+64. **（3.84 已完成）** 让 `--rerun-unrecorded` 在 `--without-ceilings` 时也打印被留下的轮数与下一句命令（现在页面有这句、命令头没有），并让 `--auto` 类批处理在拒绝一族时把拒绝写进 `queue` 记录。
+
+65. 让 `--campaign` 从记录的 `queue.family` 汇总"已付的族"（文件族/上限族各多少轮），并让 `--unrecorded` 的每一轮标出它是被哪一族付掉的。
