@@ -68,8 +68,11 @@ def test_the_split_names_the_files_the_evidence_stands_on():
             {"path": THIRD, "source": "written"},
             {"path": "", "source": ""}]
     split = evidence_split(rows, FILE)
-    assert split == {"original": 1, "elsewhere": 2, "unplaced": 1, "total": 4,
-                     "elsewhere_files": [OTHER, THIRD]}
+    assert split["original"] == 1 and split["elsewhere"] == 2 and split["unplaced"] == 1
+    assert split["total"] == 4
+    assert split["elsewhere_files"] == [OTHER, THIRD]
+    # Round 99: an unplaceable verdict is named, not just counted, so a reader can go and look it up.
+    assert split["unplaced_rows"] == [{"at": "", "verdict": ""}]
 
 
 def test_a_check_written_now_records_the_file_it_stood_on(tmp_path, monkeypatch, capsys):

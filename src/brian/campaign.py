@@ -939,10 +939,19 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                 # Round 97: the location is restored, the evidence is not. A record pointed back at its original
                 # file still holds verdicts taken on the substitute, and saying "back in place" without that
                 # would read as "answered again".
-                if item.get("checked_after_return"):
-                    lines.append("links             v%03d's record is back on its original file %s, and a check "
-                                 "has measured it there since the return (%s)"
+                evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+                taken = int(evidence.get("original") or 0)
+                if item.get("checked_after_return") and item.get("first_on_original"):
+                    # Round 99: the first verdict ever taken where the promise was made is not "another check
+                    # since the return" -- before it, nothing had tested the promise at the place it names.
+                    lines.append("links             v%03d's record is back on its original file %s, and this was "
+                                 "the first verdict ever taken there (%s)"
                                  % (version, str(item.get("first_from") or ""),
+                                    str(item.get("checked_after_return") or "")))
+                elif item.get("checked_after_return"):
+                    lines.append("links             v%03d's record is back on its original file %s, and %d "
+                                 "verdict(s) have been taken there since the return (latest %s)"
+                                 % (version, str(item.get("first_from") or ""), taken,
                                     str(item.get("checked_after_return") or "")))
                 else:
                     lines.append("links             v%03d's record is back on its original file %s, but no check "
@@ -971,6 +980,16 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                          % (int(item.get("version") or 0), int(evidence.get("total") or 0),
                             int(evidence.get("original") or 0), int(evidence.get("elsewhere") or 0),
                             detail, int(evidence.get("unplaced") or 0)))
+        for item in moves:
+            evidence = item.get("evidence")
+            if not isinstance(evidence, Mapping):
+                continue
+            for row in evidence.get("unplaced_rows") or []:
+                # Round 99: an unplaceable verdict is named with its time and word, so a reader can go and
+                # look it up instead of seeing a bare count they cannot act on (boundary 215).
+                lines.append("links             v%03d holds a verdict it cannot place: %s (%s)"
+                             % (int(item.get("version") or 0), str(row.get("at") or "?"),
+                                str(row.get("verdict") or "?")))
         after = sum(int(item.get("checks_on_repair") or 0) for item in moves)
         if after:
             # Round 95: the verdicts taken after the move are the part of the evidence a reader would most

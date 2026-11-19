@@ -5327,6 +5327,76 @@ links             1 check(s) were taken after the repair: their verdict describe
 2. **推导出来的事实要自己说是推导的。** 老检查没有 `checked_path`，但 `stream_path_moves = k` 与 `stream_path_history` 一起**唯一确定**它站在哪——这不是猜测，是从记录里算出来的。可它与"检查自己写下"仍不是一回事：一个是当时的证词，一个是事后的算术（边界 187 的分野，挪一个字段）。所以 `source` 分开记，页面在需要时可以把两种混着数，但读者能看见比例。
 3. **数不出来就说数不出来。** 既没有 `checked_path`、迁移次数又超出已知历史（比如记录被手改过）的判定，计入 `unplaced` 而不是归到最近的一边。把无法定位的折进任何一侧，都是让沉默替读者选答案（边界 166 的第二次应用）。
 
+### 3.105 第一次在原件上量，不是又一次复查
+
+第 98 轮把一份记录的证据按"取在哪个文件上"分开数了。分开之后，一个以前问不出来的问题出现了：**这份承诺，
+到底有没有在它出生的那个文件上量过一次？**
+
+一份记录可以这样走：原件消失 → 记录改指替代文件 → 在替代文件上量了两次 → 原件回来 → 记录指回原件。它持有
+两条判断，而这两条里没有一条说明它自己所在的位置。页面上原本只有两句话可以用：「回到原位后又查过一次」和
+「第一次在原件上查」。这两件事完全不同，而前者会把后者藏起来——它让一份从未在原件上测过的承诺看起来已经被
+反复检验过了。
+
+`--verify` 现在先看自己的前置证据够不够：
+
+```
+  v020  digest.rolling_window = 200  path rewritten 2 time(s) by hand and back on the original: data/smd/stream-real.json -> data/smd/stream-moved.json -> data/smd/stream-real.json
+        this check measures the file the record names again after the trip back; the verdicts it already holds were taken on the substitute (boundary 212)
+        this is the first verdict taken on the file the promise was born with: all 1 it holds were measured elsewhere (boundary 213)
+  v020  digest.rolling_window = 200  backfilled end: round-new.json has no successor-side record of its own: the end was copied from the retirement, not written by the queue
+        measured, not applied: the record's end was copied, so the deployment is left alone
+  v020  digest.rolling_window = 200  FAILED and reverted: promised recall 0.507 at the 10% budget, re-measured 0.060 (below 0.456)
+```
+
+上面这一份是"零份原件侧判断"的情形（`evidence_split["original"] == 0`）。同一棵树换成"已经有一份原件侧判断"
+的记录，第一句就必须改口：
+
+```
+        this check measures the file the record names again after the trip back; 1 of the 2 verdict(s) it already holds were taken here, 1 elsewhere (boundary 212)
+```
+
+这是本轮运行中抓到的第二个缺陷。第 97 轮那句「它已持有的判断都取在替代文件上」在当时是真的（那份记录只有一条
+判断，且取在替代文件上），但它把**当时那棵树的事实写成了句子的断言**。第 99 轮一加入"原件侧判断"，同一句话就
+变成了假话——而且它恰好出现在读者最需要分清两种判断的位置。修法是让句子跟着数字走：先看 `prior_split`，有原件
+侧的就报个数，没有才说"都在别处"（边界 190：机制变了，句子和钉住句子的断言要一起动）。
+
+`--campaign` 上的两句话也就分开了。零份原件侧判断的记录只有"位置复原了、证据没有"，并点名那条命令：
+
+```
+links  v020's record is back on its original file data/smd/stream-real.json, but no check has stood there since the return: the location is restored, the evidence is not -- brian evolve --verify --verify-version 020 --stream-file data/smd/stream-real.json
+links  v020 holds 1 verdict(s) on file: 0 on its original file, 1 on another file (data/smd/stream-moved.json), 0 it cannot place
+```
+
+查到第一次之后：
+
+```
+links  v020's record is back on its original file data/smd/stream-real.json, and this was the first verdict ever taken there (2026-11-19T22:24:25+00:00)
+links  v020 holds 2 verdict(s) on file: 1 on its original file, 1 on another file (data/smd/stream-moved.json), 0 it cannot place
+```
+
+还有第三种判断：**定位不了**的。`verification` 里既没有 `checked_path`，它的 `stream_path_moves` 又大于历史长度
+（例如记录只移动过两次，它却写成 7），那它就是一条没有位置的判断。这类判断不能折进任何一边——折进"原件侧"
+会让承诺显得被测过，折进"替代侧"会显得它站在别处；两种折法都是替一条说不清来源的证据选边（边界 166）。
+页面现在按时间 + 判词逐条列出：
+
+```
+links  v020 holds a verdict it cannot place: 2026-12-01T12:00:00+00:00 (unmeasurable)
+```
+
+一条读不出位置判断的记录，读者第一件想做的事是打开那个时间点看看发生了什么；只给一个数字，等于把追查的入口
+也一起省掉了。
+
+**边界 215：读不出位置的判断，要带时间和判词逐条列出来，不能只留一个计数。** 计数告诉读者"有东西不对劲"，
+不告诉他去哪儿看；而这类判断的存在本身就是因为当时的记录不完整，指望读者从别处补出它的位置是没有道理的。
+
+**边界 216：证据全在别处，不等于证据在这里。** "第一次在承诺出生的地方量"和"回到原位后又量了一次"是两件事；
+页面把两件事都叫"回到原位后的复查"，就把"这份承诺从未在它指名的位置被测过"这个事实藏掉了——而它恰恰是修复
+这条路存在的理由。
+
+**边界 217：一句量化过去证据的话，必须跟着分裂后的数字走。** 第 97 轮写死"它已持有的判断都取在替代文件上"，
+在当时那棵树上为真；第 99 轮一有原件侧判断，这句话就成了假话，而且假在读者最需要分清两种判断的地方。断言
+过去证据的句子要先查 `evidence_split`，数字变了句子跟着变（第 190 轮的规则用在句子的主语上）。
+
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
@@ -5691,7 +5761,17 @@ missing for the next level
     `verification` 记录 `checked_path` 与 `prior_evidence_paths`，页面上按"取在哪个文件上"把证据分开数。
     **已完成（第 98 轮）**：`verification_evidence` / `evidence_split`，实测见 §3.104。
 
-85. 让 `--verify` 在写入前检查自己的**前置证据是否够用**：如果这条承诺此前的判定全部取在替代件上
-    （`evidence_split["original"] == 0`），就在页面与 `verification` 里都注明"这次是这条承诺第一次在原件上被量"，
-    并让 `--campaign` 把"回到原位后第一次量"与"回到原位后又量了一次"分开；顺带把 `unplaced` 的判定逐条列出
-    （时间 + 判定词），让读者能手工追查，而不是只看到一个数。
+85. 已完成：`--verify` 先看自己的证据够不够。补丁给了 `evidence_split` 一个 `unplaced_rows`（无法定位的判断连
+    时间带判词一起列出来）、给 `repaired_paths` 一个 `first_on_original`，`--verify` 在
+    `on_original and prior_split["total"] and not prior_split["original"]` 时打出"这是第一次在承诺出生的
+    那个文件上取判断：它持有的 N 条（判断）都量在别处"，并把 `prior_evidence_split` 与
+    `first_original_measurement` 写进 `verification`；`--campaign` 把"回到原位后的第一次"和"又一次复查"分成
+    两句，并把无法定位的判断按时间 + 判词逐条列出。数字上：1480 → 1492 个测试（`tests/test_first_original.py`
+    10 条、`tests/test_return_trip.py` 1 条，其余是既有断言跟着新字段改），`pyflakes` 0。
+    运行中抓到第二个缺陷：第 97 轮那句"它已持有的判断都取在替代文件上"在同一份记录既有一份原件侧判断时是假
+    的，改成"其中 N 条取在这里、M 条在别处"（边界 217）。
+
+86. 让 `--campaign` 按文件统计"从未在承诺出生的地方量过"的承诺有多少（一个队列：证据全在别处的记录），并让
+    `--verify` 在这种记录上优先选原件文件；现在页面能说出单条记录的分裂，说不出这种记录的**总量**，也就排不出
+    先查哪一个。另外把 `first_original_measurement` 接进 `--history` 的 `clearings` 链，让"第一次在原件上
+    量"在历史里也是可见的一行，而不只是版本文件里的一个字段。

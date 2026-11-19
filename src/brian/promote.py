@@ -1663,8 +1663,10 @@ def evidence_split(evidence: Sequence[Mapping[str, Any]], origin: str) -> Dict[s
             elsewhere += 1
             if path not in files:
                 files.append(path)
+    unplaced_rows = [{"at": str(row.get("at") or ""), "verdict": str(row.get("verdict") or "")}
+                     for row in evidence if not str(row.get("path") or "")]
     return {"original": original, "elsewhere": elsewhere, "unplaced": unplaced,
-            "total": len(evidence), "elsewhere_files": files}
+            "total": len(evidence), "elsewhere_files": files, "unplaced_rows": unplaced_rows}
 
 
 def prior_evidence(promotion: "Promotion") -> List[Dict[str, Any]]:
@@ -1738,5 +1740,9 @@ def repaired_paths(root: Path) -> List[Dict[str, Any]]:
                      # "N verdict(s) on file" and not "N checks", because the two differ once a re-check was
                      # deduplicated (round 28).
                      "evidence": evidence_split(verification_evidence(payload), origin),
+                     # Round 99: "measured after the return" and "measured there for the first time" are two
+                     # facts. A record whose verdicts were all taken elsewhere has never had its promise tested
+                     # where it was made, so the page must not read one against the others as if it had.
+                     "first_on_original": (returned and len(on_original) == 1),
                      "in_force": version in deployed})
     return rows

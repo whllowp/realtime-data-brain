@@ -110,6 +110,7 @@ from .promote import (
     revert_promotion,
     set_state_budget,
     repaired_paths,
+    evidence_split,
     prior_evidence,
     same_stream_path,
     set_stream_path,
@@ -2823,7 +2824,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             checked_here = str(getattr(args, "stream_file", None) or "")
             # Round 98: the verdict about to be written says where it stands and where the evidence stood
             # before it, so a reader never has to infer either from the order of the file's keys.
-            prior_paths = [row for row in prior_evidence(promotion) if row.get("path") or row.get("at")]
+            prior_rows = [row for row in prior_evidence(promotion) if row.get("path") or row.get("at")]
+            prior_paths = prior_rows
+            # Round 99: what the evidence looked like *before* this check, so the verdict about to be written
+            # can say whether it is the first one ever taken where the promise was made (boundary 213).
+            prior_split = evidence_split(prior_rows, promotion.path_origin)
             on_original = bool(path_moves) and same_stream_path(checked_here, promotion.path_origin)
             # Round 97: after a return the record names the original again, so "origin -> current" prints the
             # same file twice. The chain of the trip is the honest description, and whether the trip is closed
@@ -2838,10 +2843,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                           " and back on the original" if back_home else "", chain))
                 if on_original and back_home:
                     # Round 97: the record already points at the file this check is standing on. Saying it
-                    # "still points at the repair" would contradict the line above it, and the verdicts it
-                    # already holds were taken elsewhere (boundary 212).
-                    _print("        this check measures the file the record names again after the trip back; "
-                           "the verdicts it already holds were taken on the substitute (boundary 212)")
+                    # "still points at the repair" would contradict the line above it (boundary 212).
+                    # Round 99: "the verdicts it already holds were taken on the substitute" is only true when
+                    # none of them was taken here. A record can hold both kinds, and then the count is the fact.
+                    if prior_split["original"]:
+                        _print("        this check measures the file the record names again after the trip back; "
+                               "%d of the %d verdict(s) it already holds were taken here, %d elsewhere "
+                               "(boundary 212)"
+                               % (prior_split["original"], prior_split["total"],
+                                  prior_split["elsewhere"] + prior_split["unplaced"]))
+                    else:
+                        _print("        this check measures the file the record names again after the trip back; "
+                               "the verdicts it already holds were taken on the substitute (boundary 212)")
                 elif on_original:
                     # Round 96: the same page must not claim the check is standing on the repair when it is
                     # standing on the file the promise was born with (boundary 190: the sentence and the
@@ -2851,6 +2864,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 else:
                     _print("        this check measures the repaired location, not the file the promise first "
                            "named (boundary 203)")
+                if on_original and prior_split["total"] and not prior_split["original"]:
+                    _print("        this is the first verdict taken on the file the promise was born with: all "
+                           "%d it holds were measured elsewhere (boundary 213)" % prior_split["total"])
             block = provenance_block(root, promotion.version)
             if block is not None and block[0] == LINK_BROKEN:
                 blocked.append(block)
@@ -2891,6 +2907,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     # record held before it. Without this the pages can only count "on the repair" twice over.
                     "checked_path": checked_here,
                     "prior_evidence_paths": prior_paths,
+                    "prior_evidence_split": prior_split,
                 })
                 _print("  v%03d  %s  unmeasurable" % (promotion.version, promotion.change))
                 continue
@@ -2903,7 +2920,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        "reason": reason, "measurement": measurement.to_dict(),
                        "stream_path_moves": path_moves, "on_original_path": on_original,
                        "checked_path": checked_here,
-                       "prior_evidence_paths": prior_paths}
+                       "prior_evidence_paths": prior_paths,
+                       "prior_evidence_split": prior_split,
+                       "first_original_measurement": bool(on_original and prior_split["total"]
+                                                          and not prior_split["original"])}
             if copied:
                 payload["copied_end"] = {"kind": block[0], "detail": block[1]}
             if verdict == FAILED:

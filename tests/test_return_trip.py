@@ -39,13 +39,15 @@ def _repaired_then_back(root: Path, *, checked: bool = False, on_substitute: boo
         write_verification(root, promotion,
                            {"checked_at": (NOW + timedelta(days=1, hours=1)).isoformat(),
                             "verdict": "failed", "reason": "recall fell", "stream_path_moves": 1,
-                            "on_original_path": False})
+                            "checked_path": OTHER, "on_original_path": False})
     if checked:
         promotion = load_promotions(root)[0]
+        # `stream_path_moves` is the number of moves the record had when the check ran, which is 2 once the trip
+        # back has been written -- and `checked_path` is the file itself, so the two agree (round 98).
         write_verification(root, promotion,
                            {"checked_at": (NOW + timedelta(days=2)).isoformat(),
-                            "verdict": "holds", "reason": "measured again", "stream_path_moves": 1,
-                            "on_original_path": True})
+                            "verdict": "holds", "reason": "measured again", "stream_path_moves": 2,
+                            "checked_path": FILE, "on_original_path": True})
 
 
 def _history(root: Path) -> str:
@@ -137,8 +139,25 @@ def test_the_campaign_says_when_a_check_stood_there_since(tmp_path):
     _repaired_then_back(tmp_path, checked=True)
     page = _campaign(tmp_path)
     assert "is back on its original file" in page
-    assert "a check has measured it there since the return (%s)" % (NOW + timedelta(days=2)).isoformat() in page
+    # Round 99: this one check is also the first verdict ever taken where the promise was made, and saying
+    # "another check since the return" would hide that the promise had never been tested there before.
+    assert "this was the first verdict ever taken there (%s)" % (NOW + timedelta(days=2)).isoformat() in page
     assert "the evidence is not" not in page
+
+
+def test_a_second_check_after_the_return_is_not_called_the_first(tmp_path):
+    from brian.promote import write_verification
+
+    _repaired_then_back(tmp_path, checked=True)
+    promotion = load_promotions(tmp_path)[0]
+    write_verification(tmp_path, promotion,
+                       {"checked_at": (NOW + timedelta(days=3)).isoformat(), "verdict": "failed",
+                        "reason": "recall fell", "stream_path_moves": 2, "on_original_path": True,
+                        "checked_path": FILE})
+    page = _campaign(tmp_path)
+    assert "2 verdict(s) have been taken there since the return (latest %s)" % (
+        NOW + timedelta(days=3)).isoformat() in page
+    assert "first verdict ever taken there" not in page
 
 
 def test_a_check_taken_on_the_substitute_is_still_counted_apart(tmp_path):
