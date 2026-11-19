@@ -3300,6 +3300,18 @@ class Audit:
     in_force_stale: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
+    def link_content(self) -> bool:
+        """Whether `_link_lines` has anything to say at all (round 87).
+
+        The gate used to be `links or backfilled`, written when those were the only two blocks. Rounds 85-87 hung
+        the in-force rows, the stale rows and the cleared history off the same printer, so a ledger with none of
+        the first two and one of the others printed nothing -- a page that stays silent because an unrelated fact
+        is absent (boundary 184). One property, read by both call sites, is the only place that decides.
+        """
+        return bool(self.links or self.backfilled or self.in_force or self.in_force_cleared
+                    or self.in_force_stale)
+
+    @property
     def broken_links(self) -> int:
         """Links where both sides exist and disagree, or one side points at nothing (round 81)."""
         return sum(1 for item in self.links if item.get("kind") in LINK_DEFECTS)
@@ -3616,7 +3628,7 @@ def format_audit(result: Audit) -> str:
     lines.append("")
     if not result.entries:
         lines.append("every recorded verdict survives today's rules.")
-        if result.links or result.backfilled:
+        if result.link_content:
             lines.append("")
             lines.extend(_link_lines(result))
         return "\n".join(lines)
@@ -3659,7 +3671,7 @@ def format_audit(result: Audit) -> str:
             lines.append("All of them predate the geometry field: they cannot be replayed, but re-running "
                          "such a round")
             lines.append("writes a record that can be.")
-    if result.links or result.backfilled:
+    if result.link_content:
         lines.append("")
         lines.extend(_link_lines(result))
     return "\n".join(lines)
@@ -3730,9 +3742,17 @@ def _link_lines(result: Audit) -> List[str]:
         lines.append("%d version(s) in force are no longer disputed, and the ledger forgets them now:"
                      % len(result.in_force_cleared))
         for item in result.in_force_cleared:
-            lines.append("  %-16s v%03d  %-13s (first seen %s)"
+            by = ("a re-measurement on %s" % str(item.get("checked_at"))
+                  if item.get("by") == "verification" else
+                  "no measurement: the ledger no longer reproduces it")
+            age = item.get("age_days")
+            lines.append("  %-16s v%03d  %-13s (first seen %s%s, cleared by %s)"
                          % (item.get("domain") or "default", int(item.get("version") or 0),
-                            item.get("kind"), item.get("first_seen")))
+                            item.get("kind"), item.get("first_seen"),
+                            "" if age is None else ", stood %.1f day(s)" % float(age), by))
+        if any(item.get("by") != "verification" for item in result.in_force_cleared):
+            lines.append("A dispute that left the ledger without a measurement is not resolved, it is unobserved:")
+            lines.append("counted apart on the campaign page, and charged by nothing (boundary 183).")
     return lines
 
 

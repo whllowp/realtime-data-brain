@@ -21,7 +21,7 @@ from pathlib import Path
 from brian import cli
 from brian.campaign import campaign
 from brian.evolve import audit, format_audit, repair_legacy
-from brian.promote import (IN_FORCE_STORE, LINK_BACKFILLED, LINK_BROKEN, load_promotions,
+from brian.promote import (IN_FORCE_FORMAT, IN_FORCE_STORE, LINK_BACKFILLED, LINK_BROKEN, load_promotions,
                            observe_in_force_disputes, stale_in_force_disputes)
 from test_in_force_provenance import _state
 from test_provenance_block import _legacy, _round, _stream, _version
@@ -73,7 +73,7 @@ def test_the_first_sighting_is_written_down(tmp_path):
     assert aged[0]["observations"] == 1
     assert aged[0]["age_days"] == 0.0
     stored = json.loads((tmp_path / "var" / "evolve" / IN_FORCE_STORE).read_text(encoding="utf-8"))
-    assert stored["format"] == "brian.inforce/1"
+    assert stored["format"] == IN_FORCE_FORMAT
     assert stored["observed"][0]["version"] == 20
 
 

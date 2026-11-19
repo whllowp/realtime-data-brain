@@ -95,7 +95,9 @@ from .promote import (
     domain_slug,
     format_promotions,
     IN_FORCE_GRACE_DAYS,
+    cleared_summary,
     in_force_disputes,
+    in_force_history,
     in_force_overrides,
     legacy_state_note,
     load_promotions,
@@ -1487,15 +1489,27 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # Round 85: round 84 refused to stack a promise on a disputed record, but a version can be applied before
     # its record's link breaks (a retirement or a repair recorded afterwards). The rows are computed once,
     # before any branch, so the campaign page, the audit page and the gate cannot disagree about them.
+    # Round 87: the clearings are cited, so the store has to see the verdicts -- a "cleared" row that cites a
+    # measurement is a resolution, and one that cites nothing is an absence of observation.
     try:
-        in_force_rows, in_force_cleared = observe_in_force_disputes(root, in_force_disputes(root))
+        deployed = load_promotions(root)
+    except OSError:
+        deployed = []
+    try:
+        in_force_rows, in_force_cleared = observe_in_force_disputes(root, in_force_disputes(root),
+                                                                   promotions=deployed)
     except OSError:
         in_force_rows, in_force_cleared = [], []
     in_force_broken = sum(1 for item in in_force_rows if item.get("broken"))
     try:
-        in_force_stale_rows = stale_in_force_disputes(in_force_rows, load_promotions(root))
+        in_force_stale_rows = stale_in_force_disputes(in_force_rows, deployed)
     except OSError:
         in_force_stale_rows = []
+    try:
+        in_force_history_rows, in_force_trimmed = in_force_history(root)
+    except OSError:
+        in_force_history_rows, in_force_trimmed = [], 0
+    in_force_record = cleared_summary(in_force_history_rows, trimmed=in_force_trimmed)
 
     if getattr(args, "max_limit_drift", None) is not None and not (args.audit or args.campaign):
         # Round 68: a flag that only one mode reads must say so, otherwise it is inert in every other mode and
@@ -2127,7 +2141,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             result = campaign_result(root, rules, expiry_days=args.expiry_days,
                                      refusal_expiry_days=horizon, limits=limits_view,
                                      in_force=in_force_rows, in_force_cleared=in_force_cleared,
-                                     in_force_stale=in_force_stale_rows)
+                                     in_force_stale=in_force_stale_rows, in_force_history=in_force_record)
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2

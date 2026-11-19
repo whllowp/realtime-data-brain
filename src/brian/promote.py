@@ -190,31 +190,72 @@ def _stamp_moment(now: Optional[datetime] = None) -> datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
+#: The store's format. v2 keeps a history of cleared entries beside the live rows; a v1 file (round 86) has no
+#: history at all, which reads as "nothing has cleared yet" rather than as a defect.
+IN_FORCE_FORMAT = "brian.inforce/2"
+
+#: A cleared entry cites how it stopped being true. A re-measurement is the one action that answers a copied
+#: end; anything else is the ledger no longer reproducing the objection, which is an absence of observation
+#: rather than a verdict, so the two are counted apart.
+CLEARED_BY_MEASUREMENT = "verification"
+CLEARED_BY_LEDGER = "unexplained"
+
+#: How many cleared entries to keep. A history that grows without a bound is a state file nobody can read, and
+#: the count of what was dropped travels with it so a trimmed history cannot look complete.
+IN_FORCE_HISTORY_LIMIT = 200
+
+
+def _read_in_force_store(root: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+    path = _in_force_path(root)
+    if not path.is_file():
+        return [], [], 0
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, Mapping):
+        return [], [], 0
+    observed = [dict(item) for item in payload.get("observed") or [] if isinstance(item, Mapping)]
+    cleared = [dict(item) for item in payload.get("cleared") or [] if isinstance(item, Mapping)]
+    try:
+        trimmed = int(payload.get("trimmed") or 0)
+    except (TypeError, ValueError):
+        trimmed = 0
+    return observed, cleared, trimmed
+
+
+def _checked_at(promotions: Sequence["Promotion"]) -> Dict[int, Optional[datetime]]:
+    """When each deployed version was last measured, so a clearing can say whether a measurement covers it."""
+    moments: Dict[int, Optional[datetime]] = {}
+    for promotion in promotions:
+        moment = _parse_moment((promotion.verification or {}).get("checked_at"))
+        if moment is None:
+            continue
+        previous = moments.get(int(promotion.version))
+        if previous is None or moment > previous:
+            moments[int(promotion.version)] = moment
+    return moments
+
+
 def observe_in_force_disputes(root: Path, rows: Sequence[Mapping[str, Any]],
                               now: Optional[datetime] = None,
+                              promotions: Sequence["Promotion"] = (),
                               ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Give a recomputed fact a history: when each dispute was first seen (round 86).
+    """Give a recomputed fact a history: when each dispute was first seen, and what cleared it (round 87).
 
     Returns `(aged, cleared)`: the rows enriched with `first_seen`, `last_seen`, `observations` and `age_days`;
-    and the entries this run no longer sees, once each, so the page can say a debt cleared instead of
-    remembering one that stopped being true. A clean tree writes nothing, so a deployment that never had a
-    dispute does not grow a file suggesting it did.
+    and the entries this run no longer sees, each carrying `cleared_at`, `age_days` and `by` --
+    `"verification"` when a measurement of that version is newer than the objection, `"unexplained"` when the
+    ledger merely stopped reproducing it. A clean tree writes nothing beyond the history it must keep.
     """
     moment = _stamp_moment(now)
-    path = _in_force_path(root)
-    stored: List[Dict[str, Any]] = []
-    if path.is_file():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-        if isinstance(payload, Mapping):
-            stored = [dict(item) for item in payload.get("observed") or [] if isinstance(item, Mapping)]
+    observed, cleared_history, trimmed = _read_in_force_store(root)
     seen: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
-    for item in stored:
+    for item in observed:
         key = (str(item.get("domain") or "default"), int(item.get("version") or 0),
                str(item.get("kind") or ""))
         seen[key] = item
+    checks = _checked_at(promotions)
     aged: List[Dict[str, Any]] = []
     for row in rows:
         key = (str(row.get("domain") or "default"), int(row.get("version") or 0), str(row.get("kind") or ""))
@@ -230,12 +271,54 @@ def observe_in_force_disputes(root: Path, rows: Sequence[Mapping[str, Any]],
             "first_seen": first, "last_seen": moment.isoformat(), "observations": observations,
             "age_days": round((moment - first_moment).total_seconds() / 86400.0, 2),
         })
-    cleared = [dict(item) for item in seen.values()]
-    if aged or cleared:
+    cleared: List[Dict[str, Any]] = []
+    for key, item in seen.items():
+        first = str(item.get("first_seen") or "") or moment.isoformat()
+        first_moment = _parse_moment(first)
+        checked = checks.get(key[1])
+        measured = checked is not None and (first_moment is None or checked >= first_moment)
+        entry = {
+            "domain": key[0], "version": key[1], "kind": key[2],
+            "first_seen": first, "last_seen": str(item.get("last_seen") or ""),
+            "observations": int(item.get("observations") or 0),
+            "cleared_at": moment.isoformat(),
+            "age_days": (None if first_moment is None
+                         else round((moment - first_moment).total_seconds() / 86400.0, 2)),
+            "by": CLEARED_BY_MEASUREMENT if measured else CLEARED_BY_LEDGER,
+            "checked_at": None if checked is None else checked.isoformat(),
+        }
+        cleared.append(entry)
+        cleared_history.append(entry)
+    if len(cleared_history) > IN_FORCE_HISTORY_LIMIT:
+        dropped = len(cleared_history) - IN_FORCE_HISTORY_LIMIT
+        cleared_history = cleared_history[dropped:]
+        trimmed += dropped
+    if aged or cleared or trimmed:
+        path = _in_force_path(root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"format": "brian.inforce/1", "observed": aged}, indent=2) + "\n",
-                        encoding="utf-8", newline="\n")
+        path.write_text(json.dumps({"format": IN_FORCE_FORMAT, "observed": aged,
+                                    "cleared": cleared_history, "trimmed": trimmed},
+                                   indent=2) + "\n", encoding="utf-8", newline="\n")
     return aged, cleared
+
+
+def in_force_history(root: Path) -> Tuple[List[Dict[str, Any]], int]:
+    """The cleared entries the store remembers, and how many older ones were trimmed."""
+    _, cleared, trimmed = _read_in_force_store(root)
+    return cleared, trimmed
+
+
+def cleared_summary(entries: Sequence[Mapping[str, Any]], trimmed: int = 0) -> Dict[str, Any]:
+    """The two counts apart, with the median age, because they answer different questions."""
+    measured = [item for item in entries if item.get("by") == CLEARED_BY_MEASUREMENT]
+    unexplained = [item for item in entries if item.get("by") != CLEARED_BY_MEASUREMENT]
+    ages = sorted(float(item.get("age_days") or 0.0) for item in entries if item.get("age_days") is not None)
+    middle = 0.0
+    if ages:
+        half = len(ages) // 2
+        middle = ages[half] if len(ages) % 2 else (ages[half - 1] + ages[half]) / 2.0
+    return {"total": len(entries), "measured": len(measured), "unexplained": len(unexplained),
+            "median_age_days": round(middle, 2), "trimmed": int(trimmed)}
 
 
 def stale_in_force_disputes(rows: Sequence[Mapping[str, Any]], promotions: Sequence["Promotion"],

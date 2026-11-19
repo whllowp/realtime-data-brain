@@ -4692,6 +4692,42 @@ one command that clears it.
 **边界 181：年龄不是补救。** 只升级"有命令能清掉"的那一种欠账，并在升级的句子里点名那条命令；已经按缺陷收费的那一种不要再叠一层年龄。
 
 
+### 3.93 清掉一笔债，要说清是谁清的
+
+第 3.92 轮让"一个每次重算的事实"有了年龄：把首次看见写进 `var/evolve/in_force.json`，过期升一级。这一轮问的是它退场的那一半——一行争议**消失**的时候，究竟是**被解决**了，还是**被忘掉**了。
+
+这两种事件在页面上长得一模一样。第一种是有人把在跑的版本重测了一次，测量比异议新，补写端因此不再是欠账；第二种是账本干脆不再复现这条异议（记录被改好、被退休、或者被谁删掉了），没有任何测量参与。前者是裁决，后者是观察的缺失。第 86 轮的存储只保留**当前**有争议的行，消失的行回传一次然后删掉，所以它只能说"不再争议"，分不出这两者——而"说不清"在账本上会自动倒向便宜的那一边：债务消失了，账单上看起来就像付清了。
+
+于是存储升到 `brian.inforce/2`，在旁边多一份 `cleared` 历史，每行都带**引用**：
+
+```
+  smd              v020  backfilled end (first seen 2026-11-19T19:05:39+00:00, stood 0.0 day(s),
+                         cleared by no measurement: the ledger no longer reproduces it)
+A dispute that left the ledger without a measurement is not resolved, it is unobserved:
+counted apart on the campaign page, and charged by nothing (boundary 183).
+```
+
+同一个账本，如果消失之前写过一份更新的验证，同一行读作 `cleared by a re-measurement on 2026-11-19T19:18:18+00:00`。判定规则只有一条：把该版本的 `verification.checked_at` 与这一行的 `first_seen` 比较，新的算 `verification`，其余一律 `unexplained`（不是"算作解决"，是"没有证据说它解决了"）。历史有上限（200 条），被裁掉的条数写进 `trimmed` 并由战役页印出来：一份被裁剪却不说的历史，看起来是完整的。
+
+战役页把两种清掉分开报，绝不加总：
+
+```
+links             1 dispute(s) left the in-force list: 1 cleared by a re-measurement (median 0.0 day(s)), 0 with no measurement on file
+```
+
+没有测量的清除**不进闸门**。理由和第 3.91 轮"在跑的补写端只报告不收费"是同一个：这个存储是本机的观察文件，不是账本的一部分；一台新机器、一次删库、一次目录搬迁都会让每一行看起来"没有测量"。一个因为本地文件缺失就永远红的闸门，最后没人跑（边界 154、171）。
+
+这一轮现场暴露的缺陷属于另一类：**一个页面因为无关事实的缺席而沉默**。`format_audit` 只在 `result.links or result.backfilled` 非空时才调用 `_link_lines`——那是第 83 轮的写法，当时它还只印这两种块；第 85–87 轮把"在跑的行""过期行""清除历史"都挂到了同一个打印机上，但闸门没跟着改。结果：战役页说"有 1 笔争议离开了在跑清单"，而审查页对这件事一个字都不印。修法是把判断收进一个属性 `Audit.link_content`，两处调用点读同一个判断——这已经是"闸门与内容各自演化"的第三个位置（第 3.88 轮的边界 173、第 3.92 轮的页面/闸门不同裁决），所以这次不是补一个条件，而是让判断只有一个定义。
+
+第三个教训还是时钟，和上一轮同源：测试里 `first_seen` 用的是固定的 `NOW`（2026-12-01），而验证时间戳用的是真实时钟，于是"更新的测量"被判成旧的，引用落在 `unexplained`。**一个比较只在同一个时钟下有意义**；夹具要么全部走固定时钟，要么全部走真实时钟。
+
+**边界 182：只保留当前状态的历史，说不出它是怎么结束的。** 一笔债退场时，"被解决"和"不再被看见"必须分成两条记录，否则账本会自动选择更便宜的那条解释。
+
+**边界 183：没有测量的清除只报告，不收费。** 观察存储是本地的、可丢的，闸门不能因为一个不在账本里的文件缺失就永远红。
+
+**边界 184：一个打印机的闸门，必须点名它全部的主题。** 只列了其中一种事实的条件，会在其余事实单独出现时让页面沉默——而沉默读起来像"没有问题"。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4997,4 +5033,5 @@ missing for the next level
 
 71. **（第 3.91 轮完成，2026-11-20）** 这一项的前提不成立：`brian evolve` 没有 `--promote` 入口。真正漏掉的是"没人对已经在生效的版本发问"。已经做出：`promote.in_force_promotions` 从每个部署状态的 `sources` 读出在跑哪些版本（迁移前的全局 `current.json` 记作默认域，两个变量属于同一版本只算一个），`promote.in_force_disputes` 对每个在生效版本调第 84 轮的 `provenance_block`，行里带 `domain`/`version`/`broken`/`kind`/`detail`；`Audit.in_force`、`in_force_broken`、`in_force_copied` 把它带进 `--audit` 的 `links` 段（逐行打印域名、版本、种类和细节），`--campaign` 的 `links` 段多一行 `N version(s) in force sit on a record the books dispute: v020`，`--json-out` 里是 `in_force_disputed`；`--strict` 对"在跑踩在断链上的版本"exit 2，对补写端只报告（exit 0）。真实账簿：三个在生效版本，零争议。
 72. **（第 3.92 轮完成，2026-11-20）** `in_force_disputes` 每次运行都从账本重算，能说"这个在跑的版本踩在补写端上"，说不出"已经多久"。账本也给不出年龄：它记的是变了什么，不是循环什么时候第一次看见。已经做出：`promote.observe_in_force_disputes` 把每个 `(domain, version, kind)` 的 `first_seen` 写进 `var/evolve/in_force.json`（格式 `brian.inforce/1`，保留首次时间、递增 `observations`、重算 `age_days`，本轮已消失的行回传一次 `cleared` 然后忘掉；干净部署不写文件，免得长出一个暗示"曾经有过争议"的存储）；`promote.stale_in_force_disputes` 只挑**补写端**里超过 `IN_FORCE_GRACE_DAYS = 14` 天、且没有比首次看见更新的 `verification.checked_at` 的行；`Audit.in_force_stale`、`Campaign.in_force_stale` 把它带进 `--audit`（行尾 `[stale: no verdict newer than the objection]` 和一段说明，`--campaign` 印 `v020 (20.0 day(s))` 与一行"站在宽限期之外"）与 `--json-out`（`in_force_stale` / `in_force_cleared`）；`--strict` 对过期的补写端 exit 1，并点名唯一的清账命令 `brian evolve --verify --verify-version <n> --stream-file <该版本量过的文件>`。
-73. 让 `--verify` 的结果写回 `in_force.json`：现在清账只意味着"下一次重算看不见这一行了"，而那一行是被删掉、不是被解决——把 `cleared_at` 和清除它的那次验证记下来，让 `--campaign` 能报告"平均挂了多久"。
+73. **（第 3.93 轮完成，2026-11-20）** 第 86 轮记下了"第一次看见"，一行消失时回传一次 `cleared` 然后忘掉，于是页面能说"这个版本不再有争议"，说不出"**是谁清的**"。两种完全不同的事件在这里长得一样：把在跑的版本重测一次（唯一能回答补写端的动作），以及账本不再复现这条异议（观察的缺失，不是裁决）。把两者折叠，就等于让一笔债务消失并被记成已付。已经做出：存储升到 `brian.inforce/2`，多一份 `cleared` 历史，每行带 `cleared_at`、`age_days`、`observations` 和引用 `by`（`verification` 表示有一份比首次看见更新的测量；`unexplained` 表示没有），上限 `IN_FORCE_HISTORY_LIMIT = 200` 并把被裁掉的条数记进 `trimmed`；`promote.in_force_history` / `cleared_summary` 把两种清掉分开计数并给出中位年龄；`Audit.link_content` 统一了"这一页有没有链接段要说"的判断（见 §3.93 的缺陷）；`--audit` 逐行印 `cleared by …`，并单独声明"没有测量的清除不是解决，是没看见"；`--campaign` 印 `N dispute(s) left the in-force list: K cleared by a re-measurement (median … day(s)), M with no measurement on file`，`--json-out` 里是 `in_force_cleared_history`。真实账簿：零清除（没有在生效版本踩过争议），所以这一段只有在 demo 里才有内容可读。
+74. 让 `--verify` 在测量成功的那一刻直接写那条清除记录（带 `checked_at` 与 `verdict`），而不是等下一次 `--audit` 重算才发现"这一行不见了"：如果那一行在此之前被删掉、或账簿被回滚，清除就没有人记；顺带让 `--campaign` 按域名拆开清除历史（现在只报总数与中位年龄）。
