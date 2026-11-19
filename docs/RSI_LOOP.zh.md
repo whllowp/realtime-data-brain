@@ -5150,6 +5150,49 @@ stream path     v020  data/smd/stream-real.json -> data/smd/stream-moved.json
 **边界 205：修记录不会让证据变新。** `--set-stream-path` 没有重测任何东西（命令自己就这么说），所以"路径被修过"
 不能被读成"承诺被重新验证过"——前者是位置，后者是结论，两件不同的事。
 
+### 3.101 在修过的位置上取的结论，也要自己说出来
+
+第 94 轮把"这条记录的测量文件被人工改过"印到了版本表和 campaign 上。缺的是另一半：**检查**写下的
+`verification` 什么也没说。于是在修过的位置上跑出来的结论，读起来和一开始就量在承诺所指文件上的结论一模一样——
+这既是边界 203 的延伸（改过的记录必须自述被改过），也是边界 205 的落点（"路径被修过"不是"承诺被重新验证过"，
+而"验证"这件事恰恰是在这里被写下来的）。
+
+做法：
+
+1. `Promotion` 带上第 93 轮自己写的字段 `stream_path_history`，并给出 `path_moves` / `path_origin` / `path_current`。
+2. `--verify` 在**测量之前**说清站在哪里：
+
+   ```
+     v020  digest.rolling_window = 200  path rewritten 1 time(s) by hand: data/smd/stream-real.json -> data/smd/stream-moved.json
+           this check measures the repaired location, not the file the promise first named (boundary 203)
+   ```
+
+3. 三条写 `verification` 的路径都记 `stream_path_moves`——包括定义缺失、只能写 `unmeasurable` 的那条，
+   因为"站在哪个位置"是记录的事实，不是判决的产物（边界 207）。
+4. 版本表在行尾标 `(path rewritten N time(s) by hand)`，并在判决后面标 `[measured on the repaired path]`：
+
+   ```
+   v020     digest.rolling_window = 20 recall 0.507 reverted …  [measured on the repaired path]  (path rewritten 1 time(s) by hand)
+   ```
+
+5. `repaired_paths` 多算一个 `checks_on_repair`（当前判决与 `checks` 历史里 `stream_path_moves > 0` 的条数），
+   `--campaign` 把它和迁移数印在一起：
+
+   ```
+   links             1 record(s) have a rewritten stream path: v020 moved 1 time(s) -- …
+   links             1 check(s) were taken after the repair: their verdict describes the repaired location, not the file the promise first named
+   ```
+
+实测（`var/demo95`，从第 93 轮迁移过的版本重建、只倒回部署那一半）：上面两段原样打出；`v020.json` 的
+`verification` 里 `stream_path_moves == 1`、`verdict == "failed"`；`--history` 的 `stream paths` 段与第 94 轮一致。
+
+**边界 206：** 在修过的位置上取的结论必须自己说出来。检查的结论是关于一个**位置**的；位置被人工换过而结论不自述，
+读者会把"在 X 上验过"读成"在承诺最初指的文件上验过"。第 94 轮让**记录**自述，这一轮让**关于记录的判断**自述。
+**边界 207：** 事实属于记录，不属于判决。即使这次检查跑不起来（定义缺失 → `unmeasurable`），`stream_path_moves`
+也要写下来；否则"这次检查站在哪"取决于它是否成功，而失败的那一次恰恰最容易被误读成"在原位验过"。
+**边界 208：** 计数要跟着被计数的东西走。`--campaign` 说"有 N 次检查是在修复之后取的"，而不是只把 N 条被修过的记录
+念一遍——修两次只验一次，和修一次验一次，证据的成色不同。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5491,6 +5534,15 @@ missing for the next level
     `--history` 输出 `stream paths` 段（`v020  <from> -> <to>  (N move(s), last <at>)`）并把结果放进
     `--json-out` 的 `stream_path_moves`；`--campaign` 输出 `links  N record(s) have a rewritten stream path …`。
 
+81. ✅ 让 `--verify` 在开跑前说清"这条记录的位置被人工改过"，把 `stream_path_moves` 记进 `verification`，并在版本表与
+    `--campaign` 上标出来（第 95 轮）。
+    实现为 `Promotion.stream_path_history`（第 93 轮的字段）+ `path_moves`/`path_origin`/`path_current`；
+    `--verify` 先打印 `path rewritten N time(s) by hand: <from> -> <to>`；`payload["stream_path_moves"]`
+    在三条写 `verification` 的路径上都写（含定义缺失的 unmeasurable）；`format_promotions` 标
+    `[measured on the repaired path]` 与 `(path rewritten N time(s) by hand)`；`repaired_paths` 增加
+    `checks_on_repair`，`--campaign` 打印 `links  N check(s) were taken after the repair …`。
 
-81. 让 `--verify` 在版本表里标出"这条记录的路径被人工改过"，并把重测时的 `stream_path_history` 长度记进
-    `verification`：在修过的路径上验出来的结论，和一开始就量在那里的结论不是同一句证据。
+
+82. 让"原件回来了"成为一个可行动的事实：`repaired_paths` 记录 `origin_exists`，当原始文件在当前检出里重新出现时，
+    `--campaign` 与 `--history` 明说"可以把记录改回原件并重验"，而不是让读者自己发现；同时让 `--verify` 在记录被
+    修过、而它是用原件跑的时候，把 verdict 标成"回到原始位置"。

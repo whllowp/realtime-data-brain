@@ -709,6 +709,25 @@ class Promotion:
     # Earlier checks, oldest first. A version whose claim was retracted and later re-established keeps
     # both records: the retraction is evidence about how the claim was tested, not a clerical error.
     checks: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 95: round 93's `--set-stream-path` can move the file a record was measured on, and a check taken
+    # after that move describes the location the repair picked, not the one the promise originally named. The
+    # chain is carried here so the version table and the verification can both say so (boundary 203).
+    stream_path_history: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def path_moves(self) -> int:
+        """How many times a hand repair moved the file this promise is measured on."""
+        return len(self.stream_path_history or [])
+
+    @property
+    def path_origin(self) -> str:
+        """The file the record originally named, before any repair moved it (empty when never moved)."""
+        return str((self.stream_path_history[0] or {}).get("from") or "") if self.stream_path_history else ""
+
+    @property
+    def path_current(self) -> str:
+        """The file the record names now (empty when never moved)."""
+        return str((self.stream_path_history[-1] or {}).get("to") or "") if self.stream_path_history else ""
 
     @property
     def pending(self) -> bool:
@@ -741,6 +760,7 @@ class Promotion:
             "verification": self.verification,
             "reverted_at": self.reverted_at,
             "checks": list(self.checks),
+            "stream_path_history": [dict(item) for item in self.stream_path_history],
         }
 
 
@@ -790,6 +810,8 @@ def load_promotions(root: Path) -> List[Promotion]:
             verification=payload.get("verification"),
             reverted_at=str(payload.get("reverted_at") or ""),
             checks=list(payload.get("checks") or []),
+            stream_path_history=[dict(item) for item in (payload.get("stream_path_history") or [])
+                                 if isinstance(item, Mapping)],
         ))
     promotions.sort(key=lambda item: item.version)
     return promotions
@@ -1418,8 +1440,15 @@ def format_promotions(promotions: List[Promotion], state: Optional[Mapping[str, 
         earlier = len(getattr(promotion, "checks", []) or [])
         if earlier:
             note = "%s  (%d earlier check%s)" % (note, earlier, "" if earlier == 1 else "s")
-        lines.append("%-8s %-26s %-12s %s%s" % ("v%03d" % promotion.version, promotion.change[:26],
-                                                promise, note, legacy_mark))
+        # Round 95: a verdict taken after a hand repair describes the repaired location, not the file the
+        # promise was born with. Said next to the verdict, because that is the claim the verdict is about.
+        if int((promotion.verification or {}).get("stream_path_moves") or 0):
+            note = "%s  [measured on the repaired path]" % note
+        moved_mark = ""
+        if promotion.path_moves:
+            moved_mark = "  (path rewritten %d time(s) by hand)" % promotion.path_moves
+        lines.append("%-8s %-26s %-12s %s%s%s" % ("v%03d" % promotion.version, promotion.change[:26],
+                                                  promise, note, legacy_mark, moved_mark))
         # A refusal that recorded the comparable shape keeps it here: the number is the point of the
         # refusal, so a table that hides it makes the refusal look like a dead end (round 28).
         shaped = shape_note(promotion.verification)
@@ -1583,10 +1612,16 @@ def repaired_paths(root: Path) -> List[Dict[str, Any]]:
         if not moves:
             continue
         version = int(match.group(1))
+        # Round 95: a verdict is about a location. Count the checks this record holds that were taken after a
+        # repair moved it, so the campaign can say how much of the evidence describes a moved target.
+        checks = [payload.get("verification")] + list(payload.get("checks") or [])
+        after = sum(1 for item in checks
+                    if isinstance(item, Mapping) and int(item.get("stream_path_moves") or 0) > 0)
         rows.append({"version": version,
                      "moves": moves,
                      "first_from": str(moves[0].get("from") or ""),
                      "to": str(payload.get("stream_path") or moves[-1].get("to") or ""),
                      "at": str(moves[-1].get("at") or ""),
+                     "checks_on_repair": after,
                      "in_force": version in deployed})
     return rows

@@ -2786,6 +2786,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # skipped (a contradicted record, an expired definition) measured nothing and clears nothing.
         measured_versions: List[Tuple[int, str, str, str]] = []
         for promotion in promotions:
+            # Round 95: round 94 put the repair on the version table; the check has to say it too, and say it
+            # before measuring, because the number it records (`stream_path_moves`) describes where it stood.
+            path_moves = promotion.path_moves
+            if path_moves:
+                _print("  v%03d  %s  path rewritten %d time(s) by hand: %s -> %s"
+                       % (promotion.version, promotion.change, path_moves,
+                          promotion.path_origin or "(unknown)", promotion.path_current or "(unknown)"))
+                _print("        this check measures the repaired location, not the file the promise first named "
+                       "(boundary 203)")
             block = provenance_block(root, promotion.version)
             if block is not None and block[0] == LINK_BROKEN:
                 blocked.append(block)
@@ -2818,6 +2827,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 write_verification(root, promotion, {
                     "checked_at": _stamp(), "stream": source, "verdict": UNMEASURABLE,
                     "reason": "the version file does not name the change, so it cannot be re-measured",
+                    # Even a check that could not run stands on a location: the repair is a fact about the
+                    # record, not about the verdict (boundary 205).
+                    "stream_path_moves": path_moves,
                 })
                 _print("  v%03d  %s  unmeasurable" % (promotion.version, promotion.change))
                 continue
@@ -2827,7 +2839,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                           recorded_stream=promotion.stream,
                                           checked_stream=checked_stream)
             payload = {"checked_at": _stamp(), "stream": source, "verdict": verdict,
-                       "reason": reason, "measurement": measurement.to_dict()}
+                       "reason": reason, "measurement": measurement.to_dict(),
+                       "stream_path_moves": path_moves}
             if copied:
                 payload["copied_end"] = {"kind": block[0], "detail": block[1]}
             if verdict == FAILED:

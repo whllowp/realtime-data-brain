@@ -919,6 +919,12 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         lines.append("links             %d record(s) have a rewritten stream path: %s -- the location is a repair,"
                      " not the original measurement, and `brian evolve --history` prints each move"
                      % (len(moves), named))
+        after = sum(int(item.get("checks_on_repair") or 0) for item in moves)
+        if after:
+            # Round 95: the verdicts taken after the move are the part of the evidence a reader would most
+            # easily mistake for an original measurement, so their count is printed with the moves.
+            lines.append("links             %d check(s) were taken after the repair: their verdict describes the "
+                         "repaired location, not the file the promise first named" % after)
     dead = (result.in_force_history or {}).get("dead_record_paths")
     if isinstance(dead, list) and dead:
         # Round 93: what the record itself claims to have been measured on, and this checkout cannot open. It is
