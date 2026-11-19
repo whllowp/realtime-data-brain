@@ -5109,6 +5109,47 @@ stream path     v020  data/smd/stream-real.json -> data/smd/stream-moved.json
 **边界 202：一个事实的守卫要挂在它自己的主语上。** 记录是否可达和有没有清过账无关，把它塞进 clearing 的 gate，
 就会在"全新检出、什么都没清过"时恰好沉默——这正是边界 184 说的那件事，这一轮又踩了一次。
 
+### 3.100 修过的位置不是原来的位置
+
+第 93 轮给了修记录的命令 `--set-stream-path`。它修好了一个洞（记录指着一份打不开的文件），同时悄悄地改了
+一件更要紧的事：**这份承诺现在说的是另一份文件**。而这一轮之前，没有任何页面印出这件事——`--history` 只列版本、
+清账和上限，`--campaign` 只数断链、补过的末端和打不开的路径。于是一条被人工搬过的记录，读起来和
+"一开始就量在这份文件上"的记录一模一样。这和第 83 轮"补过的末端"是同一类事实，只是换了个字段。
+
+做法和那一轮对齐：
+
+1. `promote.repaired_paths(root)` 扫版本文件，列出 `stream_path_history` 非空的版本，返回**整条链**
+   （`moves`）、`first_from`、`to`、`at` 与 `in_force`。返回整条链而不是一对值，是因为只有 `from`/`to` 时
+   "搬了一次到这里"和"搬了三次、最后到这里"读起来一样（边界 204）。
+2. `--history` 在清账链之前加一段：
+
+   ```
+   stream paths     1 record(s) have had their measured file rewritten by hand:
+     v020  data/smd/stream-real.json -> data/smd/stream-moved.json  (1 move(s), last 2026-11-19T21:08:34.846728+00:00)
+   ```
+
+   并在 `--json-out` 里给出 `stream_path_moves`，这样脚本不必解析页面。
+3. `--campaign` 数在 `dead_record_paths` 之前：
+
+   ```
+   links             1 record(s) have a rewritten stream path: v020 moved 1 time(s) -- the location is a repair,
+                     not the original measurement, and `brian evolve --history` prints each move
+   ```
+
+两个页面都不缓存这个事实，各自从版本文件算——所以第 93 轮那条 `--set-stream-path` 会在下一次出的每一页上出现，
+不需要任何人记得"把修过的事写下来"。
+
+实测（`var/demo90/answerable`，第 93 轮留下的那条迁移）：`--history` 打出上面那一段，`--campaign` 打出上面那一行；
+同时 `--campaign` 里已经没有"打不开的路径"那一行，因为迁移后的文件是存在的——两件事被清楚地分开，而不是互相
+掩盖。
+
+**边界 203：修过的位置不是原来的位置。** 一条被人工改过的记录必须自述被改过，否则它读起来和原始记录一样；
+这是第 83 轮"补过的末端"换了个字段，同一条规矩。
+**边界 204：一次修复要留整条链，而不是一对值。** 只有起止两点时，"搬了一次"和"搬了三次、最后到这里"读起来
+一样，而它们的可信程度不同。
+**边界 205：修记录不会让证据变新。** `--set-stream-path` 没有重测任何东西（命令自己就这么说），所以"路径被修过"
+不能被读成"承诺被重新验证过"——前者是位置，后者是结论，两件不同的事。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5445,6 +5486,11 @@ missing for the next level
     写 `stream_path` 并把旧值记进该版本的 `stream_path_history`）。按替换次数判"记录过期"是错的对象：
     替换修的是这一次检查，不修记录，所以只作为事实统计。
 
+80. ✅ 把 `stream_path_history` 印到 `--history`，并让 `--campaign` 统计"路径被人工修过的记录"数（第 94 轮）。
+    实现为 `promote.repaired_paths(root)`：列出 `stream_path_history` 非空的版本，带整条 `moves` 链与 `in_force`；
+    `--history` 输出 `stream paths` 段（`v020  <from> -> <to>  (N move(s), last <at>)`）并把结果放进
+    `--json-out` 的 `stream_path_moves`；`--campaign` 输出 `links  N record(s) have a rewritten stream path …`。
 
-80. 把 `stream_path_history` 印到 `--history`（现在只在版本文件里），并让 `--campaign` 统计"路径被人工修过的记录"数：
-    修过的记录不能当作原始记录的证据，和 `backfilled` 末端是同一类事实。
+
+81. 让 `--verify` 在版本表里标出"这条记录的路径被人工改过"，并把重测时的 `stream_path_history` 长度记进
+    `verification`：在修过的路径上验出来的结论，和一开始就量在那里的结论不是同一句证据。

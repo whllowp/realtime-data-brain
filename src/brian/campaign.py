@@ -909,6 +909,16 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # from the measured count so a failed comparison can never look like a paid debt.
         lines.append("links             %d of those clearings rested on a check that could not test the "
                      "claim: recorded, and they answer nothing" % result.in_force_untested)
+    moves = (result.in_force_history or {}).get("repaired_paths")
+    if isinstance(moves, list) and moves:
+        # Round 94: a repaired location is not an original one. Counted apart and named, because a reader who
+        # cannot see that the path was rewritten will read the promise as having been made on the file it now
+        # names (boundary 203).
+        named = ", ".join("v%03d moved %d time(s)" % (int(item.get("version") or 0), len(item.get("moves") or []))
+                          for item in moves)
+        lines.append("links             %d record(s) have a rewritten stream path: %s -- the location is a repair,"
+                     " not the original measurement, and `brian evolve --history` prints each move"
+                     % (len(moves), named))
     dead = (result.in_force_history or {}).get("dead_record_paths")
     if isinstance(dead, list) and dead:
         # Round 93: what the record itself claims to have been measured on, and this checkout cannot open. It is

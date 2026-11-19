@@ -1551,3 +1551,42 @@ def dead_record_paths(root: Path) -> List[Dict[str, Any]]:
         rows.append({"version": int(match.group(1)), "stream_path": recorded,
                      "in_force": int(match.group(1)) in deployed})
     return rows
+
+
+def repaired_paths(root: Path) -> List[Dict[str, Any]]:
+    """Versions whose measured file has been rewritten by hand, with every move (round 94).
+
+    Round 93's `--set-stream-path` repairs a record whose file is gone. The repair leaves the promise pointing at a
+    file it was not born with, and that is a fact a reader has to see: a record that says "measured on X" after a
+    hand edit means "measured on something, then told to say X". The same reasoning as round 83's `backfilled` end
+    -- an edited record must name itself as edited, or a repair reads as original evidence (boundary 174, applied to
+    a field). Every move is returned rather than the first and last, because "moved once" and "moved three times,
+    ending here" read the same from a single pair (boundary 204).
+    """
+    rows: List[Dict[str, Any]] = []
+    deployed = {int(version) for _slug, version in in_force_promotions(root)}
+    directory = _evolve_dir(root) / VERSIONS
+    if not directory.is_dir():
+        return rows
+    for path in sorted(directory.glob("v*.json")):
+        match = re.fullmatch(r"v(\d+)\.json", path.name)
+        if not match:
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        history = payload.get("stream_path_history")
+        if not isinstance(history, list) or not history:
+            continue
+        moves = [dict(item) for item in history if isinstance(item, Mapping)]
+        if not moves:
+            continue
+        version = int(match.group(1))
+        rows.append({"version": version,
+                     "moves": moves,
+                     "first_from": str(moves[0].get("from") or ""),
+                     "to": str(payload.get("stream_path") or moves[-1].get("to") or ""),
+                     "at": str(moves[-1].get("at") or ""),
+                     "in_force": version in deployed})
+    return rows

@@ -109,6 +109,7 @@ from .promote import (
     record_clearing,
     revert_promotion,
     set_state_budget,
+    repaired_paths,
     set_stream_path,
     dead_record_paths,
     state_budgets,
@@ -1528,6 +1529,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # Round 93: which promises name a stream file this checkout cannot open. Computed here from the checkout,
     # never stored: the answer changes when a file is moved, not when a clearing is written.
     in_force_record = dict(in_force_record, dead_record_paths=dead_record_paths(root))
+    # Round 94: the promises whose measured file was rewritten by hand. Computed from the version records, so a
+    # `--set-stream-path` shows up on the next page without anyone having to remember to write it down.
+    in_force_record = dict(in_force_record, repaired_paths=repaired_paths(root))
 
     if getattr(args, "max_limit_drift", None) is not None and not (args.audit or args.campaign):
         # Round 68: a flag that only one mode reads must say so, otherwise it is inert in every other mode and
@@ -1720,6 +1724,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                            % (version, int(entry.get("attempt") or 0),
                               str(entry.get("checked_at") or ""), str(entry.get("verdict") or ""),
                               path or "(unnamed stream)", mark))
+        # Round 94: a version file can have its measured file rewritten by hand (`--set-stream-path`). The chain
+        # belongs on this page: it changes what every later verdict is about, and a reader who cannot see the move
+        # will read the promise as having been made on the file it now names (boundary 203).
+        path_moves = repaired_paths(root)
+        if path_moves:
+            _print("stream paths     %d record(s) have had their measured file rewritten by hand:"
+                   % len(path_moves))
+            for item in path_moves:
+                _print("  v%03d  %s -> %s  (%d move(s), last %s)%s"
+                       % (int(item.get("version") or 0), str(item.get("first_from") or "(unrecorded)"),
+                          str(item.get("to") or "(unrecorded)"), len(item.get("moves") or []),
+                          str(item.get("at") or "unknown"),
+                          "  [in force]" if item.get("in_force") else ""))
         for index, record in enumerate(rounds, start=1):
             baseline_row = record.get("baseline") or {}
             measured = baseline_row.get("tokens_per_report")
@@ -1814,6 +1831,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 "rounds": history_rows,
                 "links": link_rows,
                 "in_force_clearings": clearing_rows,
+            "stream_path_moves": path_moves,
                 "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
                              "payable": ceiling_payable, "by_domain": ceiling_rows},
             }), encoding="utf-8")
