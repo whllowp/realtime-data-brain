@@ -115,6 +115,8 @@ from .promote import (
     same_stream_path,
     set_stream_path,
     dead_record_paths,
+    never_tested_at_origin,
+    origin_queue,
     state_budgets,
     state_drains,
     version_label,
@@ -1562,6 +1564,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # Round 93: which promises name a stream file this checkout cannot open. Computed here from the checkout,
     # never stored: the answer changes when a file is moved, not when a clearing is written.
     in_force_record = dict(in_force_record, dead_record_paths=dead_record_paths(root))
+    # Round 101: the origin queue travels with the page and the JSON payload, so a script that wants to run it
+    # reads the same list `--from-queue` walks instead of parsing the sentence above.
+    try:
+        origin_queue_state = never_tested_at_origin(repaired_paths(root))
+    except OSError:
+        origin_queue_state = {"records": 0, "by_file": {}, "versions": []}
     # Round 94: the promises whose measured file was rewritten by hand. Computed from the version records, so a
     # `--set-stream-path` shows up on the next page without anyone having to remember to write it down.
     in_force_record = dict(in_force_record, repaired_paths=repaired_paths(root))
@@ -2282,6 +2290,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload["limits"] = limits_view
             # Round 69: the drift the gate charged is a derived fact, so it travels with the page.
             payload["ceiling_drift"] = drift
+            # Round 101: the queue the page counts, in the form a script can execute.
+            payload["origin_queue"] = origin_queue_state
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
@@ -2662,6 +2672,55 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 3
 
     if args.verify:
+        # Round 101: the queue as an action. `--from-queue N` measures the first N promises that hold no verdict
+        # on the file they were born with, each on that file, in the queue's order. Every one of them is a check
+        # the page already named -- the point is that nobody has to retype a version label or a path, because a
+        # retyped path is how a check lands on the substitute (round 99, boundary 218).
+        from_queue = int(getattr(args, "from_queue", 0) or 0)
+        if from_queue and (args.verify_withheld or getattr(args, "withheld_stream", None)):
+            _print("--from-queue runs the origin queue; --verify-withheld re-measures refusals. "
+                   "Pass one, not both: they answer different questions about different records.")
+            return 2
+        if from_queue:
+            if int(getattr(args, "verify_version", 0) or 0):
+                _print("--from-queue already names the versions to check; drop --verify-version so the queue "
+                       "decides which promises are measured.")
+                return 2
+            try:
+                queued = origin_queue(root)
+            except OSError as error:
+                _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
+                return 2
+            runnable = [row for row in queued if row.get("origin_exists")]
+            skipped = len(queued) - len(runnable)
+            if not runnable:
+                _print("no promise in the queue can be measured here: %d record(s) hold no verdict on the file "
+                       "they were born with, and none of those files is in this checkout." % len(queued))
+                return 0
+            chosen = runnable[:max(1, from_queue)]
+            _print("from queue       %d of %d runnable promise(s) hold no verdict on the file they were born "
+                   "with; measuring each on its own origin" % (len(chosen), len(runnable)))
+            if skipped:
+                _print("                 %d left out: the file they were born with is not in this checkout"
+                       % skipped)
+            worst = 0
+            for row in chosen:
+                version = int(row.get("version") or 0)
+                origin = str(row.get("origin") or "")
+                _print("")
+                _print("---- v%03d  <-  %s  (never measured where this promise was made)" % (version, origin))
+                inner = argparse.Namespace(**vars(args))
+                inner.from_queue = 0
+                inner.verify_version = version
+                # The file is the point: it is the record's own origin, not the record's current path and not
+                # whatever `--stream-file` happened to say.
+                inner.stream_file = origin
+                inner.json_out = None
+                worst = max(worst, cmd_evolve(inner, settings))
+            _print("")
+            _print("%d promise(s) measured on the file they were born with. A copied end is measured, never "
+                   "applied; a contradiction is still refused." % len(chosen))
+            return worst
         wanted = int(getattr(args, "verify_version", 0) or 0)
         horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
         # Round 45: several domains in one command. `--withheld-stream domain=stream.json` names the stream
@@ -4331,6 +4390,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--verify", action="store_true",
                         help="re-measure every unverified promotion and revert the ones whose claim "
                              "no longer holds, then exit")
+    evolve.add_argument("--from-queue", type=int, default=0, metavar="N",
+                        help="with --verify: measure the first N promises that hold no verdict on the file "
+                             "they were born with, each on that file, in the queue's order")
     evolve.add_argument("--verify-version", type=int, default=0,
                         help="with --verify: only that version number (default: everything unverified)")
     evolve.add_argument("--accept-copied", action="store_true",

@@ -1710,6 +1710,20 @@ def never_tested_at_origin(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     return {"records": len(versions), "by_file": by_file, "versions": versions}
 
 
+def origin_queue(root: Path) -> List[Dict[str, Any]]:
+    """The promises never measured where they were made, in the order a reader should act on them (round 101).
+
+    Round 100 could count this queue and name the first command; the run itself was still a copy-and-paste of a
+    version label and a file path, and a hand-copied path is how a check ends up measuring somewhere the promise
+    was never made. One function stands behind the page, the JSON payload and `--verify --from-queue`, so the
+    command a reader is given and the command a script runs are the same list.
+
+    Order is by version, which is the order the records were written: an older promise has stood longer with its
+    evidence somewhere else, and the queue is a backlog, not a ranking.
+    """
+    return list(never_tested_at_origin(repaired_paths(root))["versions"])
+
+
 def repaired_paths(root: Path) -> List[Dict[str, Any]]:
     """Versions whose measured file has been rewritten by hand, with every move (round 94).
 

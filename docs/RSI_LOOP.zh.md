@@ -5461,6 +5461,62 @@ clearings        1 recorded clearing(s); each names the measurement that earned 
 恰恰是最弱的那几条（一条判断都没有的记录）；统计一个"从未做过的事"，要把"什么都没做"算进去。
 
 
+### 3.107 把队列从一句话变成一个命令：`--from-queue` 与抄错的路径
+
+第 100 轮让 `--campaign` 数出了"有多少条承诺从未在它出生的文件上被量过"，并且指名了第一条该跑的命令。可是跑那
+条命令的方式，仍然是把版本号和路径从页面上抄下来——而"抄下来的路径"正是第 99 轮出问题的地方：`--verify` 会照
+着调用者给的文件去量，抄错一个字符，这一量就落在了替换件上，页面于是把"在别处又查了一次"写成"在原件上查了新
+的一次"。
+
+所以这一轮把队列本身变成入口。`promote.origin_queue(root)` 是唯一的一份队列（`never_tested_at_origin` 套在
+`repaired_paths` 上，按版本号排序），它同时供给三处：campaign 页面上的那句话、`--campaign --json-out` 的
+`origin_queue`、以及 `--verify --from-queue N`。页面印的列表和命令跑的列表必须是同一份，否则"照着上面做"这句
+话就又变成了手工活。
+
+`--from-queue N` 的几条规矩，都是为了它不能悄悄改变问题：
+
+- 它和 `--verify-withheld` 互斥（一个量的是"从未在原件上量过的承诺"，一个重测的是被驳回的候选），和
+  `--verify-version` 也互斥（队列自己决定量哪几条）。两处都直接退出 2 并说明理由，而不是猜一个。
+- 原件不在这个 checkout 里的记录只能计数，不能丢弃：页头写 `1 left out`，不然一次执行看起来比它实际做的更完整。
+- 限制写成 `N of M runnable`，因为"我跑了 1 条"和"队列里有 3 条"是两件事。
+- 每一条内部都用**记录自己的**原件路径，不用当前的 `stream_path`，也不用调用者给 `--stream-file`：这正是
+  `--from-queue` 存在的理由。
+- 多条检查只回一个退出码时取最坏的那个（2 比 1 比 0），否则调用者读到的"通过"会盖住后面的构建缺陷。
+
+实跑（`var/demo100`，v020 的文件被手工改到 `data/smd/stream-moved.json`，只有一条取在替换件上的结论）：
+
+```
+from queue       1 of 1 runnable promise(s) hold no verdict on the file they were born with; measuring each on its own origin
+
+---- v020  <-  data/smd/stream-real.json  (never measured where this promise was made)
+verifying 1 promotion(s) from smd on SMD
+  v020  digest.rolling_window = 200  path rewritten 1 time(s) by hand: data/smd/stream-real.json -> data/smd/stream-moved.json
+        this check measures the original file the promise first named, while the record still points at the repair (boundary 209)
+        this is the first verdict taken on the file the promise was born with: all 1 it holds were measured elsewhere (boundary 213)
+  v020  digest.rolling_window = 200  backfilled end: round-new.json has no successor-side record of its own: the end was copied from the retirement, not written by the queue
+        measured, not applied: the record's end was copied, so the deployment is left alone
+  v020  digest.rolling_window = 200  FAILED and reverted: promised recall 0.507 at the 10% budget, re-measured 0.060 (below 0.456)
+
+cleared         1 in-force observation(s) were answered by this check:
+  smd              v020  backfilled end stood 20.0 day(s), answered on data/smd/stream-real.json
+```
+
+同一份队列也在 JSON 里（`--campaign --json-out queue.json`）：
+
+```
+origin_queue: {"records": 1, "by_file": {"data/smd/stream-real.json": 1},
+               "versions": [{"version": 20, "origin": "data/smd/stream-real.json", "verdicts": 1, "origin_exists": true}]}
+```
+
+跑完之后同一个 `--campaign` 的 `origin_queue` 变成 `{"records": 0, ...}`——这是对的：这条承诺现在**在**原件上有
+结论了，队列里不该还留着它。
+
+**边界 221：一个指名了命令的队列，仍然要调用者重抄一个标识符，而抄下来的标识符就是替换件溜回来的地方——页面
+印出的列表必须就是命令执行的列表。**
+**边界 222：执行队列不能悄悄把它变宽或变窄：够不着的条目要计数而不是丢掉，上限要写成 `N of M`。**
+**边界 223：多条检查只报一个退出码时，必须取最坏的那个，否则调用者读到的汇总会盖住构建缺陷。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5842,6 +5898,11 @@ missing for the next level
     `record_clearing(..., first_original=)` 与 `--history` 的 `[first verdict at the origin]` 让"第一次在
     原件上量"在历史里也是一行。数字上：1492 → 1506 个测试（`tests/test_origin_queue.py` 12 条），`pyflakes` 0。
 
-87. 让队列成为可执行动作：`--verify` 接受 `--from-queue N`（按 campaign 队列的顺序取前 N 条、各自用它出生的文件
-    去测），并把队列写进 `--campaign --json-out`，让"先查哪一个"从一句话变成一个命令；现在页面能排出顺序，但
-    执行这一步还要人抄一次版本号和文件名，而抄错一次就是又一次"量在别处"。
+87. 完成：把队列变成可执行的入口（`--verify --from-queue N`），并把队列写进 `--campaign --json-out`。`promote.origin_queue`
+    是唯一一份队列（`never_tested_at_origin(repaired_paths(root))["versions"]`，按版本号排序），页面、JSON 和命令都从它取；
+    互斥组合（与 `--verify-withheld`、与 `--verify-version`）直接退出 2 并说明；原件不在 checkout 里的条目计数为
+    `left out` 而不是丢弃；上限写成 `N of M runnable`；每条内部用**记录自己的**原件路径，而不是当前的 `stream_path`
+    也不是调用者的 `--stream-file`；多条检查取最坏退出码（2 比 1 比 0）。实跑见 §3.107，`tests/test_from_queue.py` 11 条。
+
+88. 让"跑过队列"留下痕迹：`--from-queue` 跑完要在 `--history` 的 clearing 行上标出"这条结论来自队列"（`queued: true`），
+    并让 `--campaign` 分列"队列跑出来的结论"和"手工抄路径跑出来的结论"；再让 `--from-queue 0` 只打印会跑哪些、不真的去量。
