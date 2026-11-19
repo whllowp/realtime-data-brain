@@ -105,6 +105,7 @@ from .promote import (
     stale_in_force_disputes,
     promotions_for_domain,
     provenance_block,
+    record_clearing,
     revert_promotion,
     set_state_budget,
     state_budgets,
@@ -346,7 +347,7 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("%d version(s) in force have sat on a copied record for longer than the %.0f-day grace period"
                % (in_force_stale, IN_FORCE_GRACE_DAYS))
         _print("with no re-measurement newer than the objection, so --strict exits 1:")
-        _print("`brian evolve --verify --verify-version <n> --stream-file <the file that version measured>`")
+        _print("`brian evolve --verify --verify-version <n> --stream-file <the file that version measured> --accept-copied`")
         _print("clears it, because the copy is about the record, not about the number.")
     if broken_links:
         return 2
@@ -2636,20 +2637,41 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (len(promotions), domain_slug(domain), source))
         # Round 84: a version is only as trustworthy as the round that produced it. That round's record
         # names the version in `applied`, and rounds 81-83 made it possible to say whether the record's
-        # replacement link is contradicted or was copied. A promise stacked there would entrench numbers the
-        # ledger itself disputes -- and the check is skipped *without* writing a verdict, because an
-        # `unmeasurable` record would suppress re-checking until the claim expires, while this has to nag
-        # until the books agree.
+        # replacement link is contradicted or was copied.
+        # Round 88: the two kinds are not the same refusal. A contradiction cannot be settled by measuring --
+        # both books still disagree about which end is the evidence -- so it stays unchecked. A copied end is an
+        # absence of provenance, and re-measuring the deployed version is exactly what round 86's stale charge
+        # asks for: refusing it left that charge unclearable by the command that named it. So the copy can be
+        # measured with `--accept-copied`, recorded, and never applied.
         blocked: List[Tuple[str, str]] = []
+        copied_ends: List[Tuple[str, str]] = []
+        copied_measured: List[Tuple[str, str]] = []
+        # Round 88: the versions this run actually measures, with the moment of the check. A version that was
+        # skipped (a contradicted record, an expired definition) measured nothing and clears nothing.
+        measured_versions: List[Tuple[int, str, str]] = []
         for promotion in promotions:
             block = provenance_block(root, promotion.version)
-            if block is not None:
+            if block is not None and block[0] == LINK_BROKEN:
                 blocked.append(block)
                 _print("  v%03d  %s  %s: %s"
                        % (promotion.version, promotion.change, block[0], block[1]))
                 _print("        not checked: a promise stacked on this record would entrench numbers the "
                        "ledger itself disputes")
                 continue
+            copied = block is not None
+            if copied:
+                copied_ends.append(block)
+                if not args.accept_copied:
+                    _print("  v%03d  %s  %s: %s"
+                           % (promotion.version, promotion.change, block[0], block[1]))
+                    _print("        not checked: a promise stacked here would inherit an end a repair copied; "
+                           "--accept-copied measures it without applying")
+                    continue
+                copied_measured.append(block)
+                _print("  v%03d  %s  %s: %s"
+                       % (promotion.version, promotion.change, block[0], block[1]))
+                _print("        measured, not applied: the record's end was copied, so the deployment is left "
+                       "alone")
             if not promotion.pending:
                 age = verification_age_days(promotion.verification)
                 _print("  v%03d  re-checking: its last check is %s old (expiry %.0f day(s))"
@@ -2670,15 +2692,25 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                           checked_stream=checked_stream)
             payload = {"checked_at": _stamp(), "stream": source, "verdict": verdict,
                        "reason": reason, "measurement": measurement.to_dict()}
+            if copied:
+                payload["copied_end"] = {"kind": block[0], "detail": block[1]}
             if verdict == FAILED:
                 # The promise stopped paying out, so the configuration stops being the deployed one.
                 # The file is kept, because a retracted claim is part of the record, not a hole in it.
+                # Retracting is not stacking, so a copied end does not block it.
                 revert_promotion(root, promotion, domain=domain)
                 write_verification(root, promotion, payload, reverted_at=_stamp())
+                measured_versions.append((promotion.version, payload["checked_at"], verdict))
                 _print("  v%03d  %s  FAILED and reverted: %s" % (promotion.version,
                                                                  promotion.change, reason))
             elif verdict == VERIFIED:
                 write_verification(root, promotion, payload)
+                measured_versions.append((promotion.version, payload["checked_at"], verdict))
+                if copied:
+                    _print("  v%03d  %s  %s (not applied: the record's link was repaired from one end, and a "
+                           "promise stacked on it would inherit that copy)"
+                           % (promotion.version, promotion.change, verdict))
+                    continue
                 # Round 44: applying every version a check verifies stacked them. The check is recorded
                 # either way; only a domain with no other version in force takes the change.
                 stacked = stacking_note(root, promotion, domain)
@@ -2708,6 +2740,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                         "candidate": shape.describe(),
                     }
                 write_verification(root, promotion, payload)
+                measured_versions.append((promotion.version, payload["checked_at"], verdict))
                 _print("  v%03d  %s  unmeasurable: %s" % (promotion.version, promotion.change, reason))
                 hint = rescale_hint(promotion, promotion.stream, checked_stream)
                 if hint:
@@ -2715,25 +2748,45 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 note = shape_note(payload)
                 if note:
                     _print(note)
+        cleared_now: List[Dict[str, Any]] = []
+        for version, checked_at, verdict in measured_versions:
+            cleared_now.extend(record_clearing(root, version, now=checked_at, verdict=verdict,
+                                               reason="measured again by --verify"))
+        if cleared_now:
+            _print("")
+            _print("cleared         %d in-force observation(s) were answered by this check:" % len(cleared_now))
+            for entry in cleared_now:
+                age = entry.get("age_days")
+                _print("  %-16s v%03d  %-13s stood %s"
+                       % (entry["domain"], int(entry["version"]), entry["kind"],
+                          "an unknown time" if age is None else "%.1f day(s)" % float(age)))
+            _print("A measurement answers the objection, not the copy: the record is unchanged, so the next")
+            _print("audit observes it again with today's date, and this verdict is what keeps it out of the")
+            _print("stale charge (boundary 185).")
         _print("")
         _print(format_promotions(load_promotions(root), current_state(root, domain), domain=domain,
                                  expiry_days=args.expiry_days))
         broken = sum(1 for kind, _detail in blocked if kind == LINK_BROKEN)
-        copied = sum(1 for kind, _detail in blocked if kind != LINK_BROKEN)
-        if blocked:
+        if blocked or copied_ends:
             _print("")
-            _print("%d version(s) were left unchecked: %d carry a replacement link the ledger contradicts, "
-                   "%d were recorded on an end a repair copied." % (len(blocked), broken, copied))
-            if broken:
+            if blocked:
+                _print("%d version(s) were left unchecked: their producing record carries a replacement link "
+                       "the ledger contradicts." % len(blocked))
                 _print("A contradiction is a build defect: no re-measurement settles which of the two books "
                        "is right, so `--verify` exits 2. `--audit` names the link.")
-            if copied:
+                _print("No verification file was written for these versions, so they stay due on every run.")
+            if copied_ends:
+                _print("%d version(s) sit on an end a repair copied, and `--verify` exits 1 while one is in "
+                       "force." % len(copied_ends))
                 _print("A copied end is a debt, not a defect: re-running the round writes a successor that "
-                       "names its predecessor itself, and `--verify` exits 1 meanwhile.")
-            _print("No verification file was written for these versions, so they stay due on every run.")
+                       "names its predecessor itself.")
+                withheld = len(copied_ends) - len(copied_measured)
+                if withheld:
+                    _print("%d of them were not checked; `--accept-copied` measures them without applying, "
+                           "which is what the stale charge asks for." % withheld)
         if broken:
             return 2
-        if copied:
+        if copied_ends:
             return 1
         return 0
 
@@ -4009,6 +4062,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "no longer holds, then exit")
     evolve.add_argument("--verify-version", type=int, default=0,
                         help="with --verify: only that version number (default: everything unverified)")
+    evolve.add_argument("--accept-copied", action="store_true",
+                        help="with --verify: measure a version whose producing record's link was repaired from "
+                             "one end; the verdict is recorded and the deployment is left alone")
     evolve.add_argument("--verify-withheld", action="store_true",
                         help="with --verify: also re-measure this stream's refusals whose evidence is older "
                              "than the refusal horizon, and write the result into their record")

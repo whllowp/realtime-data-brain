@@ -4728,6 +4728,54 @@ links             1 dispute(s) left the in-force list: 1 cleared by a re-measure
 **边界 184：一个打印机的闸门，必须点名它全部的主题。** 只列了其中一种事实的条件，会在其余事实单独出现时让页面沉默——而沉默读起来像"没有问题"。
 
 
+### 3.94 诊断指名的命令必须真的能跑
+
+第 86 轮把"躺了太久的抄写端"升级成一条收费：`--strict` 退出 1，并且打印出点名的那条命令——`brian evolve --verify --verify-version 20 --stream-file …`，意思很明确："去把这个版本重新量一次。"第 84 轮给 `--verify` 加的护栏恰好拒绝的就是这种记录：`backfilled end` 上的承诺不许再叠。两轮各自都对，合起来就成了一句不可能执行的话：**红灯亮着，而它指的那只开关是被自己焊死的。**
+
+这一轮本来只做 §6 第 74 项（让 `--verify` 把清账自己写进存储，省掉事后从时间戳反推），一接就撞上这件事。修法不是撤掉第 84 轮的拒绝，而是把两件事分开：
+
+- **拒绝叠承诺**（默认，仍然退出 1）：`not checked: a promise stacked here would inherit an end a repair copied; --accept-copied measures it without applying`
+- **愿意测量但不落承诺**（`--accept-copied`）：`measured, not applied: the record's end was copied, so the deployment is left alone`
+
+测量和落承诺是两件不同的事。拒绝后者的理由——"这份记录自己都证不明自己的来源"——不构成拒绝前者的理由：看清楚它现在跑到什么程度，恰恰是唯一能让这笔债有下文的事。量完以后 `payload["verification"]` 照常写、`record_clearing` 把这次观察答掉，但 `apply_promotion` 一步都不走。
+
+```
+smd              v020  backfilled end round-new.json has no successor-side record of its own: the end
+                       was copied from the retirement, not written by the queue
+                       [first seen 20.0 day(s) ago, seen 4 time(s)]  [stale: no verdict newer than the objection]
+… --verify --verify-version 20 --stream-file data/smd/stream-one.json --accept-copied
+measured, not applied: the record's end was copied, so the deployment is left alone
+v020  unmeasurable  the claim or the re-measurement has no recall at the budget
+cleared         1 in-force observation(s) were answered by this check:
+smd              v020  backfilled end stood 20.0 day(s)
+A measurement answers the objection, not the copy: the deployment state is left alone …
+```
+
+答掉之后再跑 `--audit --strict`，退出码是 **0**——不是因为这个版本通过了检查（它这次是 `unmeasurable`），而是因为"有没有人量过"这个问题有了答案。闸门收的是"没人回答"，不是"答案不好看"，这是边界 177 那条"拒绝必须是能被一次重测清掉的"的同一句话。
+
+第二半是**谁写的这条引用**。第 87 轮的清账是事后从 `first_seen` 和 `verification.checked_at` 比出来的，于是同一个事实是否可见，取决于账簿还留不留着两端：改一下记录、把轮退役、或者在没看见那次异议的检出里跑审计，引用就消失了。`--verify` 在知道的这一刻就能写下来，所以 `record_clearing` 写 `cited_by: measurement`，事后反推的写 `cited_by: audit`，页面把两者念出来：
+
+```
+Cleared
+1 version(s) in force are no longer disputed, and the ledger forgets them now:
+  smd  v020  backfilled end (first seen …, stood 20.0 day(s), cleared by a re-measurement on … (written by that measurement))
+links             1 of those clearings were written by the measurement itself; the rest were deduced later from the ledger
+links             clearings by domain: rcaeval-re1-ob 0 by measurement, 1 without; smd 1 by measurement, 0 without
+```
+
+三件实现在写的时候才暴露的事：
+
+1. `record_clearing` 必须**留下 `broken` 行**。测量能回答"这份记录现在跑到什么程度"，回答不了"两份记录谁对"，所以一张矛盾行不会因为量了一次就消失。
+2. 分域那一行只在真的有第二个域时印。一个域的账本该说"全部在这一条流上"，而不是打一行只含一个域的"按流拆分"。
+3. 两个测试缺陷是同一类：一处把 `audit()` 当成会读存储的函数（它只渲染传进去的 `in_force_cleared`，读存储的是 `cli`），一处用了 `legacy` 的夹具去断言 `broken`——夹具不产出它名字所说的那种缺陷，断言落在空列表上。
+
+**边界 185：诊断指名的补救，必须是那条命令真能做到的事。** 一条收费若点名 `--verify`，而 `--verify` 对这类记录只会拒绝，那么这条费用永远付不掉，闸门就变成一盏常亮的红灯。
+
+**边界 186：测量和落承诺是两件事，拒绝后者不能顺带拒绝前者。** 抄写端上不许叠承诺，是对的；但它恰恰是唯一需要被量一次的记录——不量，这笔债连"有人回答过"都没有。
+
+**边界 187：当场就能写下的事实要当场写，并标明是自己写的。** 事后从时间戳反推的引用依赖账簿两端都还在；写下 `cited_by` 之后，读的人能分清"量出来的"和"推出来的"。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5034,4 +5082,4 @@ missing for the next level
 71. **（第 3.91 轮完成，2026-11-20）** 这一项的前提不成立：`brian evolve` 没有 `--promote` 入口。真正漏掉的是"没人对已经在生效的版本发问"。已经做出：`promote.in_force_promotions` 从每个部署状态的 `sources` 读出在跑哪些版本（迁移前的全局 `current.json` 记作默认域，两个变量属于同一版本只算一个），`promote.in_force_disputes` 对每个在生效版本调第 84 轮的 `provenance_block`，行里带 `domain`/`version`/`broken`/`kind`/`detail`；`Audit.in_force`、`in_force_broken`、`in_force_copied` 把它带进 `--audit` 的 `links` 段（逐行打印域名、版本、种类和细节），`--campaign` 的 `links` 段多一行 `N version(s) in force sit on a record the books dispute: v020`，`--json-out` 里是 `in_force_disputed`；`--strict` 对"在跑踩在断链上的版本"exit 2，对补写端只报告（exit 0）。真实账簿：三个在生效版本，零争议。
 72. **（第 3.92 轮完成，2026-11-20）** `in_force_disputes` 每次运行都从账本重算，能说"这个在跑的版本踩在补写端上"，说不出"已经多久"。账本也给不出年龄：它记的是变了什么，不是循环什么时候第一次看见。已经做出：`promote.observe_in_force_disputes` 把每个 `(domain, version, kind)` 的 `first_seen` 写进 `var/evolve/in_force.json`（格式 `brian.inforce/1`，保留首次时间、递增 `observations`、重算 `age_days`，本轮已消失的行回传一次 `cleared` 然后忘掉；干净部署不写文件，免得长出一个暗示"曾经有过争议"的存储）；`promote.stale_in_force_disputes` 只挑**补写端**里超过 `IN_FORCE_GRACE_DAYS = 14` 天、且没有比首次看见更新的 `verification.checked_at` 的行；`Audit.in_force_stale`、`Campaign.in_force_stale` 把它带进 `--audit`（行尾 `[stale: no verdict newer than the objection]` 和一段说明，`--campaign` 印 `v020 (20.0 day(s))` 与一行"站在宽限期之外"）与 `--json-out`（`in_force_stale` / `in_force_cleared`）；`--strict` 对过期的补写端 exit 1，并点名唯一的清账命令 `brian evolve --verify --verify-version <n> --stream-file <该版本量过的文件>`。
 73. **（第 3.93 轮完成，2026-11-20）** 第 86 轮记下了"第一次看见"，一行消失时回传一次 `cleared` 然后忘掉，于是页面能说"这个版本不再有争议"，说不出"**是谁清的**"。两种完全不同的事件在这里长得一样：把在跑的版本重测一次（唯一能回答补写端的动作），以及账本不再复现这条异议（观察的缺失，不是裁决）。把两者折叠，就等于让一笔债务消失并被记成已付。已经做出：存储升到 `brian.inforce/2`，多一份 `cleared` 历史，每行带 `cleared_at`、`age_days`、`observations` 和引用 `by`（`verification` 表示有一份比首次看见更新的测量；`unexplained` 表示没有），上限 `IN_FORCE_HISTORY_LIMIT = 200` 并把被裁掉的条数记进 `trimmed`；`promote.in_force_history` / `cleared_summary` 把两种清掉分开计数并给出中位年龄；`Audit.link_content` 统一了"这一页有没有链接段要说"的判断（见 §3.93 的缺陷）；`--audit` 逐行印 `cleared by …`，并单独声明"没有测量的清除不是解决，是没看见"；`--campaign` 印 `N dispute(s) left the in-force list: K cleared by a re-measurement (median … day(s)), M with no measurement on file`，`--json-out` 里是 `in_force_cleared_history`。真实账簿：零清除（没有在生效版本踩过争议），所以这一段只有在 demo 里才有内容可读。
-74. 让 `--verify` 在测量成功的那一刻直接写那条清除记录（带 `checked_at` 与 `verdict`），而不是等下一次 `--audit` 重算才发现"这一行不见了"：如果那一行在此之前被删掉、或账簿被回滚，清除就没有人记；顺带让 `--campaign` 按域名拆开清除历史（现在只报总数与中位年龄）。
+74. ✅ 让 `--verify` 在补测成功时把"清账"直接写进存储（带 `checked_at` 与 `verdict`），而不是等下一次 `--audit` 再反推"这一行不在了"；顺带让 `--campaign` 报清账的历史（按域、只算有出处的两位小数）。**已做，但按原样做不通**：原来的措辞默认 `--verify` 能跑这些版本，而第 84 轮的护栏正是拒绝它们。落地时拆成两半——默认仍拒绝叠承诺（退出 1，点名 `--accept-copied`），加了这个开关则"测量但不落承诺"：写 verdict、写 `record_clearing`（`cited_by: measurement`）、不碰部署状态。另外加了按域拆分，以及区分"这条引用是当场写的还是事后推的"。75. 让 `--verify` 的结论能分出"答不了"和"答了"：现在 `unmeasurable`（比如这次的两端都没有 at-budget 召回）也算答掉了这次异议，于是红灯转绿而问题其实没被检验。下一步让 `record_clearing` 记下 `verdict` 是否真的测了承诺（`tested: false`），并让 `--strict` 的过期收费只承认 `tested` 的答案，另外提醒"量过但答不了"的那一档，并点名该补什么（流文件、几何、还是预算）。

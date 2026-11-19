@@ -204,6 +204,13 @@ CLEARED_BY_LEDGER = "unexplained"
 #: the count of what was dropped travels with it so a trimmed history cannot look complete.
 IN_FORCE_HISTORY_LIMIT = 200
 
+#: Who wrote the citation on a cleared entry. `measurement` means the check that cleared the objection recorded it
+#: at the moment it happened (round 88); `audit` means a later run noticed the row was gone and compared
+#: timestamps to guess why. The second depends on the ledger still holding both facts, so a reader is told which
+#: one they have.
+CLEARED_CITED_BY_MEASUREMENT = "measurement"
+CLEARED_CITED_BY_AUDIT = "audit"
+
 
 def _read_in_force_store(root: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
     path = _in_force_path(root)
@@ -286,6 +293,7 @@ def observe_in_force_disputes(root: Path, rows: Sequence[Mapping[str, Any]],
                          else round((moment - first_moment).total_seconds() / 86400.0, 2)),
             "by": CLEARED_BY_MEASUREMENT if measured else CLEARED_BY_LEDGER,
             "checked_at": None if checked is None else checked.isoformat(),
+            "cited_by": CLEARED_CITED_BY_AUDIT,
         }
         cleared.append(entry)
         cleared_history.append(entry)
@@ -308,8 +316,65 @@ def in_force_history(root: Path) -> Tuple[List[Dict[str, Any]], int]:
     return cleared, trimmed
 
 
+def record_clearing(root: Path, version: int, now: Optional[datetime] = None, verdict: str = "",
+                    reason: str = "") -> List[Dict[str, Any]]:
+    """Write the clearing a measurement just earned, instead of waiting for a later audit to notice absence.
+
+    Round 87 deduced every clearing from a comparison of timestamps, which means the fact exists only while the
+    ledger still holds both ends of it: rewrite the record, retire the round, or re-run the audit in a checkout
+    that never saw the objection, and the clearing is unobservable. A check that answers a copied end knows the
+    answer at the moment it runs, so it says so here (round 88).
+
+    Only a copied end is cleared. A contradiction is not answered by measuring the version -- the two books still
+    disagree about which end is the evidence -- and it stays observed until someone fixes the records.
+    """
+    moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
+    observed, cleared_history, trimmed = _read_in_force_store(root)
+    keep: List[Dict[str, Any]] = []
+    entries: List[Dict[str, Any]] = []
+    for item in observed:
+        same = int(item.get("version") or 0) == int(version)
+        if not same or item.get("broken"):
+            keep.append(item)
+            continue
+        first = str(item.get("first_seen") or "")
+        first_moment = _parse_moment(first)
+        entry = {
+            "domain": str(item.get("domain") or "default"), "version": int(version),
+            "kind": str(item.get("kind") or ""), "first_seen": first,
+            "last_seen": str(item.get("last_seen") or ""),
+            "observations": int(item.get("observations") or 0),
+            "cleared_at": moment.isoformat(),
+            "age_days": (None if first_moment is None
+                         else round((moment - first_moment).total_seconds() / 86400.0, 2)),
+            "by": CLEARED_BY_MEASUREMENT,
+            "checked_at": moment.isoformat(),
+            "cited_by": CLEARED_CITED_BY_MEASUREMENT,
+            "verdict": str(verdict or ""),
+        }
+        if reason:
+            entry["reason"] = str(reason)
+        entries.append(entry)
+        cleared_history.append(entry)
+    if not entries:
+        return []
+    if len(cleared_history) > IN_FORCE_HISTORY_LIMIT:
+        dropped = len(cleared_history) - IN_FORCE_HISTORY_LIMIT
+        cleared_history = cleared_history[dropped:]
+        trimmed += dropped
+    path = _in_force_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"format": IN_FORCE_FORMAT, "observed": keep, "cleared": cleared_history,
+                                "trimmed": trimmed}, indent=2) + "\n", encoding="utf-8", newline="\n")
+    return entries
+
+
 def cleared_summary(entries: Sequence[Mapping[str, Any]], trimmed: int = 0) -> Dict[str, Any]:
-    """The two counts apart, with the median age, because they answer different questions."""
+    """The two counts apart, with the median age, because they answer different questions.
+
+    `by_domain` splits them again by the stream they were charged to: a total over two streams cannot say which
+    one stopped being measured (round 80's reason for splitting the paid families).
+    """
     measured = [item for item in entries if item.get("by") == CLEARED_BY_MEASUREMENT]
     unexplained = [item for item in entries if item.get("by") != CLEARED_BY_MEASUREMENT]
     ages = sorted(float(item.get("age_days") or 0.0) for item in entries if item.get("age_days") is not None)
@@ -317,8 +382,15 @@ def cleared_summary(entries: Sequence[Mapping[str, Any]], trimmed: int = 0) -> D
     if ages:
         half = len(ages) // 2
         middle = ages[half] if len(ages) % 2 else (ages[half - 1] + ages[half]) / 2.0
+    by_domain: Dict[str, Dict[str, int]] = {}
+    for item in entries:
+        row = by_domain.setdefault(str(item.get("domain") or "default"),
+                                   {"measured": 0, "unexplained": 0})
+        row["measured" if item.get("by") == CLEARED_BY_MEASUREMENT else "unexplained"] += 1
+    written = sum(1 for item in entries if item.get("cited_by") == CLEARED_CITED_BY_MEASUREMENT)
     return {"total": len(entries), "measured": len(measured), "unexplained": len(unexplained),
-            "median_age_days": round(middle, 2), "trimmed": int(trimmed)}
+            "median_age_days": round(middle, 2), "trimmed": int(trimmed),
+            "written": written, "by_domain": dict(sorted(by_domain.items()))}
 
 
 def stale_in_force_disputes(rows: Sequence[Mapping[str, Any]], promotions: Sequence["Promotion"],

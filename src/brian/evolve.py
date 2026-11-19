@@ -3745,6 +3745,9 @@ def _link_lines(result: Audit) -> List[str]:
             by = ("a re-measurement on %s" % str(item.get("checked_at"))
                   if item.get("by") == "verification" else
                   "no measurement: the ledger no longer reproduces it")
+            if item.get("by") == "verification" and item.get("cited_by") == "measurement":
+                # Round 88: written by the check that earned it, not deduced from timestamps afterwards.
+                by += " (written by that measurement)"
             age = item.get("age_days")
             lines.append("  %-16s v%03d  %-13s (first seen %s%s, cleared by %s)"
                          % (item.get("domain") or "default", int(item.get("version") or 0),

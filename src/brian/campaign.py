@@ -906,6 +906,16 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                      "(median %.1f day(s)), %d with no measurement on file"
                      % (int(record.get("total") or 0), int(record.get("measured") or 0),
                         float(record.get("median_age_days") or 0.0), int(record.get("unexplained") or 0)))
+        if int(record.get("written") or 0):
+            lines.append("links             %d of those clearings were written by the measurement itself; the "
+                         "rest were deduced later from the ledger" % int(record.get("written") or 0))
+        domains = record.get("by_domain")
+        if isinstance(domains, Mapping) and len(domains) > 1:
+            lines.append("links             clearings by domain: %s"
+                         % "; ".join("%s %d by measurement, %d without"
+                                     % (name, int(values.get("measured") or 0),
+                                        int(values.get("unexplained") or 0))
+                                     for name, values in sorted(domains.items())))
         if int(record.get("trimmed") or 0):
             lines.append("links             %d older clearing(s) were trimmed from the store, so this count "
                          "is not the whole history" % int(record.get("trimmed") or 0))
