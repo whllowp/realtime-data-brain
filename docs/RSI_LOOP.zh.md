@@ -4330,6 +4330,39 @@ queue paid        1 round(s) were produced by the re-run queue: 1 ceiling; 1 mor
 **边界 167：一个事实要放在它描述的主体所在的页面上。**"谁付的"属于已付的那一轮；把它放进列"还欠着的轮"的页面，这一列会永远为空，而空列读起来像从未发生。
 
 
+### 3.86 合计之外还要按流拆开：一条链接要能从两边读
+
+第 79 轮把队列的账读到页面上，但只读了合计：`queue paid 2 round(s) … 1 ceiling, 1 file`。这个数字回答的是"上限族到底被付过没有"，回答不了"是在哪条流上付的"。而排空可以跨两条流：文件族付 `SMD`、上限族付 `RCAEval RE1-OB`，合计照样是"两族各一轮"，看起来每一本账都被付过一遍。
+
+这一轮把同一个计数按 `queue.paid`（队列当时记在哪个域名下）拆开，紧挨着合计打印：
+
+```
+queue paid        2 round(s) were produced by the re-run queue: 1 ceiling, 1 file
+paid by domain    RCAEval RE1-OB 1 ceiling; SMD 1 file
+```
+
+`queue.paid` 与那一轮的 `stream.source` 不是一回事：一次跨两流的排空里，付款者记的是"这次记在谁的账上"，而不是"这份文件属于谁"。`--json-out` 里同名键 `queue_paid_by_domain`，结构与页面一致。
+
+**第二件事：一条链接要能从两边读。** 被退役的那一份记录写着 `[retired, re-measured as round-…json]`；付款的那一份记录里，`queue.paid_round` 一直写着它替换掉的是谁，但页面没有打印，于是从后继那一行往回看的人，只能靠时间戳去猜。现在继任者的行尾带上镜像的一句：
+
+```
+ 3  …  [data/smd/stream-one.json]  [paid by the file queue]  [replacing round-unrecorded.json]
+ 4  …  [data/smd/stream-one.json]  [paid by the ceiling queue]  [replacing round-named.json]
+```
+
+没有 `paid_round` 的记录不打印这一段——一个没写前身的继任者，不能靠猜补上一个。
+
+三条读法：
+
+- **合计不能代替分项**。只要动作的单位是流，计数就必须在合计之外再按流说一遍；否则一个"看起来健康"的合计会把"这条流的上限账从没被碰过"藏起来（边界 168）。
+- **链接写在一边，就要印在两边**。退役记录与继任记录是同一条关系的两端；只印一端，等于要求读者用时间戳做二次推断，而二次推断正是这条循环反复出错的地方（边界 169）。
+- **拆开要有依据，不是多印一行**。`paid` 这个字段从第 78 轮起就在记录里，它记的是队列记在谁名下；用它拆而不是用文件归属拆，是因为"付了哪本账"才是读者要问的问题。
+
+**边界 168：聚合不能代替分项——只要行动的单位是流，每个计数都必须同时按流报告。**一个跨流合计可以看起来每个族都被付过，而其中一条流的一本账从未被碰过。
+
+**边界 169：一条关系写在记录的一边，就要在两边都能读出来。**把"谁替换了谁"只印在被替换的那一行，读者就得拿时间戳配对；配对是推断，而推断会错。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4623,4 +4656,6 @@ missing for the next level
 
 65. **（3.85 已完成）** → 让 `--campaign` 从记录的 `queue.family` 汇总"已付的族"（文件族/上限族各多少轮），第三态（没写族的老记录）单独计数；"每一轮被哪一族付掉"落在 `--history` 与它的 `--json-out` 上——`--unrecorded` 列的是还欠着的轮，而付款的族属于付款者（后继记录），它不会出现在那里。
 
-66. 让 `--campaign` 把已付的族按域拆开（`queue.paid`），并让 `--history` 对被队列付过的轮一并标出它的前身是哪一轮（`queue.paid_round`）：这样"某次重测替换掉了哪一轮"不必翻记录才知道。
+66. **（3.86 已完成）** → `--campaign` 把已付的族按 `queue.paid` 拆开（`paid by domain`，JSON 为 `queue_paid_by_domain`）；`--history` 对被队列付过的轮标出它的前身（`queue.paid_round` → `[replacing …]`），没有写前身的不补猜。
+
+67. 让 `--history` 的 `[replacing …]` 与 `[retired, re-measured as …]` 互相校验：一条关系只写了一边、或两边写成不同的轮时，`--audit --strict` 把它当作账簿缺陷报出来（kind `broken-link`），而不是让页面各印各的。

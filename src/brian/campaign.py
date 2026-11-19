@@ -194,6 +194,10 @@ class Campaign:
     # the round's `queue` block). Counted here because the record is only half an answer: a reader asking
     # "which book did the queue pay down" should not have to open forty JSON files.
     paid_families: Dict[str, int] = field(default_factory=dict)
+    # Round 80: the same count split by the domain the queue paid on. The aggregate answers "was the ceiling
+    # family ever paid"; only the split answers "was it paid on this stream", and a drain over two streams
+    # hides that distinction inside a total that looks healthy either way.
+    paid_by_domain: Dict[str, Dict[str, int]] = field(default_factory=dict)
     # Rounds that say a queue paid them but not which family: written between rounds 58 and 77. Counted
     # separately so their silence cannot read as "the file family" (boundary 162 in its record form).
     paid_unstated: int = 0
@@ -237,6 +241,8 @@ class Campaign:
             "ceilings_differ": self.drift,
             "ceilings_unrecorded": self.drift_unrecorded,
             "queue_paid_families": dict(sorted(self.paid_families.items())),
+            "queue_paid_by_domain": {domain: dict(sorted(counts.items()))
+                                     for domain, counts in sorted(self.paid_by_domain.items())},
             "queue_paid_unstated": self.paid_unstated,
             "domains": [row.to_dict() for row in self.rows],
         }
@@ -337,6 +343,11 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
             family = str(queue_entry.get("family") or "")
             if family:
                 result.paid_families[family] = result.paid_families.get(family, 0) + 1
+                # Round 80: and which domain's book it went into. `paid` is the domain the queue charged,
+                # which is not the round's `stream.source` when a drain spans two streams.
+                paid_domain = str(queue_entry.get("paid") or "(unstated)")
+                counts = result.paid_by_domain.setdefault(paid_domain, {})
+                counts[family] = counts.get(family, 0) + 1
             else:
                 result.paid_unstated += 1
         if not row.first or finished < row.first:
@@ -707,6 +718,14 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             line += ("; %d more say a queue paid them without naming the family (records from before "
                      "round 78)" % result.paid_unstated)
         lines.append(line)
+        if result.paid_by_domain:
+            # Round 80: the same count per domain. A drain over two streams can pay the ceiling family on
+            # one of them only; the total above reads the same either way, so the split sits next to it.
+            split = []
+            for domain, counts in sorted(result.paid_by_domain.items()):
+                split.append("%s %s" % (domain, ", ".join("%d %s" % (n, f)
+                                                          for f, n in sorted(counts.items()))))
+            lines.append("paid by domain    %s" % "; ".join(split))
     if result.withheld:
         # Round 42: the half of the ledger a version page cannot show. Printed above the rows because the
         # second number is a question every domain page owes an answer to: which refusals no longer hold.

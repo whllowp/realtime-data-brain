@@ -95,3 +95,37 @@ def test_the_history_json_carries_the_queue_block(tmp_path, monkeypatch, capsys)
     payload = json.loads(target.read_text(encoding="utf-8"))
     assert payload["rounds"][0]["queue"]["family"] == "ceiling"
     assert payload["rounds"][0]["queue"]["shape"]["ceiling_rounds"] == 1
+
+
+def test_the_split_says_which_domain_paid(tmp_path):
+    """Round 80: a drain over two streams can pay the ceiling family on one of them only."""
+    _round(tmp_path, "round-a.json",
+           queue={"paid": "SMD", "paid_round": "round-old-a.json", "family": "file"})
+    _round(tmp_path, "round-b.json", source="RCAEval RE1-OB",
+           queue={"paid": "RCAEval RE1-OB", "paid_round": "round-old-b.json", "family": "ceiling"})
+    result = campaign(tmp_path)
+    assert result.paid_families == {"file": 1, "ceiling": 1}
+    assert result.paid_by_domain == {"SMD": {"file": 1}, "RCAEval RE1-OB": {"ceiling": 1}}
+    assert result.to_dict()["queue_paid_by_domain"] == {"SMD": {"file": 1},
+                                                       "RCAEval RE1-OB": {"ceiling": 1}}
+    text = format_campaign(result)
+    assert "paid by domain    RCAEval RE1-OB 1 ceiling; SMD 1 file" in text
+
+
+def test_the_history_line_says_which_round_the_successor_replaced(tmp_path, monkeypatch, capsys):
+    """The retired round names what replaced it; a reader on the successor asks the mirror question."""
+    _round(tmp_path, "round-new.json",
+           queue={"paid": "SMD", "paid_round": "round-unrecorded.json", "family": "file"})
+    monkeypatch.chdir(tmp_path)
+    cli.main(["evolve", "--history"])
+    out = capsys.readouterr().out
+    assert "[paid by the file queue]  [replacing round-unrecorded.json]" in out
+
+
+def test_a_successor_without_a_predecessor_does_not_invent_one(tmp_path, monkeypatch, capsys):
+    _round(tmp_path, "round-new.json", queue={"paid": "SMD", "family": "ceiling"})
+    monkeypatch.chdir(tmp_path)
+    cli.main(["evolve", "--history"])
+    out = capsys.readouterr().out
+    assert "[paid by the ceiling queue]" in out
+    assert "[replacing" not in out

@@ -1622,6 +1622,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             queue_entry = record.get("queue")
             if isinstance(queue_entry, Mapping) and queue_entry.get("family"):
                 mark += "  [paid by the %s queue]" % queue_entry.get("family")
+                # Round 80: and which record it replaced. The retired round already says what took its
+                # place; this is the same sentence from the other side, so a reader never has to match two
+                # stamps by eye to answer "which measurement is behind this row".
+                replaced = str(queue_entry.get("paid_round") or "")
+                if replaced:
+                    mark += "  [replacing %s]" % replaced
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
