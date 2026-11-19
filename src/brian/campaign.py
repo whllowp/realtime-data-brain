@@ -909,6 +909,20 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # from the measured count so a failed comparison can never look like a paid debt.
         lines.append("links             %d of those clearings rested on a check that could not test the "
                      "claim: recorded, and they answer nothing" % result.in_force_untested)
+    dead = (result.in_force_history or {}).get("dead_record_paths")
+    if isinstance(dead, list) and dead:
+        # Round 93: what the record itself claims to have been measured on, and this checkout cannot open. It is
+        # printed outside the clearing block on purpose: a promise naming a file nobody can open is true whether or
+        # not anything was ever cleared, and a gate naming one subject silences the other (round 87, boundary 184).
+        # It is fixable, so the line names the command with the file that would take its place.
+        for item in dead:
+            lines.append("links             v%03d records %s%s, which this checkout cannot open: fix the "
+                         "record rather than the check -- brian evolve --set-stream-path v%03d=<a file that "
+                         "exists>"
+                         % (int(item.get("version") or 0), str(item.get("stream_path") or ""),
+                            " (in force)" if item.get("in_force") else "",
+                            int(item.get("version") or 0)))
+
     if result.in_force_history and int(result.in_force_history.get("total") or 0):
         record = result.in_force_history
         lines.append("links             %d dispute(s) left the in-force list: %d cleared by a re-measurement "
@@ -941,6 +955,13 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                 lines.append("links             the oldest of them was written %s (v%03d, %s)"
                              % (str(oldest.get("checked_at")), int(oldest.get("version") or 0),
                                 "an unknown time" if age is None else "%.1f day(s) ago" % float(age)))
+        named = record.get("substitutions")
+        if isinstance(named, Mapping) and named:
+            # Round 93: checks ran on a file the record knew rather than the one they were asked for. That is a
+            # caller's habit, so it is reported as a fact and charged by nothing.
+            lines.append("links             substitutions: %s"
+                         % "; ".join("asked for %s, ran on the recorded file %d time(s)" % (name, int(count))
+                                     for name, count in sorted(named.items())))
         domains = record.get("by_domain")
         if isinstance(domains, Mapping) and len(domains) > 1:
             lines.append("links             clearings by domain: %s"

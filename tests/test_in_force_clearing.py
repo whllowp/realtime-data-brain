@@ -164,7 +164,9 @@ def test_the_summary_keeps_the_two_kinds_apart():
                        "by_domain": {"rcaeval-re1-ob": {"measured": 0, "unexplained": 1},
                                      "smd": {"measured": 2, "unexplained": 0}},
                        "by_file": {"(unnamed)": 1, "data/smd/stream-one.json": 1},
-                       "last_by_file": {"data/smd/stream-one.json": "2026-11-19T20:00:00+00:00"}}
+                       "last_by_file": {"data/smd/stream-one.json": "2026-11-19T20:00:00+00:00"},
+                       # Round 93: neither entry needed a substitute, so the count is empty rather than absent.
+                       "substitutions": {}}
 
 
 def test_the_page_says_what_cleared_it(tmp_path):

@@ -109,6 +109,8 @@ from .promote import (
     record_clearing,
     revert_promotion,
     set_state_budget,
+    set_stream_path,
+    dead_record_paths,
     state_budgets,
     state_drains,
     version_label,
@@ -1523,6 +1525,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # computed once here and carried into both pages that print it.
     in_force_evidence = clearing_evidence(in_force_history_rows, root)
     in_force_record = dict(in_force_record, evidence_missing=in_force_evidence)
+    # Round 93: which promises name a stream file this checkout cannot open. Computed here from the checkout,
+    # never stored: the answer changes when a file is moved, not when a clearing is written.
+    in_force_record = dict(in_force_record, dead_record_paths=dead_record_paths(root))
 
     if getattr(args, "max_limit_drift", None) is not None and not (args.audit or args.campaign):
         # Round 68: a flag that only one mode reads must say so, otherwise it is inert in every other mode and
@@ -2430,6 +2435,35 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("L4 comes from the proposal rule being selected from the ledger (bounded by a declared")
         _print("space); the objective, decide() and the evaluator stay outside. Each round records")
         _print("which rule proposed it, so 'the mechanism changed' is a fact with a fingerprint.")
+        return 0
+
+    if getattr(args, "set_stream_path", None):
+        pair = str(args.set_stream_path)
+        if "=" not in pair:
+            _print("--set-stream-path takes VERSION=FILE, for example --set-stream-path v020=data/smd/stream.json")
+            return 2
+        label, target = pair.split("=", 1)
+        digits = "".join(ch for ch in label if ch.isdigit())
+        if not digits:
+            _print("--set-stream-path needs a version number in the label, not %r" % label)
+            return 2
+        try:
+            change = set_stream_path(root, int(digits), target)
+        except ValueError as error:
+            _print("  %s" % error)
+            return 2
+        if not change["changed"]:
+            _print("stream path     v%03d already says %s; nothing to change" % (change["version"], change["to"]))
+        else:
+            # Round 93: the repair is written into the record, not into a log -- a reader of the version file
+            # must see that the file moved and what it moved from.
+            _print("stream path     v%03d  %s -> %s" % (change["version"],
+                                                        change["from"] or "(unrecorded)", change["to"]))
+            _print("                recorded in the version's stream_path_history, so the change is visible")
+            _print("                to anyone who reads the promise. Nothing was re-measured by this call.")
+        if getattr(args, "json_out", None):
+            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps({"stream_path": change}, indent=2, sort_keys=False) + "\n")
         return 0
 
     if getattr(args, "repair_links", False):
@@ -4139,6 +4173,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "(the deployment state is the baseline by default)")
     evolve.add_argument("--grade", action="store_true",
                         help="print the L1-L5 grading and exit")
+    evolve.add_argument("--set-stream-path", metavar="VERSION=FILE", default=None,
+                        help="record that a version was measured on FILE, when its record names a file this "
+                             "checkout does not have; writes stream_path_history")
     evolve.add_argument("--repair-links", action="store_true",
                         help="write the missing end of a legacy replacement link; plan only without --apply")
     evolve.add_argument("--history", action="store_true",

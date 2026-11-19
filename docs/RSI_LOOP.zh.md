@@ -5050,6 +5050,65 @@ links             the oldest of them was written 2026-11-19T20:55:13+00:00 (v020
 
 **边界 199：坏链接的年龄把"账不完整"变成"从哪天起不完整"。** 最旧的那一条就是读者该先打开的那一份，而且它没有任何别人能替他看。
 
+### 3.99 修一次检查，不等于修好了记录：`dead_record_paths` 与 `--set-stream-path`
+
+第 92 轮让 `--verify` 在指名文件不存在时改跑记录里的那份，并把清账凭据的年龄印出来。两件事都做对了，却都只让
+读者**看见**一件事：某个承诺指着一份在这个检出里打不开的文件。看不见的那一半是：这份记录没有任何命令能改。
+于是每次检查要么替换、要么拒绝，记录永远不会学到。
+
+这一轮先把对象搞清楚了。第一版按"同一个版本连续替换两次就判记录过期"来做，跑完发现判错了东西：替换换掉的是
+**调用者指名**的文件，连续替换是调用者的习惯（脚本里写死的旧路径），`--set-stream-path` 修不了习惯。真正修得了
+的是记录本身——`v020` 说自己在 `data/smd/stream-real.json` 上量过，而这份文件已经不在了。
+
+于是：
+
+1. `promote.dead_record_paths(root)` 扫 `var/evolve/versions/*.json`，列出 `stream_path` 非空且在当前检出里
+   打不开的版本，并带 `in_force`（部署状态里是否有人在用）。这是**读时计算**，不写进任何存储：答案是"这个检出
+   里有没有这份文件"，文件一挪答案就变（边界 194）。
+2. `--campaign` 在 links 段输出：
+
+   ```
+   links             v020 records data/smd/stream-real.json (in force), which this checkout cannot open: fix the
+                     record rather than the check -- brian evolve --set-stream-path v020=<a file that exists>
+   ```
+
+3. `brian evolve --set-stream-path v020=data/smd/stream-moved.json` 做修复本身：目标文件必须存在（修完指着空处，
+   修好了文书、丢了证据，边界 195），旧值写进该版本的 `stream_path_history`（`from`/`to`/`at`/`why`），
+   返回 `changed`，第二次执行什么都不做。命令自己说清楚："Nothing was re-measured by this call."——修记录和在
+   新文件上重测是两件事（边界 186 的同一条规则）。
+
+实测（`var/demo90/answerable`，Laya 在线，把 `data/smd/stream-real.json` 改名之后）：
+
+```
+links  v020 records data/smd/stream-real.json (in force), which this checkout cannot open: ... --set-stream-path v020=<a file that exists>
+
+stream path     v020  data/smd/stream-real.json -> data/smd/stream-moved.json
+                recorded in the version's stream_path_history, so the change is visible
+                to anyone who reads the promise. Nothing was re-measured by this call.
+```
+
+修完之后 `--campaign` 里那一行消失（因为列表是算出来的，不需要"重新记录一次修好了"），版本文件里留下
+`stream_path_history: [{"from": "data/smd/stream-real.json", "to": "data/smd/stream-moved.json", "at": …, "why": …}]`。
+随后 `--verify --verify-version 20 --stream-file data/smd/stream-moved.json --accept-copied` 直接在这份文件上跑，
+不再出现 `(substituted: …)`：重测得到 `FAILED and reverted`，那是因为 40 窗口的合成流确实达不到承诺的 0.507，
+和路径无关——记录修好之后，判定的对象终于是"这份文件上的承诺"。
+
+三个实现缺陷（都是"判断句的对象不对"的同一个毛病）：
+
+- 新行被塞进 clearing 的 gate（`if result.in_force_history and total:`），于是**没有任何清账时它不打印**——同一个
+  形状在第 87 轮出现过（边界 184）。现在它在 gate 外面：记录指着打不开的文件，这件事和"有没有清过账"无关。
+- `_stamp_moment` 返回 `datetime`（负责补时区），直接塞进 JSON 时 `TypeError: Object of type datetime is not JSON
+  serializable`；这个文件里其他写入点都在边界处 `.isoformat()`，只有新代码忘了。
+- 测试断言把标记顺序写反了：输出是 `… (in force), which …`，断言写的是 `… which … (in force)`。断言是照着想象
+  写的句子，不是照着输出抄的句子。
+
+**边界 200：修检查不等于修记录。** 替换能让一次检查跑完，记录仍指着打不开的文件；页面若要说"去修记录"，指的
+必须是记录自己的字段，而不是它看见的那几次替换——那是调用者的习惯，改记录改不到。
+**边界 201：修一份承诺要校验并且留痕。** 新路径必须指向一个能打开的文件（指着空处等于修好文书、丢掉证据），
+旧值必须写进这份承诺自己的历史里；版本文件是承诺本身，除此之外没有别处记得它在哪份文件上量过。
+**边界 202：一个事实的守卫要挂在它自己的主语上。** 记录是否可达和有没有清过账无关，把它塞进 clearing 的 gate，
+就会在"全新检出、什么都没清过"时恰好沉默——这正是边界 184 说的那件事，这一轮又踩了一次。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5380,7 +5439,12 @@ missing for the next level
     `clearing_evidence(..., now=…)` 多带 `oldest`，`--campaign` 印"坏链接里最旧的那一条"。见 §3.98 与边界 197/198/199。
     顺带把 `var/fix_endings.py` 从手写清单改成遍历 `git ls-files`：新文件也要被约定覆盖。
 
-79. 让替换本身可追溯：`substituted_from` 目前只在条目里，`--campaign` 应当按被替换的文件分组统计（哪些文件反复
-    查不到、哪些只是改了名），并且当同一个版本连续两次以上靠替换才测出来时，把它当作"记录的文件路径已经失效"
-    报出来，让读者去修记录而不是继续替换。
+79. ✅ 让 `--verify` 在指名文件不存在时改跑记录里的那份（第 92 轮），并把坏链接的年龄印出来（第 92 轮）。
+    第 93 轮补上真正缺的那一半：记录**自己**指名的文件失效时没人能改，所以加了 `promote.dead_record_paths`
+    （按当前检出计算，含 `in_force` 标记）与 `brian evolve --set-stream-path VERSION=FILE`（校验目标存在、
+    写 `stream_path` 并把旧值记进该版本的 `stream_path_history`）。按替换次数判"记录过期"是错的对象：
+    替换修的是这一次检查，不修记录，所以只作为事实统计。
 
+
+80. 把 `stream_path_history` 印到 `--history`（现在只在版本文件里），并让 `--campaign` 统计"路径被人工修过的记录"数：
+    修过的记录不能当作原始记录的证据，和 `backfilled` 末端是同一类事实。

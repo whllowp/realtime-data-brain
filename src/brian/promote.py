@@ -35,6 +35,7 @@ restore and the variable is removed. Neither case invents a value that was never
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -203,6 +204,8 @@ CLEARED_BY_LEDGER = "unexplained"
 #: How many cleared entries to keep. A history that grows without a bound is a state file nobody can read, and
 #: the count of what was dropped travels with it so a trimmed history cannot look complete.
 IN_FORCE_HISTORY_LIMIT = 200
+# Round 93: how many substitutions of one version's named file turn a right choice into a stale record.
+STALE_SUBSTITUTION_LIMIT = 2
 
 #: Who wrote the citation on a cleared entry. `measurement` means the check that cleared the objection recorded it
 #: at the moment it happened (round 88); `audit` means a later run noticed the row was gone and compared
@@ -528,10 +531,19 @@ def cleared_summary(entries: Sequence[Mapping[str, Any]], trimmed: int = 0) -> D
         stamp = str(item.get("checked_at") or "")
         if stamp > last_by_file.get(key, ""):
             last_by_file[key] = stamp
+    # Round 93: a substitution is a fact about what the checks were asked to read, so it is counted by the path
+    # that was named. It is not a defect: the caller names a file, the record knows the file, and the check runs on
+    # the one that exists. What *is* a defect -- a record naming a file nobody can open -- is `dead_record_paths`.
+    substitutions: Dict[str, int] = {}
+    for item in measured:
+        named = str(item.get("substituted_from") or "")
+        if named:
+            substitutions[named] = substitutions.get(named, 0) + 1
     return {"total": len(entries), "measured": len(measured), "unexplained": len(unexplained),
             "median_age_days": round(middle, 2), "trimmed": int(trimmed),
             "written": written, "untested": untested, "by_domain": dict(sorted(by_domain.items())),
-            "by_file": dict(sorted(by_file.items())), "last_by_file": dict(sorted(last_by_file.items()))}
+            "by_file": dict(sorted(by_file.items())), "last_by_file": dict(sorted(last_by_file.items())),
+            "substitutions": dict(sorted(substitutions.items()))}
 
 
 def stale_in_force_disputes(rows: Sequence[Mapping[str, Any]], promotions: Sequence["Promotion"],
@@ -1459,3 +1471,83 @@ def _age_text(days: float) -> str:
 
 def _first_line(text: str) -> str:
     return str(text).splitlines()[0] if str(text) else ""
+
+
+def set_stream_path(root: Path, version: int, stream_path: str,
+                    now: Optional[datetime] = None, why: str = "") -> Dict[str, Any]:
+    """Rewrite the file a version says it was measured on, because the record names one that is not there.
+
+    Round 92 taught `--verify` to stand in with the recorded file when the named one is gone. Doing that twice for
+    the same version is not two successes, it is one stale record: every later check pays the substitution, and a
+    reader of the record still believes the promise was measured somewhere else. The repair is therefore explicit
+    and checked -- the new path must exist (a repair that points at nothing fixes the paperwork and loses the
+    evidence, boundary 195), and the old value is kept in `stream_path_history` so the change is visible in the
+    record rather than only in a log line (boundary 174's rule, applied to a field instead of a link).
+    """
+    path = _evolve_dir(root) / VERSIONS / ("v%03d.json" % int(version))
+    if not path.is_file():
+        raise ValueError("no version record for v%03d: %s" % (int(version), path))
+    wanted = str(stream_path or "").strip()
+    if not wanted:
+        raise ValueError("refusing to record an empty stream path: the record would say less than it does now")
+    if not (root / wanted).is_file():
+        raise ValueError("the file to record does not exist in this checkout: %s "
+                         "(a repair must point at something a reader can open)" % wanted)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    before = str(payload.get("stream_path") or "")
+    if before == wanted:
+        return {"version": int(version), "from": before, "to": wanted, "changed": False}
+    payload["stream_path"] = wanted
+    history = payload.get("stream_path_history")
+    history = list(history) if isinstance(history, list) else []
+    history.append({"from": before, "to": wanted, "at": _stamp_moment(now).isoformat(),
+                    "why": str(why or "the file the record named does not exist in this checkout")})
+    payload["stream_path_history"] = history
+    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
+    return {"version": int(version), "from": before, "to": wanted, "changed": True}
+
+
+def stream_path_history(root: Path, version: int) -> List[Dict[str, Any]]:
+    """The moves a version's measured file has been through, oldest first (round 93).
+
+    Kept separate from `set_stream_path` because a reader asks this of versions this build never touched: the
+    point of recording the change is that it survives in the record, not in the session that made it.
+    """
+    path = _evolve_dir(root) / VERSIONS / ("v%03d.json" % int(version))
+    if not path.is_file():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    history = payload.get("stream_path_history")
+    return [dict(item) for item in history if isinstance(item, Mapping)] if isinstance(history, list) else []
+
+
+def dead_record_paths(root: Path) -> List[Dict[str, Any]]:
+    """Versions whose record names a stream file this checkout cannot open (round 93).
+
+    Round 91 taught the pages to mark a *clearing* whose evidence is gone, and round 92 gave the mark an age. Neither
+    can say what to do about it: the promise itself still names a file nobody can open, so every later check either
+    substitutes or refuses, and the record never learns. This is the missing list -- computed against the checkout
+    rather than stored (boundary 194), because it is a fact about the reader's tree.
+
+    `in_force` is carried so the page can say which of them is also deployed: a dead path on a retired promise is
+    housekeeping, on a live one it is a check that cannot be repeated.
+    """
+    deployed = {int(version) for _slug, version in in_force_promotions(root)}
+    rows: List[Dict[str, Any]] = []
+    directory = _evolve_dir(root) / VERSIONS
+    if not directory.is_dir():
+        return rows
+    for path in sorted(directory.glob("v*.json")):
+        match = re.fullmatch(r"v(\d+)\.json", path.name)
+        if not match:
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        recorded = str(payload.get("stream_path") or "")
+        if not recorded or (root / recorded).is_file():
+            continue
+        rows.append({"version": int(match.group(1)), "stream_path": recorded,
+                     "in_force": int(match.group(1)) in deployed})
+    return rows
