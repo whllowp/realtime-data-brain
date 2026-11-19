@@ -4652,6 +4652,46 @@ still a build defect (`--strict` exits 2); a copied end is a debt, named here, n
 
 `--audit --strict` 现在对"在跑一个踩在断链上的版本"退出 2，对"在跑一个踩在补写端上的版本"只报告。第 72 项留给下一轮：把 `in_force_disputes` 的时间也记下来——同一个版本连续几轮都踩在争议记录上，应该像 `--verify` 的到期一样，从"报告"变成"该处理了"；否则它会安静地留在页面上，而页面上的警告最容易被读成"没关系"。
 
+### 3.92 重算出来的事实没有历史：把"第一次看见"写下来，并且只让能清掉的那一种升级
+
+第 3.91 轮把来源之问问到了已经在生效的版本上：`in_force_disputes` 从每个部署状态的 `sources` 读出在跑哪些版本，逐个调第 3.90 轮的 `provenance_block`。这个答案是**每次运行重算**的，所以它天生只能回答"有没有"，回答不了"多久"——而"多久"恰恰是唯一能让一个事实从"今天这样"变成"该处理了"的东西。
+
+年龄不能从账本里推出来。账本记的是每一轮**变了什么**（记录改写、退休、补写），不是循环**什么时候第一次看见**某个版本踩在一条被争执的链接上。前者是数据的变化，后者是对数据的观察；观察没有别的地方可以记，于是它被写在账本**旁边**而不是账本**里面**：`var/evolve/in_force.json`。
+
+存储的形状是 `{"format": "brian.inforce/1", "observed": [...]}`，键是 `(domain, version, kind)`。三个字段承担三件事：`first_seen` 一旦写下就不再改写（这是年龄的分子），`observations` 每轮加一（说明它不是一次性的误读），`age_days` 每次由当前时刻减出来（所以它永远和这次运行的时钟一致）。本轮已经不再争议的行会作为 `cleared` 回传一次、然后从存储里删除——页面上必须能说"这笔账结了"，而不是继续宣布一个已经不再成立的事实。一个从没有过争议的部署不写这个文件：一个空存储会暗示"曾经有过"。
+
+升级只给一种行：**补写端**（`backfilled end`，第 3.91 轮的修复写出来的那一端）。断链（`mismatch`/`unretired`/`dangling`）不在升级范围里——它一旦存在就已经按第 3.90 轮收 exit 2，因为没有任何一次重测能决定哪一本账是对的，加一条年龄只是让同一个收费多等几天。补写端不同：它恰好有一个补救动作，就是把在跑的版本再量一次（`--verify`），所以过期的补写端收 **exit 1**，并且这次的措辞必须点名那条命令：
+
+```
+1 version(s) in force have sat on a copied record for longer than the 14-day grace period
+with no re-measurement newer than the objection, so --strict exits 1:
+`brian evolve --verify --verify-version <n> --stream-file <the file that version measured>`
+clears it, because the copy is about the record, not about the number.
+```
+
+同一个版本在 20 天前被看见、之后一次都没再量过，审查页上是这样的：
+
+```
+  smd              v020  backfilled end round-new.json has no successor-side record of its own:
+                         ... [first seen 20.0 day(s) ago, seen 4 time(s)]  [stale: no verdict newer than the objection]
+1 copy(ies) have stood longer than 14 day(s) with no verdict newer than the
+objection, so `--strict` asks for a re-measurement of the deployed version: that is the
+one command that clears it.
+```
+
+写下一个比首次看见更新的 `verification.checked_at` 之后，段落和行尾标记一起消失，`--audit --strict` 退出 0：测量比异议新，而异议说的是记录，不是数字。战役页同一时间给的是 `v020 (20.0 day(s))` 和一行"站在宽限期之外"，`--json-out` 里是 `in_force_stale` 与 `in_force_cleared`。
+
+这一轮现场暴露了两个缺陷，都属于同一类：**同一个判断被写了两遍**。
+
+第一处：页面按年龄升级，闸门按"年龄 + 没有更新的测量"升级。于是补上一个一天前的验证之后，`--audit --strict` 退出 0，而审查页还在印"`--strict` asks for a re-measurement"——页面在许一个闸门不做的承诺。修法不是让页面少说一句，而是把裁决放进 `stale_in_force_disputes` 一处，页面和闸门读同一个列表（`Audit.in_force_stale`）；页面的行尾标记也从"年龄过线"改成"在这份裁决里"。
+
+第二处：时钟。工装夹具用一固定的 `NOW` 写了"20 天前"的时间戳，而观察走的是真实时钟，于是同一行被算成 8.3 天：年龄只有在同一个时钟下才有意义，而"现在"是唯一一个只有一个来源的量。夹具改成由真实时钟减出来的时间戳。
+
+**边界 180：一个每次运行都从账本重算出来的事实，说得出"是不是"，说不出"多久了"。** 年龄只可能是关于观察的，不是关于数据的，所以它必须被写在账本旁边，而且必须只写一次（首次看见），不能每次覆盖。
+
+**边界 181：年龄不是补救。** 只升级"有命令能清掉"的那一种欠账，并在升级的句子里点名那条命令；已经按缺陷收费的那一种不要再叠一层年龄。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4956,4 +4996,5 @@ missing for the next level
 70. **（第 3.90 轮完成，2026-11-20）** 已经做出：`--campaign` 的 `links` 行把补写的端单列成 `N replacement link(s) were backfilled by a repair: their ends agree by copying, not as two witnesses`，`--json-out` 里是 `backfilled_links`；`--history` 在存在补写端时不再说"every link that has both ends agrees"。`--verify` 在循环最前面读 `provenance_block(root, version)`：断链记 `broken link` 并 **exit 2**，补写端记 `backfilled end` 并 **exit 1**，两者都不写验证记录，页面说明"每次都会再拦一次"。补写端不再被算作一次队列付款。`--promote` 的那一半留给第 71 项。
 
 71. **（第 3.91 轮完成，2026-11-20）** 这一项的前提不成立：`brian evolve` 没有 `--promote` 入口。真正漏掉的是"没人对已经在生效的版本发问"。已经做出：`promote.in_force_promotions` 从每个部署状态的 `sources` 读出在跑哪些版本（迁移前的全局 `current.json` 记作默认域，两个变量属于同一版本只算一个），`promote.in_force_disputes` 对每个在生效版本调第 84 轮的 `provenance_block`，行里带 `domain`/`version`/`broken`/`kind`/`detail`；`Audit.in_force`、`in_force_broken`、`in_force_copied` 把它带进 `--audit` 的 `links` 段（逐行打印域名、版本、种类和细节），`--campaign` 的 `links` 段多一行 `N version(s) in force sit on a record the books dispute: v020`，`--json-out` 里是 `in_force_disputed`；`--strict` 对"在跑踩在断链上的版本"exit 2，对补写端只报告（exit 0）。真实账簿：三个在生效版本，零争议。
-72. 给 `in_force_disputes` 的每一行记下它第一次出现的时间，并像 `--verify` 的到期一样，让"同一个版本连续 N 轮踩在争议记录上"从报告变成该处理：现在它只在页面上说一次事实，而页面上的警告最容易被读成"没关系"。
+72. **（第 3.92 轮完成，2026-11-20）** `in_force_disputes` 每次运行都从账本重算，能说"这个在跑的版本踩在补写端上"，说不出"已经多久"。账本也给不出年龄：它记的是变了什么，不是循环什么时候第一次看见。已经做出：`promote.observe_in_force_disputes` 把每个 `(domain, version, kind)` 的 `first_seen` 写进 `var/evolve/in_force.json`（格式 `brian.inforce/1`，保留首次时间、递增 `observations`、重算 `age_days`，本轮已消失的行回传一次 `cleared` 然后忘掉；干净部署不写文件，免得长出一个暗示"曾经有过争议"的存储）；`promote.stale_in_force_disputes` 只挑**补写端**里超过 `IN_FORCE_GRACE_DAYS = 14` 天、且没有比首次看见更新的 `verification.checked_at` 的行；`Audit.in_force_stale`、`Campaign.in_force_stale` 把它带进 `--audit`（行尾 `[stale: no verdict newer than the objection]` 和一段说明，`--campaign` 印 `v020 (20.0 day(s))` 与一行"站在宽限期之外"）与 `--json-out`（`in_force_stale` / `in_force_cleared`）；`--strict` 对过期的补写端 exit 1，并点名唯一的清账命令 `brian evolve --verify --verify-version <n> --stream-file <该版本量过的文件>`。
+73. 让 `--verify` 的结果写回 `in_force.json`：现在清账只意味着"下一次重算看不见这一行了"，而那一行是被删掉、不是被解决——把 `cleared_at` 和清除它的那次验证记下来，让 `--campaign` 能报告"平均挂了多久"。

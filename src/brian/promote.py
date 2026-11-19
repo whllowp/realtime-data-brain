@@ -38,7 +38,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .config import ENV_VARS, Settings
 from .deploy import overrides_from_state
@@ -158,6 +158,109 @@ def in_force_disputes(root: Path) -> List[Dict[str, Any]]:
         rows.append({"domain": slug or "default", "version": version, "broken": block[0] == LINK_BROKEN,
                      "kind": block[0], "detail": block[1]})
     return rows
+
+
+#: How long a deployed version may sit on a copied record before `--strict` asks for a re-measurement (round 86).
+#: The same number as the claim expiry, for the same reason: the check costs a queue run, and nothing else in
+#: this loop is trusted to evidence older than two weeks.
+IN_FORCE_GRACE_DAYS = 14.0
+
+#: Where the first sighting of each dispute is kept. Outside the ledger on purpose: the ledger records rounds,
+#: and this records *when the loop noticed*, which is a fact about this build's runs, not about a measurement.
+IN_FORCE_STORE = "in_force.json"
+
+
+def _in_force_path(root: Path) -> Path:
+    return _evolve_dir(root) / IN_FORCE_STORE
+
+
+def _parse_moment(stamp: Any) -> Optional[datetime]:
+    text = str(stamp or "")
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _stamp_moment(now: Optional[datetime] = None) -> datetime:
+    moment = now or datetime.now(timezone.utc)
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def observe_in_force_disputes(root: Path, rows: Sequence[Mapping[str, Any]],
+                              now: Optional[datetime] = None,
+                              ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Give a recomputed fact a history: when each dispute was first seen (round 86).
+
+    Returns `(aged, cleared)`: the rows enriched with `first_seen`, `last_seen`, `observations` and `age_days`;
+    and the entries this run no longer sees, once each, so the page can say a debt cleared instead of
+    remembering one that stopped being true. A clean tree writes nothing, so a deployment that never had a
+    dispute does not grow a file suggesting it did.
+    """
+    moment = _stamp_moment(now)
+    path = _in_force_path(root)
+    stored: List[Dict[str, Any]] = []
+    if path.is_file():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        if isinstance(payload, Mapping):
+            stored = [dict(item) for item in payload.get("observed") or [] if isinstance(item, Mapping)]
+    seen: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
+    for item in stored:
+        key = (str(item.get("domain") or "default"), int(item.get("version") or 0),
+               str(item.get("kind") or ""))
+        seen[key] = item
+    aged: List[Dict[str, Any]] = []
+    for row in rows:
+        key = (str(row.get("domain") or "default"), int(row.get("version") or 0), str(row.get("kind") or ""))
+        previous = seen.pop(key, None)
+        first = str((previous or {}).get("first_seen") or "") or moment.isoformat()
+        observations = int((previous or {}).get("observations") or 0) + 1
+        # A stored stamp that cannot be read is replaced by "now" rather than treated as old: guessing that a
+        # dispute is ancient is how a warning turns into a charge nobody can explain.
+        first_moment = _parse_moment(first) or moment
+        aged.append({
+            "domain": key[0], "version": key[1], "broken": bool(row.get("broken")),
+            "kind": key[2], "detail": row.get("detail"),
+            "first_seen": first, "last_seen": moment.isoformat(), "observations": observations,
+            "age_days": round((moment - first_moment).total_seconds() / 86400.0, 2),
+        })
+    cleared = [dict(item) for item in seen.values()]
+    if aged or cleared:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"format": "brian.inforce/1", "observed": aged}, indent=2) + "\n",
+                        encoding="utf-8", newline="\n")
+    return aged, cleared
+
+
+def stale_in_force_disputes(rows: Sequence[Mapping[str, Any]], promotions: Sequence["Promotion"],
+                            grace_days: float = IN_FORCE_GRACE_DAYS) -> List[Dict[str, Any]]:
+    """Copied ends that have stood past the grace period with no re-measurement newer than the objection.
+
+    A contradiction is not here: it is charged the moment it exists (round 85), because no measurement settles
+    which book is right. A copied end has exactly one remedy -- measure the deployed version again -- so this is
+    the list the escalation names, and a version verified after its first sighting is not stale at all: the
+    measurement is newer than the objection, and the objection is about the record, not about the number.
+    """
+    checks = {int(promotion.version): promotion.verification for promotion in promotions}
+    stale: List[Dict[str, Any]] = []
+    for row in rows:
+        if row.get("broken"):
+            continue
+        if float(row.get("age_days") or 0.0) < float(grace_days):
+            continue
+        first = _parse_moment(row.get("first_seen"))
+        verification = checks.get(int(row.get("version") or 0))
+        checked = _parse_moment((verification or {}).get("checked_at"))
+        if checked and (first is None or checked >= first):
+            continue
+        stale.append(dict(row))
+    return stale
 
 # How long a recorded verdict speaks for the claim. A check is evidence about the day it ran: a `holds`
 # from a year ago and an `unmeasurable` from last March are both statements nobody has tested since, and

@@ -2638,6 +2638,10 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
 
 LINK_DEFECTS = ("mismatch", "unretired", "dangling")
 
+#: Round 86: how long a copied end may stand before `--strict` asks for the one command that clears it. Kept
+#: here as well as in `promote` so the page and the gate read the same number without an import cycle.
+IN_FORCE_GRACE_DAYS = 14.0
+
 # Round 83: the mark a repaired end carries. A `legacy` link is repaired by copying the retirement's claim
 # into the successor record, which makes both ends say the same thing -- so the mark has to say *how* they
 # came to agree, or the next audit will treat a copied statement as a second witness.
@@ -3287,6 +3291,13 @@ class Audit:
     # that a repair copied. Round 84 refused to *stack* a promise there; once a version is applied that refusal
     # is not available, so the fact is reported here instead -- and charged when the two books contradict.
     in_force: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 86: disputes this run no longer sees. A fact that stopped being true is reported once -- by name --
+    # and then forgotten, so the page never remembers a standing debt that has cleared.
+    in_force_cleared: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 86: the copies that have stood past the grace period with no verdict newer than the objection. The
+    # judgement is made once, by `stale_in_force_disputes`, and handed to both the page and the gate; deciding it
+    # twice is how the page came to promise a charge the gate did not make.
+    in_force_stale: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def broken_links(self) -> int:
@@ -3351,7 +3362,9 @@ class Audit:
 
 
 def audit(root: Path, rules: Optional[EvolveRules] = None,
-          in_force: Optional[Sequence[Mapping[str, Any]]] = None) -> Audit:
+          in_force: Optional[Sequence[Mapping[str, Any]]] = None,
+          in_force_cleared: Optional[Sequence[Mapping[str, Any]]] = None,
+          in_force_stale: Optional[Sequence[Mapping[str, Any]]] = None) -> Audit:
     """Re-decide every stored round under `rules` and report what moves.
 
     No measurement is re-run and no Laya call is made: this answers "do the records still say what this
@@ -3414,7 +3427,9 @@ def audit(root: Path, rules: Optional[EvolveRules] = None,
                  entries=entries, retired=retired,
                  links=replacement_links(history(root, include_retired=True)),
                  backfilled=backfilled_links(history(root, include_retired=True)),
-                 in_force=[dict(item) for item in (in_force or [])])
+                 in_force=[dict(item) for item in (in_force or [])],
+                 in_force_cleared=[dict(item) for item in (in_force_cleared or [])],
+                 in_force_stale=[dict(item) for item in (in_force_stale or [])])
 
 
 def _limit_terms(limits: Optional[Mapping[str, Any]]) -> Optional[Tuple[Optional[float],
@@ -3692,12 +3707,32 @@ def _link_lines(result: Audit) -> List[str]:
         # remains is the fact plus the same split -- a contradiction is a defect, a copied end is a debt.
         lines.append("%d version(s) in force sit on a record whose provenance the books dispute:"
                      % len(result.in_force))
+        stale_keys = {(str(item.get("domain") or "default"), int(item.get("version") or 0))
+                      for item in result.in_force_stale}
         for item in result.in_force:
-            lines.append("  %-16s v%03d  %-13s %s" % (item.get("domain") or "default",
-                                                      int(item.get("version") or 0),
-                                                      item.get("kind"), item.get("detail")))
+            age = item.get("age_days")
+            seen = ("" if age is None else
+                    "  [first seen %.1f day(s) ago, seen %d time(s)]"
+                    % (float(age), int(item.get("observations") or 0)))
+            if (str(item.get("domain") or "default"), int(item.get("version") or 0)) in stale_keys:
+                seen += "  [stale: no verdict newer than the objection]"
+            lines.append("  %-16s v%03d  %-13s %s%s" % (item.get("domain") or "default",
+                                                       int(item.get("version") or 0),
+                                                       item.get("kind"), item.get("detail"), seen))
         lines.append("A version is deployed, so refusing to stack it is no longer available. A contradiction is")
         lines.append("still a build defect (`--strict` exits 2); a copied end is a debt, named here, not charged.")
+        if result.in_force_stale:
+            lines.append("%d copy(ies) have stood longer than %.0f day(s) with no verdict newer than the"
+                         % (len(result.in_force_stale), IN_FORCE_GRACE_DAYS))
+            lines.append("objection, so `--strict` asks for a re-measurement of the deployed version: that is the")
+            lines.append("one command that clears it.")
+    if result.in_force_cleared:
+        lines.append("%d version(s) in force are no longer disputed, and the ledger forgets them now:"
+                     % len(result.in_force_cleared))
+        for item in result.in_force_cleared:
+            lines.append("  %-16s v%03d  %-13s (first seen %s)"
+                         % (item.get("domain") or "default", int(item.get("version") or 0),
+                            item.get("kind"), item.get("first_seen")))
     return lines
 
 

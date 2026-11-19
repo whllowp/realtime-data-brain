@@ -94,10 +94,13 @@ from .promote import (
     current_state,
     domain_slug,
     format_promotions,
+    IN_FORCE_GRACE_DAYS,
     in_force_disputes,
     in_force_overrides,
     legacy_state_note,
     load_promotions,
+    observe_in_force_disputes,
+    stale_in_force_disputes,
     promotions_for_domain,
     provenance_block,
     revert_promotion,
@@ -284,7 +287,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  limit_drift: int = 0, max_limit_drift: Optional[float] = None,
                  ceiling_missing: int = 0, ceiling_rounds: int = 0, ceiling_payable: int = 0,
                  max_ceiling_debt: Optional[float] = None,
-                 broken_links: int = 0, in_force: int = 0) -> int:
+                 broken_links: int = 0, in_force: int = 0,
+                 in_force_stale: int = 0) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -332,6 +336,16 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("%d version(s) in force sit on a replacement link whose two ends contradict each other, so a"
                % in_force)
         _print("deployed configuration inherits the contradiction. `--audit` names the version and the link.")
+    if in_force_stale:
+        # Round 86: a copied end is a debt with exactly one remedy -- measuring the deployed version again -- so
+        # an aged one is charged, and the charge names that command. Before the grace period it stays a report:
+        # the note is new, and a check that fails on the first sighting teaches nothing about what changed.
+        _print("")
+        _print("%d version(s) in force have sat on a copied record for longer than the %.0f-day grace period"
+               % (in_force_stale, IN_FORCE_GRACE_DAYS))
+        _print("with no re-measurement newer than the objection, so --strict exits 1:")
+        _print("`brian evolve --verify --verify-version <n> --stream-file <the file that version measured>`")
+        _print("clears it, because the copy is about the record, not about the number.")
     if broken_links:
         return 2
     if unreconstructable:
@@ -496,7 +510,7 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     ceiling_capped = (max_ceiling_debt is not None and ceiling_missing
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
-                 or ceiling_capped) else 0
+                 or ceiling_capped or in_force_stale) else 0
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -1474,10 +1488,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # its record's link breaks (a retirement or a repair recorded afterwards). The rows are computed once,
     # before any branch, so the campaign page, the audit page and the gate cannot disagree about them.
     try:
-        in_force_rows = in_force_disputes(root)
+        in_force_rows, in_force_cleared = observe_in_force_disputes(root, in_force_disputes(root))
     except OSError:
-        in_force_rows = []
+        in_force_rows, in_force_cleared = [], []
     in_force_broken = sum(1 for item in in_force_rows if item.get("broken"))
+    try:
+        in_force_stale_rows = stale_in_force_disputes(in_force_rows, load_promotions(root))
+    except OSError:
+        in_force_stale_rows = []
 
     if getattr(args, "max_limit_drift", None) is not None and not (args.audit or args.campaign):
         # Round 68: a flag that only one mode reads must say so, otherwise it is inert in every other mode and
@@ -2108,7 +2126,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         try:
             result = campaign_result(root, rules, expiry_days=args.expiry_days,
                                      refusal_expiry_days=horizon, limits=limits_view,
-                                     in_force=in_force_rows)
+                                     in_force=in_force_rows, in_force_cleared=in_force_cleared,
+                                     in_force_stale=in_force_stale_rows)
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
@@ -2182,7 +2201,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             ceiling_missing=ceiling_missing, ceiling_rounds=ceiling_rounds,
                             ceiling_payable=ceiling_payable,
                             max_ceiling_debt=getattr(args, "max_ceiling_debt", None),
-                            broken_links=result.broken_links, in_force=in_force_broken)
+                            broken_links=result.broken_links, in_force=in_force_broken,
+                            in_force_stale=len(in_force_stale_rows))
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -2219,7 +2239,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         rules = _rules_from_args(args)
         horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
         try:
-            result = audit(root, rules, in_force=in_force_rows)
+            result = audit(root, rules, in_force=in_force_rows,
+                           in_force_cleared=in_force_cleared, in_force_stale=in_force_stale_rows)
         except OSError as error:
             _print("cannot audit %s: %s" % (root / EVOLVE_DIR, error))
             return 2
@@ -2314,7 +2335,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             ceiling_missing=ceiling_missing, ceiling_rounds=ceiling_rounds,
                             ceiling_payable=ceiling_payable,
                             max_ceiling_debt=getattr(args, "max_ceiling_debt", None),
-                            broken_links=result.broken_links, in_force=in_force_broken)
+                            broken_links=result.broken_links, in_force=in_force_broken,
+                            in_force_stale=len(in_force_stale_rows))
 
     if args.grade:
         try:
