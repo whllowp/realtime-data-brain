@@ -920,9 +920,19 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                          "rest were deduced later from the ledger" % int(record.get("written") or 0))
         files = record.get("by_file")
         if isinstance(files, Mapping) and files:
+            last = record.get("last_by_file")
+            last = last if isinstance(last, Mapping) else {}
+            # Round 91: the count says how often a file answered; the date says whether it is still the evidence
+            # a reader would go and open. A file that answered once a year ago and one that answered yesterday
+            # read the same in a bare count.
             lines.append("links             clearings by stream file: %s"
-                         % "; ".join("%s %d" % (name, int(count))
+                         % "; ".join("%s %d (last %s)" % (name, int(count), str(last.get(name) or "unknown"))
                                      for name, count in sorted(files.items())))
+        gone = record.get("evidence_missing")
+        if isinstance(gone, Mapping) and int(gone.get("missing") or 0):
+            lines.append("links             %d clearing(s) name a file this checkout cannot open: %s"
+                         % (int(gone.get("missing") or 0),
+                            ", ".join(str(name) for name in gone.get("missing_files") or [])))
         domains = record.get("by_domain")
         if isinstance(domains, Mapping) and len(domains) > 1:
             lines.append("links             clearings by domain: %s"

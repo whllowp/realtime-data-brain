@@ -154,7 +154,8 @@ def test_the_summary_keeps_the_two_kinds_apart():
     entries = [
         {"by": CLEARED_BY_MEASUREMENT, "age_days": 2.0, "domain": "smd"},
         {"by": CLEARED_BY_MEASUREMENT, "age_days": 4.0, "domain": "smd",
-         "cited_by": "measurement", "stream_path": "data/smd/stream-one.json"},
+         "cited_by": "measurement", "stream_path": "data/smd/stream-one.json",
+         "checked_at": "2026-11-19T20:00:00+00:00"},
         {"by": CLEARED_BY_LEDGER, "age_days": 9.0, "domain": "rcaeval-re1-ob"},
     ]
     summary = cleared_summary(entries)
@@ -162,7 +163,8 @@ def test_the_summary_keeps_the_two_kinds_apart():
                        "median_age_days": 4.0, "trimmed": 0, "written": 1, "untested": 0,
                        "by_domain": {"rcaeval-re1-ob": {"measured": 0, "unexplained": 1},
                                      "smd": {"measured": 2, "unexplained": 0}},
-                       "by_file": {"(unnamed)": 1, "data/smd/stream-one.json": 1}}
+                       "by_file": {"(unnamed)": 1, "data/smd/stream-one.json": 1},
+                       "last_by_file": {"data/smd/stream-one.json": "2026-11-19T20:00:00+00:00"}}
 
 
 def test_the_page_says_what_cleared_it(tmp_path):

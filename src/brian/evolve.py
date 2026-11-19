@@ -2638,6 +2638,13 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
 
 LINK_DEFECTS = ("mismatch", "unretired", "dangling")
 
+#: Whether the file a citation names could be opened when the citation was written (round 91). Declared here
+#: because `promote.py` imports this module: a constant the page and the writer must agree on cannot live on the
+#: side that would close the cycle.
+EVIDENCE_PRESENT = "present"
+EVIDENCE_MISSING = "missing"
+EVIDENCE_UNNAMED = "unnamed"
+
 #: Round 86: how long a copied end may stand before `--strict` asks for the one command that clears it. Kept
 #: here as well as in `promote` so the page and the gate read the same number without an import cycle.
 IN_FORCE_GRACE_DAYS = 14.0
@@ -3766,11 +3773,16 @@ def _link_lines(result: Audit) -> List[str]:
                 by += " (written by that measurement)"
             age = item.get("age_days")
             attempt = int(item.get("attempt") or 0)
-            lines.append("  %-16s v%03d  %-13s (first seen %s%s, cleared by %s%s)"
+            # Round 91: an entry written against a file this checkout cannot open is marked where it is listed,
+            # because the row above still claims the debt was answered.
+            missing = item.get("evidence") == EVIDENCE_MISSING
+            lines.append("  %-16s v%03d  %-13s (first seen %s%s, cleared by %s%s%s)"
                          % (item.get("domain") or "default", int(item.get("version") or 0),
                             item.get("kind"), item.get("first_seen"),
                             "" if age is None else ", stood %.1f day(s)" % float(age), by,
-                            "" if not attempt else ", attempt %d" % attempt))
+                            "" if not attempt else ", attempt %d" % attempt,
+                            "" if not missing else "  [evidence missing: %s]"
+                            % (item.get("stream_path") or "")))
         attempted = [item for item in result.in_force_cleared if item.get("tested") is False]
         if attempted:
             lines.append("%d clearing(s) rested on a check that ran and could not test the claim, so they"

@@ -4776,7 +4776,7 @@ links             clearings by domain: rcaeval-re1-ob 0 by measurement, 1 withou
 **边界 187：当场就能写下的事实要当场写，并标明是自己写的。** 事后从时间戳反推的引用依赖账簿两端都还在；写下 `cited_by` 之后，读的人能分清"量出来的"和"推出来的"。
 
 
-## 3.95 比不了，不等于答过了
+### 3.95 比不了，不等于答过了
 
 第 88 轮让 `--verify` 在跑完之后写清账记录，于是"红灯为什么灭"有了出处。但那次实现只看了一件事：
 `record_clearing` 被调用过。于是 `unmeasurable` 也清账——而这正是本轮实测里发生的事：3 个窗口的流
@@ -4929,6 +4929,69 @@ links             clearings by stream file: (unnamed) 1
 **边界 193：没有名字的测量必须被印成"没有名字"。** 空字段会被读成"当时不需要测量"，而那是页面替旧
 记录编出来的事实。
 
+
+### 3.97 凭据本身也会过期：结账时看一次，读的时候再看一次
+
+第 90 轮让每一笔结账都写出证据（文件 + 时间 + 第几次）。这一轮问一个更基本的问题：**那份文件还在吗？**
+
+两个方向都得查，而且必须查在不同的时刻。
+
+**写的时候查**：`record_clearing` 先算 `evidence = _evidence_state(root, stream_path)`（`present` / `missing` /
+`unnamed`），把它存进条目，并把"是否真的答过"改成 `tested = tested and evidence != missing`。文件名打错、
+流被移走、绝对路径来自另一台机器——这些情况下这条记录不是答案，是尝试：观察行留在 `in_force.json` 里，
+`untested` 里记下 `evidence`，下一次审计照旧催。这和第 89 轮"比不了不等于答过了"是同一条规矩的第二次应用：
+**一次失败的开脱不能把时钟重置。**
+
+**读的时候再查**：`clearing_evidence(entries, root)` 只看当前 checkout，返回
+`{present, missing, unnamed, missing_files}`，**不写回存储**。理由写在函数的 docstring 里：这是"读者手上这份
+checkout"的事实，不是"结账那一刻"的事实；把它存下来，记录就会随着文件系统变化悄悄变旧（边界 194）。存进去的
+`evidence` 是历史，算出来的 `missing` 是现在，两个都要出现，谁也不许覆盖谁。
+
+三个页面各说自己的那一段：
+
+- `--verify` 说这一次结账（第 90 轮的 `answered on <file>`），文件不在就压根不会有这一行；
+- `--history` 说链条：`clearings` 块列出每笔的版本、`attempt`、时间、判定与文件，条目文件不在就追加
+  `[evidence missing]`，另起一行 `evidence  N of them name a file this checkout cannot open: …`；
+- `--campaign` 说总计：`clearings by stream file: <file> N (last <date>)`，加一行
+  `links  N clearing(s) name a file this checkout cannot open: <files>`。
+
+现场证据（`var/demo90/answerable`，先结账一笔，再把它凭据的文件改名）：
+
+```
+clearings        1 recorded clearing(s); each names the measurement that earned it:
+evidence         1 of them name a file this checkout cannot open: data/smd/stream-real.json
+  v020  attempt 1  2026-11-19T20:36:48+00:00  failed        data/smd/stream-real.json  [evidence missing]
+```
+
+```
+links             clearings by stream file: data/smd/stream-real.json 1 (last 2026-11-19T20:36:48+00:00)
+links             1 clearing(s) name a file this checkout cannot open: data/smd/stream-real.json
+```
+
+文件还在时，同一页只打印 `(last …)`，没有第二行——"缺"和"暂时都在"必须是两句话，这是第 76 轮"跳过的族要说
+出来"的同一课，只是这次的对象变成了凭据。
+
+**现场发现的第三个缺陷**：`--verify --stream-file data/smd/stream-real.json` 在文件被移走后不是报错，而是一个
+`FileNotFoundError` 的 traceback（`load_stream_file` 从 `_evolve_streams` 里抛出来）。写时检查永远走不到，
+因为它要先测完才写；而且异常退出码是 1，和"检查没通过"撞车。修法是测量之前先 `Path(args.stream_file).is_file()`，
+不在就报错、把版本记录里那份文件作为建议一并打印，退出 2：
+
+```
+cannot read data/smd/stream-real.json: no such file
+the promise records the file it was measured on: data/smd/stream-one.json
+a measurement on a file this checkout cannot open answers nothing, so nothing was cleared:
+pass --stream-file naming a file that still exists, or restore the one above.
+```
+
+**边界 194：关于"今天这份 checkout"的事实只能算，不能存。** 存进去的那一刻它是真的，之后每删一个文件它就
+悄悄变成假的，而记录不会自己更新；存下来的应当是"当时我看见它在那儿"，读的时候再算一次"现在还看得见吗"，
+两句话分开写。
+
+**边界 195：凭据打不开的结账只是尝试，不是答案。** 承认一笔债需要能被打开的证据；打不开就等于没测，观察行
+必须留下、时钟不能重置。
+
+**边界 196：命令的输入也是判断的一部分。** 一个不存在的输入必须在测量之前被报告，而不是以异常结束——异常既
+没有说出补救办法，又把"输入错了"和"检查没通过"混成同一个退出码。
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
@@ -5248,7 +5311,12 @@ missing for the next level
 在收尾行点名文件，`--history` 印出整条链，`--campaign` 按流文件分开计数，旧条目印 `(unnamed stream)`
 而不是留空。见 3.96 节与边界 191/192/193。
 
-77. 让清账链能被"证据还在不在"驱动：现在每条 `cleared` 记着它凭的 `stream_path` 与 `attempt`，但没人
-    检查那份文件是否还躺在磁盘上。下一步在 `--verify` 结账前先确认路径存在（不存在就记成"证据缺失"
-    而不再算"已清"），并让 `--campaign` 给每份流文件印出"最后一次凭它结账"的时间，好看出哪份证据已经
-    很久没人用。
+77. 结账条目已经"有凭据"（第 90 轮给了 `stream_path` 和 `attempt`），但没有检查那份凭据在这个 checkout
+    上是否还打得开。第 91 轮加上写时检查（`record_clearing` 发现文件不存在就记成"证据缺失"的尝试，而不是
+    成功结账）和读时检查（`clearing_evidence`），让 `--history` / `--campaign` / `--audit` 各自说出自己那一
+    段；还发现指名一个不存在的 `--stream-file` 会让 `--verify` 直接抛 `FileNotFoundError`，改成先报错再测量。
+    下一个：让 `--verify` 在指名的文件消失时用记录里的文件重测（并把这次替换写进结账条目），以及让
+    `--campaign` 打印"证据缺失最久的那一笔"。
+
+78. 让 `--verify` 在指名的文件消失时，用记录里写的那份文件重测（把"换了哪份凭据"写进结账条目），
+    并让 `--campaign` 打印"证据缺失最久的那一笔"——缺得最久的那一笔最可能是唯一没人看过的那一笔。

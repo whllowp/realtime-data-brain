@@ -96,6 +96,7 @@ from .promote import (
     format_promotions,
     IN_FORCE_GRACE_DAYS,
     cleared_summary,
+    clearing_evidence,
     in_force_disputes,
     in_force_history,
     in_force_overrides,
@@ -1518,6 +1519,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     except OSError:
         in_force_history_rows, in_force_trimmed = [], 0
     in_force_record = cleared_summary(in_force_history_rows, trimmed=in_force_trimmed)
+    # Round 91: which cited files are gone is a fact about this checkout, not about the write, so it is
+    # computed once here and carried into both pages that print it.
+    in_force_evidence = clearing_evidence(in_force_history_rows, root)
+    in_force_record = dict(in_force_record, evidence_missing=in_force_evidence)
 
     if getattr(args, "max_limit_drift", None) is not None and not (args.audit or args.campaign):
         # Round 68: a flag that only one mode reads must say so, otherwise it is inert in every other mode and
@@ -1688,14 +1693,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             chains: Dict[int, List[Dict[str, Any]]] = {}
             for entry in clearing_rows:
                 chains.setdefault(int(entry.get("version") or 0), []).append(entry)
+            evidence = in_force_evidence
             _print("clearings        %d recorded clearing(s); each names the measurement that earned it:"
                    % len(clearing_rows))
+            if int(evidence.get("missing") or 0):
+                _print("evidence         %d of them name a file this checkout cannot open: %s"
+                       % (int(evidence.get("missing") or 0),
+                          ", ".join(str(name) for name in evidence.get("missing_files") or [])))
             for version in sorted(chains):
                 for entry in sorted(chains[version], key=lambda item: str(item.get("checked_at") or "")):
-                    _print("  v%03d  attempt %-2d %s  %-13s %s"
+                    _print("  v%03d  attempt %-2d %s  %-13s %s%s"
                            % (version, int(entry.get("attempt") or 0),
                               str(entry.get("checked_at") or ""), str(entry.get("verdict") or ""),
-                              str(entry.get("stream_path") or "(unnamed stream)")))
+                              str(entry.get("stream_path") or "(unnamed stream)"),
+                              "  [evidence missing]" if str(entry.get("stream_path") or "")
+                              and not (root / str(entry.get("stream_path"))).is_file() else ""))
         for index, record in enumerate(rounds, start=1):
             baseline_row = record.get("baseline") or {}
             measured = baseline_row.get("tokens_per_report")
@@ -2630,6 +2642,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     _print("stream file    %s  (named by %s)"
                            % (resolved, ", ".join("v%03d" % item.version for item in by_path[resolved])))
                     args.stream_file = resolved
+        if args.stream_file and not Path(args.stream_file).is_file():
+            # Round 91: a citation is only as good as the file behind it. The promise records the file it was
+            # measured on, so the remedy can name one that exists instead of repeating the argument that just
+            # failed. A traceback here said "the file is missing" in the most expensive possible way.
+            _print("cannot read %s: no such file" % args.stream_file)
+            recorded = sorted({str(item.stream_path or "") for item in load_promotions(root)} - {""})
+            if recorded:
+                _print("the promise records the file it was measured on: %s" % ", ".join(recorded))
+            _print("a measurement on a file this checkout cannot open answers nothing, so nothing was cleared:")
+            _print("pass --stream-file naming a file that still exists, or restore the one above.")
+            return 2
         settings, streams, source, _overrides = _evolve_streams(args, settings)
         domain = source
         # A promise is a statement about one dataset (boundary 33), so a stream only re-checks the

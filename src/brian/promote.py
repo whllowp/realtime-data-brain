@@ -42,8 +42,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .config import ENV_VARS, Settings
 from .deploy import overrides_from_state
-from .evolve import (LINK_DEFECTS, Candidate, EvolveRules, Measurement, backfilled_links,
-                     history, replacement_links)
+from .evolve import (EVIDENCE_MISSING, EVIDENCE_PRESENT, EVIDENCE_UNNAMED, LINK_DEFECTS, Candidate,
+                     EvolveRules, Measurement, backfilled_links, history, replacement_links)
 
 GEOMETRY_TOLERANCE = 0.25
 
@@ -212,6 +212,45 @@ CLEARED_CITED_BY_MEASUREMENT = "measurement"
 CLEARED_CITED_BY_AUDIT = "audit"
 
 
+def _evidence_state(root: Path, stream_path: str) -> str:
+    """Whether the file this citation is about to name can be opened (round 91).
+
+    A clearing is a claim about a measurement, and the measurement is a file. If the file is gone, the claim
+    cannot be audited -- and a claim nobody can audit is not how a debt gets paid, it is how one disappears. So a
+    missing file makes the entry an attempt rather than an answer: the observation keeps its clock.
+    """
+    path = str(stream_path or "")
+    if not path:
+        return EVIDENCE_UNNAMED
+    return EVIDENCE_PRESENT if (root / path).is_file() else EVIDENCE_MISSING
+
+
+def clearing_evidence(entries: Sequence[Mapping[str, Any]], root: Path) -> Dict[str, Any]:
+    """Read-time check: which named files can no longer be opened today.
+
+    Round 90 made every citation name its file. A file can be deleted afterwards, and nothing writes that down --
+    the fact is about the checkout a reader has, not about the moment the clearing happened. So this is computed
+    on demand and never stored (boundary 194).
+    """
+    present = missing = unnamed = 0
+    missing_files: List[str] = []
+    for item in entries:
+        path = str(item.get("stream_path") or "")
+        if not path:
+            unnamed += 1
+            continue
+        if (root / path).is_file():
+            present += 1
+        else:
+            missing += 1
+            if path not in missing_files:
+                missing_files.append(path)
+    return {"present": present, "missing": missing, "unnamed": unnamed,
+            "missing_files": sorted(missing_files)}
+
+
+
+
 def _read_in_force_store(root: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
     path = _in_force_path(root)
     if not path.is_file():
@@ -372,6 +411,10 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
     (`stream_path`) and the ordinal of that attempt in this version's chain. Without the file, "cleared by
     a re-measurement on 2026-11-19" is a claim a reader can neither open nor refute; without the ordinal, a
     chain that was cleared, re-disputed and cleared again reads exactly like one cleared once.
+
+    Round 91: a citation is only as good as the file behind it. If `stream_path` names something this checkout
+    cannot open, the entry is recorded as an attempt (`evidence: "missing"`, `tested: false`) and the row keeps
+    running -- the check ran, but nobody can audit what it read (boundary 195).
     """
     moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
     observed, cleared_history, trimmed = _read_in_force_store(root)
@@ -384,6 +427,7 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             continue
         first = str(item.get("first_seen") or "")
         first_moment = _parse_moment(first)
+        evidence = _evidence_state(root, stream_path)
         entry = {
             "domain": str(item.get("domain") or "default"), "version": int(version),
             "kind": str(item.get("kind") or ""), "first_seen": first,
@@ -396,7 +440,8 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             "checked_at": moment.isoformat(),
             "cited_by": CLEARED_CITED_BY_MEASUREMENT,
             "verdict": str(verdict or ""),
-            "tested": bool(tested),
+            "evidence": evidence,
+            "tested": bool(tested) and evidence != EVIDENCE_MISSING,
             "stream_path": str(stream_path or ""),
             # Round 90: the ordinal counts what this version's chain already holds, so an attempt is a
             # position in a history rather than a loose fact.
@@ -407,12 +452,13 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             entry["reason"] = str(reason)
         entries.append(entry)
         cleared_history.append(entry)
-        if not tested:
-            # Recorded, not answered: the row stays observed with its clock running (round 89).
+        if not tested or evidence == EVIDENCE_MISSING:
+            # Recorded, not answered: the row stays observed with its clock running (rounds 89 and 91).
             attempted = dict(item)
             attempted["untested"] = {"at": moment.isoformat(), "verdict": str(verdict or ""),
                                      "reason": str(attempt_reason or reason or ""),
-                                     "stream_path": str(stream_path or "")}
+                                     "stream_path": str(stream_path or ""),
+                                     "evidence": evidence}
             keep.append(attempted)
     if not entries:
         return []
@@ -452,13 +498,19 @@ def cleared_summary(entries: Sequence[Mapping[str, Any]], trimmed: int = 0) -> D
     # Round 90: which file did the answering. A count per stream is the same reason round 80 split the
     # paid families: a total over two streams cannot say which one stopped being measured.
     by_file: Dict[str, int] = {}
+    last_by_file: Dict[str, str] = {}
     for item in measured:
         key = str(item.get("stream_path") or "(unnamed)")
         by_file[key] = by_file.get(key, 0) + 1
+        # Round 91: a count says how often a file answered; the date says whether it is still the evidence
+        # anyone uses. Two files with one clearing each read the same unless the age is printed next to them.
+        stamp = str(item.get("checked_at") or "")
+        if stamp > last_by_file.get(key, ""):
+            last_by_file[key] = stamp
     return {"total": len(entries), "measured": len(measured), "unexplained": len(unexplained),
             "median_age_days": round(middle, 2), "trimmed": int(trimmed),
             "written": written, "untested": untested, "by_domain": dict(sorted(by_domain.items())),
-            "by_file": dict(sorted(by_file.items()))}
+            "by_file": dict(sorted(by_file.items())), "last_by_file": dict(sorted(last_by_file.items()))}
 
 
 def stale_in_force_disputes(rows: Sequence[Mapping[str, Any]], promotions: Sequence["Promotion"],
