@@ -1040,6 +1040,19 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         if int(record.get("written") or 0):
             lines.append("links             %d of those clearings were written by the measurement itself; the "
                          "rest were deduced later from the ledger" % int(record.get("written") or 0))
+        # Round 102: a clearing earned by a queued run and one earned by a hand-typed command leave the same
+        # verdict; what differs is whether anyone retyped an identifier, which is the habit the queue exists to
+        # remove (boundary 221). Entries from before this round carry no field, so they are counted apart rather
+        # than folded into either side (round 79).
+        queued = int(record.get("queued") or 0)
+        unstated = int(record.get("unstated_queue") or 0)
+        by_hand = int(record.get("total") or 0) - queued - unstated
+        if int(record.get("total") or 0):
+            line = "links             %d clearing(s) were produced by the queue, %d by a hand-typed command" % (
+                queued, by_hand)
+            if unstated:
+                line += "; %d were written before the store recorded it" % unstated
+            lines.append(line)
         files = record.get("by_file")
         if isinstance(files, Mapping) and files:
             last = record.get("last_by_file")

@@ -1765,6 +1765,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     # event from another re-check, and the chain is where a reader goes to see the order.
                     if entry.get("first_original"):
                         mark += "  [first verdict at the origin]"
+                    # Round 102: say how the check was started. A queued run and a hand-typed one leave the same
+                    # verdict behind; only the record can tell a reader whether anyone had to retype an identifier.
+                    if entry.get("queued") is True:
+                        mark += "  [from the queue]"
                     _print("  v%03d  attempt %-2d %s  %-13s %s%s"
                            % (version, int(entry.get("attempt") or 0),
                               str(entry.get("checked_at") or ""), str(entry.get("verdict") or ""),
@@ -2676,12 +2680,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # on the file they were born with, each on that file, in the queue's order. Every one of them is a check
         # the page already named -- the point is that nobody has to retype a version label or a path, because a
         # retyped path is how a check lands on the substitute (round 99, boundary 218).
-        from_queue = int(getattr(args, "from_queue", 0) or 0)
-        if from_queue and (args.verify_withheld or getattr(args, "withheld_stream", None)):
+        # Round 102: `None` means "this command was not asked to walk the queue", `0` means "walk it only in
+        # imagination" -- a plan is the first thing a batch command should be able to show (boundary 175).
+        from_queued = getattr(args, "from_queue", None)
+        from_queue = int(from_queued or 0)
+        if from_queued is not None and (args.verify_withheld or getattr(args, "withheld_stream", None)):
             _print("--from-queue runs the origin queue; --verify-withheld re-measures refusals. "
                    "Pass one, not both: they answer different questions about different records.")
             return 2
-        if from_queue:
+        if from_queued is not None:
             if int(getattr(args, "verify_version", 0) or 0):
                 _print("--from-queue already names the versions to check; drop --verify-version so the queue "
                        "decides which promises are measured.")
@@ -2697,6 +2704,22 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("no promise in the queue can be measured here: %d record(s) hold no verdict on the file "
                        "they were born with, and none of those files is in this checkout." % len(queued))
                 return 0
+            if from_queued is not None and not from_queue:
+                # Round 102: a plan, not a measurement. It lists exactly the records `--from-queue N` would walk, in
+                # the queue's order, so the caller can read the shape before spending anything.
+                chosen = runnable
+                _print("from queue       %d of %d runnable promise(s) hold no verdict on the file they were born "
+                       "with; --from-queue 0 only lists them" % (len(chosen), len(runnable)))
+                for row in chosen:
+                    _print("  v%03d  <-  %s  (never measured where this promise was made)"
+                           % (int(row.get("version") or 0), str(row.get("origin") or "")))
+                if skipped:
+                    _print("                 %d left out: the file they were born with is not in this checkout"
+                           % skipped)
+                _print("")
+                _print("nothing was measured. Run the same command with --from-queue N to measure the first N of "
+                       "them on the files they were born with.")
+                return 0
             chosen = runnable[:max(1, from_queue)]
             _print("from queue       %d of %d runnable promise(s) hold no verdict on the file they were born "
                    "with; measuring each on its own origin" % (len(chosen), len(runnable)))
@@ -2710,7 +2733,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("")
                 _print("---- v%03d  <-  %s  (never measured where this promise was made)" % (version, origin))
                 inner = argparse.Namespace(**vars(args))
-                inner.from_queue = 0
+                inner.from_queue = None
+                # Round 102: the inner check is told it was started by the queue, so the clearing it writes says so.
+                inner.queued_run = True
                 inner.verify_version = version
                 # The file is the point: it is the record's own origin, not the record's current path and not
                 # whatever `--stream-file` happened to say.
@@ -3065,7 +3090,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                                tested=verdict != UNMEASURABLE,
                                                attempt_reason=why, stream_path=checked_path,
                                                substituted_from=substituted_from,
-                                               first_original=first_original))
+                                               first_original=first_original,
+                                               queued=bool(getattr(args, "queued_run", False))))
         answered = [entry for entry in cleared_now if entry.get("tested") is not False]
         attempted = [entry for entry in cleared_now if entry.get("tested") is False]
         if answered:
@@ -4390,7 +4416,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--verify", action="store_true",
                         help="re-measure every unverified promotion and revert the ones whose claim "
                              "no longer holds, then exit")
-    evolve.add_argument("--from-queue", type=int, default=0, metavar="N",
+    evolve.add_argument("--from-queue", type=int, default=None, metavar="N",
                         help="with --verify: measure the first N promises that hold no verdict on the file "
                              "they were born with, each on that file, in the queue's order")
     evolve.add_argument("--verify-version", type=int, default=0,

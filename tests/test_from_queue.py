@@ -114,7 +114,10 @@ def test_the_inner_check_is_told_the_origin_not_the_stream_file_the_caller_passe
     assert len(inner) == 1
     assert inner[0].verify_version == 20
     assert inner[0].stream_file == FILE
-    assert inner[0].from_queue == 0
+    # Round 102: the inner check is handed `None` (not 0, which would mean "list the queue and stop") and is told
+    # that this run came from the queue, so the clearing it writes says so.
+    assert inner[0].from_queue is None
+    assert inner[0].queued_run is True
     assert "---- v020  <-  %s  (never measured where this promise was made)" % FILE in out
 
 

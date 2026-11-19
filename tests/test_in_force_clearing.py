@@ -161,6 +161,9 @@ def test_the_summary_keeps_the_two_kinds_apart():
     summary = cleared_summary(entries)
     assert summary == {"total": 3, "measured": 2, "unexplained": 1,
                        "median_age_days": 4.0, "trimmed": 0, "written": 1, "untested": 0,
+                       # Round 102: none of these entries records how the check was started, so they are all
+                       # counted as "unstated" rather than assumed to have been typed by hand.
+                       "queued": 0, "unstated_queue": 3,
                        "by_domain": {"rcaeval-re1-ob": {"measured": 0, "unexplained": 1},
                                      "smd": {"measured": 2, "unexplained": 0}},
                        "by_file": {"(unnamed)": 1, "data/smd/stream-one.json": 1},

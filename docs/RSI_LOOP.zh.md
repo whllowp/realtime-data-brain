@@ -5517,6 +5517,63 @@ origin_queue: {"records": 1, "by_file": {"data/smd/stream-real.json": 1},
 **边界 223：多条检查只报一个退出码时，必须取最坏的那个，否则调用者读到的汇总会盖住构建缺陷。**
 
 
+### 3.108 同一句结论，两种来路：清账要说出它是不是队列跑出来的
+
+第 101 轮让队列可以被执行。这带来一个此前无法表达的事实：这笔清账是**队列**跑出来的，还是**人手抄**着版本号和路径
+跑出来的？结论一模一样，差别在于有没有人重抄过一个标识符——而那正是替换件溜回来的地方（边界 221）。所以这一轮让
+清账记录自己的来路。
+
+`record_clearing(..., queued=)` 把 `queued` 写进条目：`True` 表示 `--from-queue` 挑的这条，`False` 表示调用者自己
+写下了版本和文件，字段**缺失**表示这条记录写在这个字段存在之前。三种状态分开数，因为把缺失折进任何一边都是让默认值
+替读者作答（第 79 轮的规则）。
+
+`--history` 在对应行尾加 `[from the queue]`，`--campaign` 多一句：
+
+```
+links             1 clearing(s) were produced by the queue, 0 by a hand-typed command
+```
+
+人手跑一次，同一句变成：
+
+```
+links             0 clearing(s) were produced by the queue, 1 by a hand-typed command
+```
+
+**这句在没有任何队列清账时也要印**。第一版只在"队列跑过"或"有老记录没写字段"时印，于是全手抄的账本上这一行干脆
+不存在——而缺失的一行会被读成"没有这个事实"，不是"没有一条来自队列"（边界 162 又出现一次，这次出现在一个"分列"
+里）。
+
+另外，`--from-queue 0` 现在只**列出**队列，不量任何东西：
+
+```
+from queue       1 of 1 runnable promise(s) hold no verdict on the file they were born with; --from-queue 0 only lists them
+  v020  <-  data/smd/stream-real.json  (never measured where this promise was made)
+
+nothing was measured. Run the same command with --from-queue N to measure the first N of them on the files they were born with.
+```
+
+实跑（`var/demo100`）：`--from-queue 1 --accept-copied` 之后，`--history` 的 clearing 行是
+
+```
+v020  attempt 1  2026-11-19T23:43:50+00:00  failed  data/smd/stream-real.json  [first verdict at the origin]  [from the queue]
+```
+
+而同一份账本改用 `--verify-version 20 --stream-file …` 手抄跑一遍，行尾只有 `[first verdict at the origin]`，两个标记
+是两件独立的事，所以它们各印各的。
+
+**这里踩到一个"0 被当成假"的坑**：`from_queue` 既是"是否进入队列模式"又是"跑几条"，而 `0` 在 Python 里是假值。第一版
+用 `if from_queue:` 守这个分支，于是 `--from-queue 0` 直接跳过整个队列段，落进普通 `--verify`（没有版本、没有文件），
+退出码 1。修法是把"是否在场"和"取什么值"分开：`from_queued is not None` 才进入队列段，`int(from_queued or 0)` 才是
+上限。测试里那条 `--from-queue 0` 的用例正是靠这个错误才写出来的。
+
+**边界 224：结论不会因为命令是手打的还是队列跑的就变，但"有没有人重抄过标识符"是另一个事实，而它恰恰预测替换——
+所以必须记下来，否则"同一条结论"会把替换的来路抹平。**
+**边界 225：计划和执行必须可分辨：`--from-queue 0` 只列不量，而"没有给值"不能被读成 0——一个同时表示"是否进入"和
+"跑几条"的参数，必须用在场的标志和数值本身分开判断。**
+**边界 226：一个分列必须把零印出来：全手抄的账本要写"0 … 1"，因为缺行会被读成"没有这个事实"而不是"没有一条来自
+队列"。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5904,5 +5961,11 @@ missing for the next level
     `left out` 而不是丢弃；上限写成 `N of M runnable`；每条内部用**记录自己的**原件路径，而不是当前的 `stream_path`
     也不是调用者的 `--stream-file`；多条检查取最坏退出码（2 比 1 比 0）。实跑见 §3.107，`tests/test_from_queue.py` 11 条。
 
-88. 让"跑过队列"留下痕迹：`--from-queue` 跑完要在 `--history` 的 clearing 行上标出"这条结论来自队列"（`queued: true`），
-    并让 `--campaign` 分列"队列跑出来的结论"和"手工抄路径跑出来的结论"；再让 `--from-queue 0` 只打印会跑哪些、不真的去量。
+88. 完成：让"跑过队列"留下痕迹。`record_clearing(..., queued=)` 把来路写进条目（`True` 队列、`False` 手抄、字段缺失 =
+    本轮之前写的），`cleared_summary` 分出 `queued` / `unstated_queue` 三态，`--history` 行尾加 `[from the queue]`，
+    `--campaign` 印 `N clearing(s) were produced by the queue, M by a hand-typed command`（全手抄时也要印 0），
+    `--from-queue 0` 只列队列不测量。实跑见 §3.108，`tests/test_queued_clearing.py` 11 条。
+
+89. 让"队列跑过"能接到部署上：`--from-queue` 跑完把"这次队列执行"本身记成一条记录（时间、跑了几条、最坏退出码、
+    被跳过的几份原件），让 `--campaign` 能说"最近一次队列执行是何时、跑了几条、其中几条留了结论"，并让
+    `--from-queue N` 在遇到第一条 `contradiction`（退出 2）时停下来，把剩下的几条列出来而不是继续跑。

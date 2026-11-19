@@ -407,7 +407,8 @@ def in_force_history(root: Path) -> Tuple[List[Dict[str, Any]], int]:
 def record_clearing(root: Path, version: int, now: Optional[datetime] = None, verdict: str = "",
                     reason: str = "", tested: bool = True,
                     attempt_reason: str = "", stream_path: str = "",
-                    substituted_from: str = "", first_original: bool = False
+                    substituted_from: str = "", first_original: bool = False,
+                    queued: bool = False
                     ) -> List[Dict[str, Any]]:
     """Write the clearing a measurement just earned, instead of waiting for a later audit to notice absence.
 
@@ -439,6 +440,11 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
     so the entry names what was asked for (`substituted_from`) beside what was read (`stream_path`): a verdict
     is about a file, and a reader who cannot see the file changed will read one stream's answer as another's
     (boundary 197).
+
+    Round 102: a clearing also says how the check that earned it was started. `--verify --from-queue N` walks the
+    queue and measures each record on the file it was born with; a run typed by hand copies a label and a path off a
+    page, and that copy is exactly what the queue exists to remove. The verdict is the same either way; what differs
+    is whether anyone had to retype an identifier, which is the thing that lands checks on substitutes (boundary 221).
     """
     moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
     observed, cleared_history, trimmed = _read_in_force_store(root)
@@ -471,6 +477,9 @@ def record_clearing(root: Path, version: int, now: Optional[datetime] = None, ve
             # Round 100: a clearing can be the first verdict ever taken where the promise was made, and the
             # history page has to be able to say so -- the fact otherwise lives only in the version file.
             "first_original": bool(first_original),
+            # Round 102: how the check was started. `True` when `--from-queue` picked this record, `False` when a
+            # caller typed the version and the path, and absent on entries written before this round.
+            "queued": bool(queued),
             # Round 90: the ordinal counts what this version's chain already holds, so an attempt is a
             # position in a history rather than a loose fact.
             "attempt": 1 + sum(1 for prior in cleared_history
@@ -543,7 +552,13 @@ def cleared_summary(entries: Sequence[Mapping[str, Any]], trimmed: int = 0) -> D
         named = str(item.get("substituted_from") or "")
         if named:
             substitutions[named] = substitutions.get(named, 0) + 1
+    # Round 102: did the queue start this check, or did a hand-copied command? An entry written before this round
+    # carries no field at all, and silence is its own state -- folding it into either side lets the default pick the
+    # answer (round 79's rule).
+    queued = sum(1 for item in entries if item.get("queued") is True)
+    unstated = sum(1 for item in entries if "queued" not in item)
     return {"total": len(entries), "measured": len(measured), "unexplained": len(unexplained),
+            "queued": queued, "unstated_queue": unstated,
             "median_age_days": round(middle, 2), "trimmed": int(trimmed),
             "written": written, "untested": untested, "by_domain": dict(sorted(by_domain.items())),
             "by_file": dict(sorted(by_file.items())), "last_by_file": dict(sorted(last_by_file.items())),
