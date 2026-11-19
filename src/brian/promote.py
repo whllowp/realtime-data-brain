@@ -1530,15 +1530,25 @@ def set_stream_path(root: Path, version: int, stream_path: str,
     payload = json.loads(path.read_text(encoding="utf-8"))
     before = str(payload.get("stream_path") or "")
     if before == wanted:
-        return {"version": int(version), "from": before, "to": wanted, "changed": False}
+        return {"version": int(version), "from": before, "to": wanted, "changed": False, "returned": False}
     payload["stream_path"] = wanted
     history = payload.get("stream_path_history")
     history = list(history) if isinstance(history, list) else []
-    history.append({"from": before, "to": wanted, "at": _stamp_moment(now).isoformat(),
-                    "why": str(why or "the file the record named does not exist in this checkout")})
+    origin = str(history[0].get("from") or "") if history else ""
+    # Round 97: moving back to the file the promise was born with is not another repair, it is the end of a trip.
+    # The command knows it is a return and says so itself, because a caller writing `why` by hand would have to
+    # know the record's whole history to phrase it, and a reader cannot tell "moved again" from "moved back".
+    returned = bool(origin) and wanted == origin and before != wanted
+    note = str(why or ("the original file the record first named is back in this checkout: this move returns the "
+                       "promise to it" if returned
+                       else "the file the record named does not exist in this checkout"))
+    entry = {"from": before, "to": wanted, "at": _stamp_moment(now).isoformat(), "why": note}
+    if returned:
+        entry["return"] = True
+    history.append(entry)
     payload["stream_path_history"] = history
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
-    return {"version": int(version), "from": before, "to": wanted, "changed": True}
+    return {"version": int(version), "from": before, "to": wanted, "changed": True, "returned": returned}
 
 
 def stream_path_history(root: Path, version: int) -> List[Dict[str, Any]]:
@@ -1636,8 +1646,17 @@ def repaired_paths(root: Path) -> List[Dict[str, Any]]:
         # repair moved it, so the campaign can say how much of the evidence describes a moved target.
         checks = [payload.get("verification")] + list(payload.get("checks") or [])
         after = sum(1 for item in checks
-                    if isinstance(item, Mapping) and int(item.get("stream_path_moves") or 0) > 0)
+                    if isinstance(item, Mapping) and int(item.get("stream_path_moves") or 0) > 0
+                    and not item.get("on_original_path"))
         origin = str(moves[0].get("from") or "")
+        # Round 97: a move back to the original file ends the trip. The record is then in place again, while the
+        # evidence it holds may still describe the substitute -- two facts that must not be folded into one.
+        returned = len(moves) > 1 and str(moves[-1].get("to") or "") == origin
+        returned_at = str(moves[-1].get("at") or "") if returned else ""
+        on_original = [str(item.get("checked_at") or "") for item in checks
+                       if isinstance(item, Mapping) and item.get("on_original_path")]
+        newest = max(on_original) if on_original else ""
+        checked_after_return = newest if returned and newest and newest >= returned_at else ""
         rows.append({"version": version,
                      "moves": moves,
                      "first_from": origin,
@@ -1647,6 +1666,9 @@ def repaired_paths(root: Path) -> List[Dict[str, Any]]:
                      # measured on is back in this checkout, the record can be pointed at it again and measured
                      # there -- a fact an operator can act on, so the pages say it (boundary 209).
                      "origin_exists": bool(origin) and (root / origin).is_file(),
+                     "returned": returned,
+                     "returned_at": returned_at,
+                     "checked_after_return": checked_after_return,
                      "checks_on_repair": after,
                      "in_force": version in deployed})
     return rows

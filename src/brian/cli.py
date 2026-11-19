@@ -1357,12 +1357,21 @@ def format_history_paths(items: List[Mapping[str, Any]]) -> List[str]:
         return []
     lines = ["stream paths     %d record(s) have had their measured file rewritten by hand:" % len(items)]
     for item in items:
-        back = "  (the original file is back: %s)" % str(item.get("first_from") or "") \
-            if item.get("origin_exists") else ""
-        lines.append("  v%03d  %s -> %s  (%d move(s), last %s)%s%s"
-                     % (int(item.get("version") or 0), str(item.get("first_from") or "(unrecorded)"),
-                        str(item.get("to") or "(unrecorded)"), len(item.get("moves") or []),
-                        str(item.get("at") or "unknown"),
+        origin = str(item.get("first_from") or "")
+        # Round 97: a returned record is one round trip, not two unrelated moves. The chain is printed whole --
+        # origin -> substitute -> origin -- because a reader who sees only the last pair cannot tell a return from
+        # a second repair (boundary 204's rule, applied to the direction of the move).
+        chain = [origin or "(unrecorded)"] + [str(move.get("to") or "(unrecorded)")
+                                              for move in item.get("moves") or []]
+        if item.get("returned"):
+            when = "round trip: %d move(s), returned %s" % (len(item.get("moves") or []),
+                                                            str(item.get("returned_at") or "unknown"))
+            back = ""
+        else:
+            when = "%d move(s), last %s" % (len(item.get("moves") or []), str(item.get("at") or "unknown"))
+            back = "  (the original file is back: %s)" % origin if item.get("origin_exists") else ""
+        lines.append("  v%03d  %s  (%s)%s%s"
+                     % (int(item.get("version") or 0), " -> ".join(chain), when,
                         "  [in force]" if item.get("in_force") else "", back))
     return lines
 
@@ -2494,6 +2503,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                                         change["from"] or "(unrecorded)", change["to"]))
             _print("                recorded in the version's stream_path_history, so the change is visible")
             _print("                to anyone who reads the promise. Nothing was re-measured by this call.")
+            if change.get("returned"):
+                # Round 97: the trip back ends here. Saying so at the moment it happens keeps a reader from
+                # counting it as a second repair, and from reading the old verdicts as if they had been taken
+                # on the file the record now names (boundary 211).
+                _print("                this one is a return: the record is back on the file the promise was")
+                _print("                born with, while the evidence it holds was measured on the substitute.")
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps({"stream_path": change}, indent=2, sort_keys=False) + "\n")
@@ -2806,11 +2821,24 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             path_moves = promotion.path_moves
             checked_here = str(getattr(args, "stream_file", None) or "")
             on_original = bool(path_moves) and same_stream_path(checked_here, promotion.path_origin)
+            # Round 97: after a return the record names the original again, so "origin -> current" prints the
+            # same file twice. The chain of the trip is the honest description, and whether the trip is closed
+            # decides which sentence about the check is true.
+            back_home = bool(path_moves) and same_stream_path(promotion.path_origin, promotion.path_current)
             if path_moves:
-                _print("  v%03d  %s  path rewritten %d time(s) by hand: %s -> %s"
+                chain = " -> ".join([promotion.path_origin or "(unknown)"] +
+                                    [str(move.get("to") or "(unknown)")
+                                     for move in promotion.stream_path_history])
+                _print("  v%03d  %s  path rewritten %d time(s) by hand%s: %s"
                        % (promotion.version, promotion.change, path_moves,
-                          promotion.path_origin or "(unknown)", promotion.path_current or "(unknown)"))
-                if on_original:
+                          " and back on the original" if back_home else "", chain))
+                if on_original and back_home:
+                    # Round 97: the record already points at the file this check is standing on. Saying it
+                    # "still points at the repair" would contradict the line above it, and the verdicts it
+                    # already holds were taken elsewhere (boundary 212).
+                    _print("        this check measures the file the record names again after the trip back; "
+                           "the verdicts it already holds were taken on the substitute (boundary 212)")
+                elif on_original:
                     # Round 96: the same page must not claim the check is standing on the repair when it is
                     # standing on the file the promise was born with (boundary 190: the sentence and the
                     # mechanism move together).

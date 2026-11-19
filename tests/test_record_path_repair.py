@@ -105,7 +105,7 @@ def test_set_stream_path_records_the_move(tmp_path):
     _copied(tmp_path)
     (tmp_path / OTHER).write_text("{}", encoding="utf-8", newline="\n")
     change = set_stream_path(tmp_path, 20, OTHER, now=NOW)
-    assert change == {"version": 20, "from": FILE, "to": OTHER, "changed": True}
+    assert change == {"version": 20, "from": FILE, "to": OTHER, "changed": True, "returned": False}
     payload = _version_payload(tmp_path)
     assert payload["stream_path"] == OTHER
     assert payload["stream_path_history"] == [{"from": FILE, "to": OTHER, "at": NOW.isoformat(),

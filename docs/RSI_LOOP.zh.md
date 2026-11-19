@@ -5237,6 +5237,55 @@ stream path     v020  data/smd/stream-real.json -> data/smd/stream-moved.json
 **边界 210：** 同一句判决在两种位置上含义不同。`failed` 在原件上跑出来的意思是"这个承诺不成立"，在替身上跑出来
 可能是"替身与原件不同"——所以两种位置的判决必须能被分开读，而不是共用一个词和一个标记。
 
+### 3.103 指回原件不是又一次修复：一次往返，以及"位置复原了、证据没有"
+
+第 96 轮教会了页面：原件可能回来，并且给出了把记录指回去的命令。它没说清的是，运维真的执行那条命令之后会发生什么。
+
+`--set-stream-path` 把这次回归记成了"又一次迁移"。于是 `--history` 打出第二条"迁移"，`--campaign` 仍然把这条记录描述成"在一个修复过的位置上"，而记录一旦指回原件，读起来就像那条承诺在原件上又被回答过一次——尽管它持有的判定几乎全部是在替代件上取到的（边界 210：同一个词在两个位置上是两件事）。
+
+**改了什么。** 三处，都围绕"这条记录的旅程"：
+
+1. `set_stream_path` 自己判断这是不是一次回归：读 `stream_path_history[0]["from"]`，如果目标等于它、且和当前值不同，`returned = True`，并把 `why` 写成"原名文件已回到这个检出里：这次迁移把承诺指回它"，同时在该条历史里写 `"return": True`。**理由不是省事**：调用者手写 `why` 时看不见记录的形状，只有命令自己知道"这是回归"还是"又迁了一次"（边界 211）。
+2. `repaired_paths` 现在给出 `returned` / `returned_at` / `checked_after_return`，并且 `checks_on_repair` **不再把站在原件上的检查算作"在修复位置上取的判定"**——同一份判定不能同时属于两个位置。
+3. `--history` 把整段旅程读成一行（`a -> b -> a  (round trip: 2 move(s), returned <时刻>)`），`--campaign` 则把"位置复原"和"证据没复原"分成两句：没有任何检查站在原件上时，它点名 `--verify` 那条命令；有检查站上去之后，它改成"a check has measured it there since the return (<时刻>)`。
+
+**实测（`var/demo95`，记录已迁到 `data/smd/stream-moved.json`，原件 `data/smd/stream-real.json` 已恢复）。**
+
+```
+$ python -m brian.cli evolve --set-stream-path v020=data/smd/stream-real.json
+stream path     v020  data/smd/stream-moved.json -> data/smd/stream-real.json
+                recorded in the version's stream_path_history, so the change is visible
+                to anyone who reads the promise. Nothing was re-measured by this call.
+                this one is a return: the record is back on the file the promise was
+                born with, while the evidence it holds was measured on the substitute.
+```
+
+`--history`：
+
+```
+stream paths     1 record(s) have had their measured file rewritten by hand:
+  v020  data/smd/stream-real.json -> data/smd/stream-moved.json -> data/smd/stream-real.json  (round trip: 2 move(s), returned 2026-11-19T21:46:09.219326+00:00)
+```
+
+`--campaign`（还没有检查站在原件上）：
+
+```
+links             1 record(s) had their measured file rewritten by hand and are back on the file the promise was made on: v020 (round trip of 2 move(s)) -- the trip is closed, and what has been measured there since is stated below
+links             v020's record is back on its original file data/smd/stream-real.json, but no check has stood there since the return: the location is restored, the evidence is not -- brian evolve --verify --verify-version 020 --stream-file data/smd/stream-real.json
+```
+
+照着那行跑一次之后（`FAILED and reverted`，判定写在原件上）：
+
+```
+links             v020's record is back on its original file data/smd/stream-real.json, and a check has measured it there since the return (2026-11-19T21:57:50+00:00)
+```
+
+**三个读数。**
+
+1. **"指回去"和"改过一次"在记录里长得一样，除非命令自己说。** 第一次实现里 `--set-stream-path` 对往返和再迁移写同一句 `why`，`--history` 于是打出两条并列的"迁移"，读者只能靠时刻顺序去猜哪条是回程——而按时刻排序是推断，不是记录（边界 169 的老账）。
+2. **位置复原 ≠ 证据复原。** 记录指回原件后，它历史里的 `verification` 仍是在替代件上取的；`--campaign` 如果只说"已经回到原位"，读起来就是"又重新回答过了"。所以那句话必须把两件事分开说，并且**在没有任何检查站上去时点名那条命令**（边界 185：诊断指名的命令必须真的能跑）。
+3. **判定不能同时属于两个位置。** `checks_on_repair` 原本把任何带 `stream_path_moves` 的检查都算进去，包括站在原件上的那次；同一条判定被两边各数一次，读者就会以为替代件也被验证过。现在原件上的检查只进 `checked_after_return`。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5592,6 +5641,10 @@ missing for the next level
     `[measured on the original path]`（与 `[measured on the repaired path]` 互斥）（第 96 轮）。
 
 
-83. 让"把记录指回原件"这一步本身留下痕迹：`--set-stream-path` 指回原件时在 `stream_path_history` 里注明这是一次
-    **回归**（`why` 由命令自己写，而不是调用者随手写），并在 `--history` 上把"迁移 -> 回归"读成一条完整的往返，
-    而不是两条无关的迁移；同时让 `--campaign` 说明这条记录现在站回原位、但**证据还没有**回到原位（除非之后重验过）。
+83. "把记录指回原件"是一次往返，不是又一次修复：`--set-stream-path` 指回原件时把 `stream_path_history` 里那一条
+    注成一次**回归**，`why` 由命令自己写（不是调用者手写），`--history` 把"迁移 -> 回归"读成一条往返，
+    `--campaign` 把"位置复原了"和"证据还没复原"分开说。**已完成（第 97 轮）**：实测见 §3.103。
+
+84. 让 `--verify` 在一条往返记录上区分"这次判定取在原件上"和"这条承诺此前只有替代件上的证据"：
+    `verification` 里除了 `on_original_path`，再记录 `prior_evidence_paths`（此前判定分别取在哪些文件上），
+    并让 `--campaign` 说清"回到原位之后，这条承诺的证据有几份来自原件、几份来自替代件"。

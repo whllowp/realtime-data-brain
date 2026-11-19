@@ -914,13 +914,43 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # Round 94: a repaired location is not an original one. Counted apart and named, because a reader who
         # cannot see that the path was rewritten will read the promise as having been made on the file it now
         # names (boundary 203).
-        named = ", ".join("v%03d moved %d time(s)" % (int(item.get("version") or 0), len(item.get("moves") or []))
-                          for item in moves)
-        lines.append("links             %d record(s) have a rewritten stream path: %s -- the location is a repair,"
-                     " not the original measurement, and `brian evolve --history` prints each move"
-                     % (len(moves), named))
+        # Round 97: a record that went out and came back is not still "on a repair". Counting it in the
+        # sentence that says "the location is a repair, not the original measurement" would contradict the
+        # line printed two lines below it, and the page would argue with itself (round 60's rule).
+        back_home = [item for item in moves if item.get("returned")]
+        elsewhere = [item for item in moves if not item.get("returned")]
+        if elsewhere:
+            named = ", ".join("v%03d moved %d time(s)" % (int(item.get("version") or 0),
+                                                          len(item.get("moves") or []))
+                              for item in elsewhere)
+            lines.append("links             %d record(s) have a rewritten stream path: %s -- the location is a "
+                         "repair, not the original measurement, and `brian evolve --history` prints each move"
+                         % (len(elsewhere), named))
+        if back_home:
+            named = ", ".join("v%03d (round trip of %d move(s))"
+                              % (int(item.get("version") or 0), len(item.get("moves") or []))
+                              for item in back_home)
+            lines.append("links             %d record(s) had their measured file rewritten by hand and are back "
+                         "on the file the promise was made on: %s -- the trip is closed, and what has been "
+                         "measured there since is stated below" % (len(back_home), named))
         for item in moves:
-            if item.get("origin_exists"):
+            version = int(item.get("version") or 0)
+            if item.get("returned"):
+                # Round 97: the location is restored, the evidence is not. A record pointed back at its original
+                # file still holds verdicts taken on the substitute, and saying "back in place" without that
+                # would read as "answered again".
+                if item.get("checked_after_return"):
+                    lines.append("links             v%03d's record is back on its original file %s, and a check "
+                                 "has measured it there since the return (%s)"
+                                 % (version, str(item.get("first_from") or ""),
+                                    str(item.get("checked_after_return") or "")))
+                else:
+                    lines.append("links             v%03d's record is back on its original file %s, but no check "
+                                 "has stood there since the return: the location is restored, the evidence is not "
+                                 "-- brian evolve --verify --verify-version %03d --stream-file %s"
+                                 % (version, str(item.get("first_from") or ""), version,
+                                    str(item.get("first_from") or "")))
+            elif item.get("origin_exists"):
                 # Round 96: the repair may no longer be necessary. Naming the command matters, because a reader
                 # who is told "the original file is back" but not how to use it has been told a suspicion.
                 lines.append("links             v%03d's original file %s is back in this checkout: the record can "
