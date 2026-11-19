@@ -4363,6 +4363,59 @@ paid by domain    RCAEval RE1-OB 1 ceiling; SMD 1 file
 **边界 169：一条关系写在记录的一边，就要在两边都能读出来。**把"谁替换了谁"只印在被替换的那一行，读者就得拿时间戳配对；配对是推断，而推断会错。
 
 
+
+### 3.87 一条关系有两个作者：链接交叉校验，以及为什么只有三种不一致进闸门
+
+第 66 轮把同一条关系印在了两页上：被重跑的轮写 `[retired, re-measured as round-new.json]`，付款的轮写 `[replacing round-other.json]`。两句话都应该对，但它们由**两个不同的命令**写：退休是一个命令（`--retire` 或重跑队列里的 `retire()`），付账是另一个命令（重跑队列的 `persist()`）。中间没有任何代码比较它们。于是账簿可以同时写下"round-old 被 round-new 取代"和"round-new 取代了 round-other"，两句话不可能同时为真，而第 66 轮的页面会把它们都印成事实。
+
+第 81 轮把两端读出来、放在一起比，只做这一件事。
+
+**四种不一致，三种收费。** `replacement_links(records)` 只读 `history(include_retired=True)`，返回 `{round, names, kind, detail}`：
+
+| kind | 条件 | 是否收费 |
+|---|---|---|
+| `mismatch` | 后继说它取代了 P，而 P 的 `retired.re_measured_as` 指的不是它 | 收 |
+| `unretired` | 后继说它取代了 P，而 P 身上没有任何退休标记 | 收 |
+| `dangling` | 任一端指向的轮不在账簿里 | 收 |
+| `legacy` | 被退休的轮指向的后继没有 `queue` 块（第 78 轮之前写的，或手写的 `--retire --re-measured-as`） | 不收 |
+
+`legacy` 不收，理由与第 33 轮 `legacy` / `missing` 的分法相同：那一端**没法补写**。第 78 轮之前的后继记录根本没有 `queue.paid_round` 这个字段，回填只能是编造。把它计费，`--strict` 会永远红着，然后没人再跑它（边界 171）。但它是历史，不是事实：`--audit` 单独印一段 `N replacement link(s) have no successor-side record …`，`LINK_DEFECTS` 里不含它。
+
+**页面与闸门。** `--history` 顶部先给一句总数，然后把一个发现涉及的两行都标出来：
+
+```
+links             1 replacement link(s) disagree with their other end: round-new.json
+ 2  …  [retired, re-measured as round-new.json]  [data/smd/stream-one.json]  [broken link: mismatch with round-new.json]
+ 3  …  [paid by the file queue]  [replacing round-other.json]  [broken link: mismatch with round-other.json]
+```
+
+`--json-out` 里多了 `links`，与页面同源。`--audit` 在**两条路径**上都印（"每个判定都还成立" 的早退路径与正常路径）：一个账簿缺陷不应该只在有别的判定要重算时才出现。`--audit --strict` 退出 2：
+
+```
+1 replacement link(s) disagree, so the two ends of the relation cannot both be true:
+  round-new.json             mismatch  round-other.json: the successor names round-other.json, but round-old.json names it as its successor
+A link is written by a command; a broken one means the books contradict each other and re-deciding
+under today's rules cannot settle it. `--strict` charges these as a build defect.
+1 replacement link(s) disagree: the retired record and the successor name different rounds,
+or one end points at a round the ledger does not hold. The two ends cannot both be true, and
+no re-deciding settles it, so --strict exits 2. `--audit` names each one.
+```
+
+退出 2 而不是 1，是第 33 轮定的规矩：重新判定（`--rejudge`）能改变的进 1，重新判定永远解决不了的进 2。一条链接两边矛盾，重算今天的规则不会让它们一致——它只会再算出一份新的、同样可能矛盾的记录。
+
+**遗留的含糊。** 上面的例子里有三份记录参与：`round-old` 说"我被 `round-new` 取代"，`round-new` 说"我取代了 `round-other`"，`round-other` 说"我被 `round-new` 取代"。发现被归到 `round-new`（后继）与 `round-other`（它声称取代的轮）这一对上，`round-old` 只在 `detail` 里被点名、没有被标记。因为"谁提名了同一个后继"需要从**所有**记录里反向收集，而 `replacement_links` 现在的形状是 `{round, names}`，装不下第三个参与者。这不是错，是形状不够：下一次可以让 `names` 变成列表，把提名者一起标出来。
+
+三个读法：
+
+- **一条关系有两个作者，就必须有一处比较。** 两边都写下来，不等于两边都被核对过；两个命令各写一半、没人对账的"事实"，其实是两条互不相关的声明（边界 170）。
+- **补不回来的那一端是历史，不能收费。** 计费的前提是有人能付；对一笔没人能付的账收费，结果是闸门被关掉（边界 171，与第 72 轮同一条）。
+- **缺陷要印在两条路径上。** `--audit` 的早退路径最容易漏印——那正是读者最相信"没事"的一句。
+
+**边界 170：一条关系有两个作者、却没有一处比较，它不是一条事实，而是两条声明；既然账簿把两端都存下来了，就必须比较它们。**
+
+**边界 171：一端无法补写的不一致属于历史，不能进闸门——否则闸门永远是红的，然后没人再跑它。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -4658,4 +4711,7 @@ missing for the next level
 
 66. **（3.86 已完成）** → `--campaign` 把已付的族按 `queue.paid` 拆开（`paid by domain`，JSON 为 `queue_paid_by_domain`）；`--history` 对被队列付过的轮标出它的前身（`queue.paid_round` → `[replacing …]`），没有写前身的不补猜。
 
-67. 让 `--history` 的 `[replacing …]` 与 `[retired, re-measured as …]` 互相校验：一条关系只写了一边、或两边写成不同的轮时，`--audit --strict` 把它当作账簿缺陷报出来（kind `broken-link`），而不是让页面各印各的。
+67. **（3.87 已完成）** → `--history` 的 `[replacing …]` 与 `[retired, re-measured as …]` 互相校验：`replacement_links()` 分 `mismatch` / `unretired` / `dangling` / `legacy` 四种，前三种由 `--audit --strict` 以退出码 2 计入账簿缺陷，`legacy`（第 78 轮之前写的后继无法补写）只印不收费；`--history` 标出发现涉及的两行，`--json-out` 带 `links`。
+
+68. → 让链接校验反过来也能被用起来：`--verify` / `--promote` 拒绝在一份链接已断（`broken_links` 非空）的记录上叠加承诺；`--rerun-unrecorded` 给 `legacy` 的一端正一次名（后继记录补写 `queue.paid_round`），把"补不回来"变成"补一次就不再有"；并把 `replacement_links` 的 `names` 改成列表，让被同一个后继取代的**所有**提名者都被标出来（§3.87 末尾的含糊）。
+

@@ -63,6 +63,7 @@ from .evolve import (
     reader_scores,
     record_withheld_check,
     rejudge,
+    replacement_links,
     retire,
     round_limits_text,
     run_round,
@@ -276,7 +277,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  drain_ceilings: Optional[Mapping[str, Any]] = None,
                  limit_drift: int = 0, max_limit_drift: Optional[float] = None,
                  ceiling_missing: int = 0, ceiling_rounds: int = 0, ceiling_payable: int = 0,
-                 max_ceiling_debt: Optional[float] = None) -> int:
+                 max_ceiling_debt: Optional[float] = None,
+                 broken_links: int = 0) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -301,11 +303,22 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     """
     if not strict:
         return 0
+    if broken_links:
+        # Round 81: the two ends of a replacement relation are written by two different commands, and
+        # neither checks the other. A ledger whose books contradict each other cannot be repaired by
+        # re-deciding under today's rules, so this is a build defect (exit 2), like `inconsistent`.
+        _print("")
+        _print("%d replacement link(s) disagree: the retired record and the successor name different "
+               "rounds," % broken_links)
+        _print("or one end points at a round the ledger does not hold. The two ends cannot both be true, and")
+        _print("no re-deciding settles it, so --strict exits 2. `--audit` names each one.")
     if inconsistent:
         _print("")
         _print("%d comparison(s) cannot be reconstructed in records that carry the geometry and still lack "
                "the reference:" % inconsistent)
         _print("that is a defect in this build, so --strict exits 2.")
+        return 2
+    if broken_links:
         return 2
     if unreconstructable:
         _print("")
@@ -470,7 +483,6 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
                  or ceiling_capped) else 0
-
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -1559,6 +1571,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         today_limits = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
                                     drain_ceiling, drain_ceilings, flag_drain_ceilings)
         recorded_limits = [record for record in rounds if record.get("limits")]
+        # Round 81: the replacement links, checked once for the whole page. Both ends of a relation are
+        # printed here (the retired row says what replaced it, the successor says what it replaced), so this
+        # is the one page where a disagreement is visible to a reader who does not already suspect one.
+        link_rows = replacement_links(rounds)
+        link_defects = [item for item in link_rows if item.get("kind") in ("mismatch", "unretired", "dangling")]
+        if link_defects:
+            _print("links             %d replacement link(s) disagree with their other end: %s"
+                   % (len(link_defects), ", ".join(sorted({str(item["round"]) for item in link_defects}))))
+        else:
+            _print("links             every replacement link agrees with the other end it names")
         _print("ceilings          %d of %d round(s) record the wait ceilings they were judged under; %d do not"
                % (len(recorded_limits), len(rounds), len(rounds) - len(recorded_limits)))
         history_rows: List[Dict[str, Any]] = []
@@ -1628,6 +1650,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 replaced = str(queue_entry.get("paid_round") or "")
                 if replaced:
                     mark += "  [replacing %s]" % replaced
+            # Round 81: a link that disagrees with its other end is marked on both of the rows it names, so a
+            # reader who starts at either row sees it without consulting the header.
+            own_name = str(record.get("round") or record.get("finished_at") or "")
+            for item in link_defects:
+                other = ""
+                if str(item.get("round")) == own_name:
+                    other = str(item.get("names"))
+                elif str(item.get("names")) == own_name:
+                    other = str(item.get("round"))
+                if other:
+                    mark += "  [broken link: %s with %s]" % (item.get("kind"), other)
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
@@ -1656,6 +1689,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if getattr(args, "json_out", None):
             Path(args.json_out).write_text(_json({
                 "rounds": history_rows,
+                "links": link_rows,
                 "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
                              "payable": ceiling_payable, "by_domain": ceiling_rows},
             }), encoding="utf-8")
@@ -2104,7 +2138,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             max_limit_drift=_drift_cap(args, drift),
                             ceiling_missing=ceiling_missing, ceiling_rounds=ceiling_rounds,
                             ceiling_payable=ceiling_payable,
-                            max_ceiling_debt=getattr(args, "max_ceiling_debt", None))
+                            max_ceiling_debt=getattr(args, "max_ceiling_debt", None),
+                            broken_links=result.broken_links)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -2235,7 +2270,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             max_limit_drift=_drift_cap(args, drift),
                             ceiling_missing=ceiling_missing, ceiling_rounds=ceiling_rounds,
                             ceiling_payable=ceiling_payable,
-                            max_ceiling_debt=getattr(args, "max_ceiling_debt", None))
+                            max_ceiling_debt=getattr(args, "max_ceiling_debt", None),
+                            broken_links=result.broken_links)
 
     if args.grade:
         try:

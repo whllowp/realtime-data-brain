@@ -2549,6 +2549,81 @@ def retirement_overlap(root: Path, retired: str, successor: Optional[str]) -> Di
             "successor_readable": True}
 
 
+def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Every replacement the ledger claims, checked against the other side of the link (round 81).
+
+    A retirement writes one end of a relation (`retired.re_measured_as`) and the re-run queue writes the
+    other (`queue.paid_round`). Both ends are claims by a command; neither is a check on the other, so a
+    record can name a successor that never named it back, or two records can name each other's predecessors
+    differently. Until this function existed the pages printed each side's own version and nobody compared
+    them.
+
+    Four outcomes, and only three are defects:
+
+    - `mismatch` — the successor says it replaced P, and P says it was re-measured as something else.
+    - `unretired` — the successor says it replaced P, and P carries no retirement mark at all.
+    - `dangling` — a link names a round the ledger does not hold.
+    - `legacy` — the retired round names a successor that records no `queue` block: successors written
+      before round 78 (and copies made by hand with `--retire --re-measured-as`) cannot name their
+      predecessor, so this end was unbackfillable rather than wrong.
+
+    `kind` is the charge, not the shape: `--strict` exits 2 on the first three (a build defect) and warns on
+    `legacy`, exactly as round 33 split its two debts.
+    """
+    names = {str(record.get("round") or "") for record in rounds}
+    by_name = {str(record.get("round") or ""): record for record in rounds}
+    findings: List[Dict[str, Any]] = []
+
+    for record in rounds:
+        successor = str(record.get("round") or "")
+        retired = record.get("retired")
+        if not isinstance(retired, Mapping):
+            continue
+        claimed = str(retired.get("re_measured_as") or "")
+        if not claimed:
+            continue
+        if claimed not in names:
+            findings.append({"round": successor, "names": claimed, "kind": "dangling",
+                             "detail": "the retired round names a successor the ledger does not hold"})
+            continue
+        # The successor's own end of the link, if it wrote one.
+        link = (by_name[claimed].get("queue") or {})
+        if not isinstance(link, Mapping) or not link:
+            findings.append({"round": successor, "names": claimed, "kind": "legacy",
+                             "detail": "the successor predates the queue's `paid_round` field"})
+            continue
+        named = str(link.get("paid_round") or "")
+        if not named:
+            findings.append({"round": successor, "names": claimed, "kind": "legacy",
+                             "detail": "the successor was written by a command that did not record what "
+                                       "it replaced"})
+            continue
+        if named != successor:
+            findings.append({"round": claimed, "names": named, "kind": "mismatch",
+                             "detail": "the successor names %s, but %s names it as its successor"
+                                       % (named, successor)})
+
+    for record in rounds:
+        successor = str(record.get("round") or "")
+        link = record.get("queue")
+        if not isinstance(link, Mapping):
+            continue
+        named = str(link.get("paid_round") or "")
+        if not named:
+            continue
+        if named not in names:
+            findings.append({"round": successor, "names": named, "kind": "dangling",
+                             "detail": "the successor names a round the ledger does not hold"})
+            continue
+        if not isinstance(by_name[named].get("retired"), Mapping):
+            findings.append({"round": successor, "names": named, "kind": "unretired",
+                             "detail": "the successor says it replaced a round that was never retired"})
+    return findings
+
+
+LINK_DEFECTS = ("mismatch", "unretired", "dangling")
+
+
 def _round_name(name: str) -> str:
     return name if name.endswith(".json") else "%s.json" % name
 
@@ -3063,6 +3138,20 @@ class Audit:
     entries: List[Dict[str, Any]] = field(default_factory=list)
     # Rounds the ledger still holds but no longer asks the mechanism to answer for (round 34).
     retired: int = 0
+    # Round 81: the replacement links the ledger claims, each checked against the other side. Kept apart
+    # from `entries` because a broken link is not a verdict that moved: it says the books disagree with
+    # each other, which no amount of re-deciding under today's rules can fix.
+    links: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def broken_links(self) -> int:
+        """Links where both sides exist and disagree, or one side points at nothing (round 81)."""
+        return sum(1 for item in self.links if item.get("kind") in LINK_DEFECTS)
+
+    @property
+    def link_legacy(self) -> int:
+        """Links whose successor end could not have been written (pre-round-78 records)."""
+        return sum(1 for item in self.links if item.get("kind") == "legacy")
 
     @property
     def moved(self) -> int:
@@ -3161,7 +3250,8 @@ def audit(root: Path, rules: Optional[EvolveRules] = None) -> Audit:
                 "cross": cross,
             })
     return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials,
-                 entries=entries, retired=retired)
+                 entries=entries, retired=retired,
+                 links=replacement_links(history(root, include_retired=True)))
 
 
 def _limit_terms(limits: Optional[Mapping[str, Any]]) -> Optional[Tuple[Optional[float],
@@ -3348,6 +3438,9 @@ def format_audit(result: Audit) -> str:
     lines.append("")
     if not result.entries:
         lines.append("every recorded verdict survives today's rules.")
+        if result.links:
+            lines.append("")
+            lines.extend(_link_lines(result))
         return "\n".join(lines)
     lines.append("%-26s %-10s %-14s %s" % ("round", "stream", "recorded rules", "what moves today"))
     lines.append("-" * 96)
@@ -3388,7 +3481,39 @@ def format_audit(result: Audit) -> str:
             lines.append("All of them predate the geometry field: they cannot be replayed, but re-running "
                          "such a round")
             lines.append("writes a record that can be.")
+    if result.links:
+        lines.append("")
+        lines.extend(_link_lines(result))
     return "\n".join(lines)
+
+
+def _link_lines(result: Audit) -> List[str]:
+    """The replacement links, split into the ones this build broke and the ones history could not write.
+
+    Round 81. Two ends of one relation, two commands, no comparison between them: without this a reader
+    learns that round A was re-measured as B from A, and that B replaced C from B, and never finds out that
+    B and C disagree. Only the charged kinds are printed as defects.
+    """
+    lines: List[str] = []
+    broken = [item for item in result.links if item.get("kind") in LINK_DEFECTS]
+    legacy = [item for item in result.links if item.get("kind") == "legacy"]
+    if broken:
+        lines.append("%d replacement link(s) disagree, so the two ends of the relation cannot both be true:"
+                     % len(broken))
+        for item in broken:
+            lines.append("  %-26s %-9s %s: %s" % (item["round"], item["kind"], item["names"],
+                                                  item["detail"]))
+        lines.append("A link is written by a command; a broken one means the books contradict each other "
+                     "and re-deciding")
+        lines.append("under today's rules cannot settle it. `--strict` charges these as a build defect.")
+    if legacy:
+        lines.append("%d replacement link(s) have no successor-side record because the successor was written "
+                     "before round 78:" % len(legacy))
+        for item in legacy:
+            lines.append("  %-26s -> %s (%s)" % (item["round"], item["names"], item["detail"]))
+        lines.append("Nothing is wrong with those records; the field did not exist. Re-running the round "
+                     "writes both ends.")
+    return lines
 
 
 @dataclass

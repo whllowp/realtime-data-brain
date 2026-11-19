@@ -152,6 +152,10 @@ class Campaign:
     # Of those, the ones in records that carry the geometry and still lack the reference: a defect in this
     # build rather than a record written before the field existed (round 33).
     inconsistent: int = 0
+    # Round 81: replacement links whose two ends disagree (or point at a round the ledger does not hold),
+    # and links whose successor end could not have been written because it predates round 78.
+    broken_links: int = 0
+    link_legacy: int = 0
     # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
     retired: int = 0
     # Refusals the loop still holds: the count `previously_rejected` would return, and how many of them
@@ -469,6 +473,11 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.relabelled = report.relabelled
     result.unreconstructable = report.cross
     result.inconsistent = report.inconsistent
+    # Round 81: a broken replacement link is a defect of the books, not of a verdict, so it travels with the
+    # campaign's own audit and is charged by the same gate. The campaign is where a reader asks "what does
+    # this loop claim", which is exactly the question a link answers wrongly.
+    result.broken_links = report.broken_links
+    result.link_legacy = report.link_legacy
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
     # streams could see "7 verdicts would change today" and not know which one owes them.
