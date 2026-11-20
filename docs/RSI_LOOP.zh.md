@@ -8369,6 +8369,65 @@ ceilings          0 of 1 re-measured with their ceilings; 1 still without
 读者以为工作做了。凡是"先说后做"的句子，都要放在"确实会做"的分支里。
 
 
+### 3.160 重测要继承它踩着的那条断言：`inherited_from` 这一栏
+
+第 153 轮让"这个文件是人指的、几何不认"在重测之前说出来、在页面上数出来。但那次重测**写出的新记录**
+只写 `stream_path: <file>`，一句来历都没有：于是一次成功的重测之后一分钟，账本里那条断言就消失了——
+`--campaign` 的 `claims` 计数掉一，而实际上什么都没被修掉。**修的是文件，丢的是证据**。
+
+真跑一次（重跑 `var/demo153`，那条被手工指到 `data/smd/stream-one.json` 的记录）：
+
+```
+---- re-running round-out-of-reach.json on data/smd/stream-one.json
+  careful: the file data/smd/stream-one.json was claimed by a person, and its geometry disagrees with the
+  ones the round recorded -- what this measures is evidence about that file, not about the one the round
+  first measured (boundary 371)
+recorded round var\evolve\round-20261120T090613Z.json
+retired round-out-of-reach.json (re-measured as round-20261120T090613Z.json)
+ceilings          1 of 1 re-measured with their ceilings; 0 still without
+```
+
+新记录的 `stream_path_history` 现在是：
+
+```
+[{"from": "data/smd/stream-one.json", "to": "data/smd/stream-one.json",
+  "at": "2026-11-20T09:06:13.294446+00:00", "geometry": "disagrees",
+  "why": "the record named no file; this one was claimed by hand",
+  "inherited_from": "round-out-of-reach.json"}]
+```
+
+于是同一份账本上的页面（重测之后）：
+
+```
+claims            1 round(s) name a file a person claimed, and the geometry never confirmed it:
+                  round-20261120T090613Z.json data/smd/stream-one.json (disagrees)
+```
+
+注意这一行里的轮名已经换了：数的是 `round-20261120T090613Z.json`，也就是**真的在那个文件上量过**的那一轮，
+而不是当初被指的那一轮。这就是继承的作用——断言跟着证据走，而不是跟着它第一次被写下的那条记录。
+
+**`from` 和 `to` 一样，所以这一栏必须存在。** 继承下来的条目里，`from` 和 `to` 都是同一个文件：一条"重测"
+测的就是这条记录原本指的那个文件，方向没变。单看 `from`/`to`，这看起来像一次什么都不做的搬动；只有
+`inherited_from` 说出它是从哪条记录接过来的。**同一个字段在两个地方的语义不同，就得有一个字段专门说方向**。
+
+**时间是新的，来历是旧的。** 条目的 `at` 用新记录的时刻，"一个人指过这个文件"是文件的属性，而"这一轮在它
+上面量了"是今天的属性——两个事实都有日期，混用其中一个就会让旧断言看起来像刚发生的（第 153 轮记 `at`
+时踩过同一类）。
+
+**`to_dict` 才是真正的入口。** `persist` 从 `RoundResult.to_dict()` 写轮记录，所以字段只加在 dataclass 上、
+不写进 `to_dict`，下一张页面就读不到——测试里那句"a field missing there is a field the next page cannot read"
+就是这件事。没有继承记录的轮仍然把这个键写成 `None`（而不是 `[]`），否则读者要自己区分"没有断言"和"有一条
+空的断言"。
+
+**遗留的缺口（写进下一项）**：继承可以链式发生，但条目只记得**上一跳**（`inherited_from`）。连着继承几次之后，
+"这条断言最初是谁在什么时候记下的"就查不到了——断言越老、越像是在这一轮刚被确认的。下一轮让它带上
+`claim_origin`（最初那条断言所在的轮）与链长，并在页面上说出它已经站了多少轮。
+
+**边界 373**：一次测量如果是踩着某条人的断言完成的，那条断言必须落到它写出的记录上；否则修完一次，证据
+就随旧记录一起退休了，而页面会把"证据消失了"读成"问题解决了"。
+**边界 374**：继承来的事实带两个日期——它发生过的时刻、和它被再断言一次的时刻；只记其中一个，都会让读者
+把旧断言当成新证据（或把新测量当成旧结论）。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8962,7 +9021,8 @@ missing for the next level
 139. **（已完成，见 §3.159）** 让"补回去的文件"也能被反过来检查：`--claim-round-file` 写下的
      `geometry: disagrees` 是一条人的断言，重测之前和页面上都要说出来，并让 `--campaign` 数出有几条记录
      站在这类文件上。
-140. 让重测**继承**被重测记录上的那条断言：成功的重跑现在直接写 `stream_path`，于是"这个文件是人指的、
-     几何不认"在重测之后就从账本里消失了，而那次重测正是站在它上面做的。让 `RoundResult` 带上
-     `stream_path_history`，把继承来的断言（带原记录的轮名）写进新记录，并让 `claimed_rounds` 在
-     `--campaign` 上仍然数得到它。
+140. **已完成（见 §3.160）** 一次重测现在是"踩在谁的断言上"完成的：`RoundResult` 多了 `stream_path_history`，
+     队列重跑把被继承的条目（`inherited_from`、原来那条 `why`、新记录自己的 `at`）写进它写出的新记录，
+     于是 `claim_note`、`claimed_rounds` 与 `--campaign` 在新记录上仍然数得到那条断言。
+141. 让继承也能链式读：一条断言连着被继承几次之后，要说出它最初是哪一轮记下的（`claim_origin`）与已经站了多少轮，
+     否则越老的断言看起来越像这一轮刚确认的。

@@ -1633,6 +1633,15 @@ class RoundResult:
     measure a different sampling and call the difference a result (rounds 26, 44).
     """
 
+    stream_path_history: List[Dict[str, Any]] = field(default_factory=list)
+    """The files a person named for this round, with the verdict the geometry check gave each (round 154).
+
+    Round 152 records a claim in the record it repairs; a re-measurement writes a *new* record, and that new
+    record named the file without saying where the name came from. The claim then vanished from the ledger
+    right after a measurement that stood on it -- `--campaign`'s `claims` count fell by one although no repair
+    had been undone (boundary 373). The queue copies the entry here, marked `inherited_from`.
+    """
+
     @property
     def accepted(self) -> List[str]:
         return [verdict.candidate for _c, _m, verdict in self.trials if verdict.accepted]
@@ -1665,6 +1674,8 @@ class RoundResult:
             # `data/smd/stream-check.json` is stride 7). A record that cannot name its own file leaves the
             # next check depending on the operator's memory.
             "stream_path": self.stream_path or None,
+            # Round 154: the claim a re-measurement stood on travels with the record it wrote.
+            "stream_path_history": self.stream_path_history or None,
             "rules": self.rules.to_dict(),
             # A round is evidence *for a ruleset*. Storing the numbers without saying which rules judged
             # them produces a record that looks authoritative and cannot be audited, which is the failure
@@ -2471,6 +2482,47 @@ def _rewrite_ledger_line(root: Path, name: str, changes: Dict[str, Any]) -> bool
     return True
 
 
+def unconfirmed_claim(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The claim behind the file this record now names, when the geometry never confirmed it (round 154).
+
+    Returns the entry itself rather than a sentence, because two callers need different things from it: the
+    note on the page wants words, and a re-measurement wants the entry to copy onto the record it writes.
+    Only a claim that points at the file the record *currently* names counts: an older claim about another
+    file is evidence about that other file (boundary 371).
+    """
+    claimed = [item for item in (record.get("stream_path_history") or [])
+               if isinstance(item, dict) and item.get("to")]
+    named = str(record.get("stream_path") or "")
+    for entry in reversed(claimed):
+        if named and str(entry.get("to") or "") != named:
+            continue
+        if str(entry.get("geometry") or "unknown") == "agrees":
+            return None
+        return entry
+    return None
+
+
+def inherit_claim(record: Dict[str, Any], target_file: str,
+                  now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """The history a re-measurement should carry, given the record it re-measures (round 154).
+
+    Empty when the file was not claimed, or when the claim was confirmed: a re-run on a file the geometry
+    agreed with has nothing to inherit. The copied entry keeps the person's `why`, says which round it came
+    from, and takes the moment of the *new* record, because "a person claimed this" is true of the file while
+    "this round measured it" is true of today (boundary 374).
+    """
+    entry = unconfirmed_claim(record)
+    if entry is None or str(entry.get("to") or "") != str(target_file or ""):
+        return []
+    moment = now or datetime.now(timezone.utc)
+    return [{"from": str(record.get("stream_path") or ""),
+             "to": str(target_file or ""),
+             "at": moment.isoformat(),
+             "geometry": str(entry.get("geometry") or "unknown"),
+             "why": str(entry.get("why") or ""),
+             "inherited_from": str(record.get("round") or "")}]
+
+
 def claim_note(record: Dict[str, Any]) -> Optional[str]:
     """What a person's claim said about the file this record now names (round 153).
 
@@ -2480,19 +2532,14 @@ def claim_note(record: Dict[str, Any]) -> Optional[str]:
     a re-measurement on that file, or a page counting the round -- so both ask here instead of trusting the
     name (boundary 371).
     """
-    claimed = [item for item in (record.get("stream_path_history") or [])
-               if isinstance(item, dict) and item.get("to")]
-    named = str(record.get("stream_path") or "")
-    for entry in reversed(claimed):
-        if named and str(entry.get("to") or "") != named:
-            continue
-        verdict = str(entry.get("geometry") or "unknown")
-        if verdict == "agrees":
-            return None
-        said = ("disagrees with" if verdict == "disagrees" else "was never checked against")
-        return ("the file %s was claimed by a person, and its geometry %s the ones the round recorded"
-                % (named or str(entry.get("to") or ""), said))
-    return None
+    entry = unconfirmed_claim(record)
+    if entry is None:
+        return None
+    verdict = str(entry.get("geometry") or "unknown")
+    said = ("disagrees with" if verdict == "disagrees" else "was never checked against")
+    named = str(record.get("stream_path") or "") or str(entry.get("to") or "")
+    return "the file %s was claimed by a person, and its geometry %s the ones the round recorded" % (
+        named, said)
 
 
 def claimed_rounds(rounds: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:

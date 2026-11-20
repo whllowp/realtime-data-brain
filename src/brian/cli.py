@@ -44,6 +44,7 @@ from .evolve import (
     catalogue,
     ceiling_shortfall,
     claim_note,
+    inherit_claim,
     claim_round_file,
     claimed_rounds,
     debt_history,
@@ -2981,6 +2982,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             result = run_round(run_settings, streams, selected=recorded, rules=rules, source=source,
                                claim=record.get("claim") or {})
             result.stream_path = target_file
+            # Round 154: a re-measurement writes a new record. If the file it measured was claimed by a
+            # person and the geometry disagreed, that fact belongs on the new record too -- otherwise the
+            # claim disappears right after a measurement that stood on it (boundary 373).
+            result.stream_path_history = inherit_claim(record, target_file)
             # Round 68: a re-run is judged under the same ceilings as any other round, so it records them.
             result.limits = _limits_view(minute_ceiling, minute_ceilings, flag_run_ceilings,
                                          drain_ceiling, drain_ceilings, flag_drain_ceilings)
