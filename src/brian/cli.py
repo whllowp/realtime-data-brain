@@ -1893,6 +1893,25 @@ def _rules_from_args(args: Any) -> EvolveRules:
     return EvolveRules(min_gain=args.min_gain, replication_tolerance=tolerance)
 
 
+def _round_names_walk(root: Path, name: str) -> Optional[int]:
+    """Which walk a round record says paid it, `0` when it says nothing, or None when it is not readable (round 146).
+
+    A hand retirement must not bill a second time for a payment the queue already recorded: the successor round
+    carries `queue.walk` in that case, and that number is the one the store already holds.
+    """
+    path = root / "var" / "evolve" / name
+    try:
+        record = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    block = record.get("queue")
+    if not isinstance(block, dict):
+        return 0
+    return int(block.get("walk") or 0)
+
+
 def _retire_names(values: List[str]) -> List[str]:
     """Flatten `--retire` into one name per round, in the order the operator wrote them.
 
@@ -2943,6 +2962,29 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("retired           %s  (%s)"
                    % (name, "re-measured as %s" % successor if successor
                       else "no successor named: the record stays, the checks skip it"))
+            if successor:
+                # Round 146: a retirement that names a successor is a payment, whether the queue made it or a
+                # person typed both commands. Recording only the queue's payments made the store's count say
+                # "the loop paid this" when a human had. The successor already exists and was written before this
+                # command, so it cannot name the walk -- the page says that instead of pretending otherwise.
+                paid_walk = _round_names_walk(root, str(successor))
+                if paid_walk is None:
+                    pass
+                elif paid_walk:
+                    _print("walk              already recorded: %s was paid by the queue's walk %d, so this "
+                           "retirement does not pay for it a second time" % (successor, paid_walk))
+                else:
+                    try:
+                        hand_walk = begin_rerun_run(root, {"hand": True, "limit": 0, "families": []})["walk"]
+                        finish_rerun_run(root, hand_walk, {"paid": 1, "rounds": [str(successor)]})
+                    except OSError:
+                        hand_walk = 0
+                    if not hand_walk:
+                        _print("walk              this retirement could not be recorded as a walk: the store is "
+                               "unwritable, and the retirement itself stands")
+                    else:
+                        _print("walk              %d, typed by hand: the round it paid was written before this "
+                               "command, so it cannot name the walk (boundary 351)" % hand_walk)
             overlap = (mark or {}).get("overlap") or {}
             if successor:
                 matches = overlap.get("matches") or []

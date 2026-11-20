@@ -1860,6 +1860,9 @@ def begin_rerun_run(root: Path, run: Mapping[str, Any], now: Optional[datetime] 
     ordinal = trimmed + len(held["runs"]) + 1
     runs = held["runs"] + [{
         "walk": ordinal,
+        # Round 146: a payment typed by hand and a payment the queue made are both payments, and only one of
+        # them says anything about the queue. The entry has to carry which, or the count reads as automation.
+        "hand": bool(run.get("hand")),
         "at": moment.isoformat(),
         "started": moment.isoformat(),
         "finished": "",
@@ -1922,9 +1925,12 @@ def rerun_walks(root: Path) -> Dict[str, Any]:
     runs = [run for run in held["runs"] if isinstance(run, Mapping)]
     paid = sum(int(run.get("paid") or 0) for run in runs)
     empty = sum(1 for run in runs if not int(run.get("paid") or 0))
+    hand = sum(1 for run in runs if run.get("hand"))
     return {
         "walks": len(runs),
         "empty": empty,
+        "hand": hand,
+        "queued": len(runs) - hand,
         "paid": paid,
         "trimmed": int(held.get("trimmed") or 0),
         "last_at": str(runs[-1].get("at") or "") if runs else "",
@@ -1950,9 +1956,14 @@ def format_rerun_walks(summary: Mapping[str, Any]) -> Optional[str]:
     walks = int(summary.get("walks") or 0)
     if not walks:
         return None
-    text = ("%d invocation(s) of the re-run queue; %d paid no round; %d round(s) paid in all; the last was walk %d "
-            "at %s" % (walks, int(summary.get("empty") or 0), int(summary.get("paid") or 0),
-                       int(summary.get("last_walk") or 0), str(summary.get("last_at") or "")))
+    hand = int(summary.get("hand") or 0)
+    queued = int(summary.get("queued") or walks - hand)
+    # Round 146: "3 invocation(s)" was ambiguous the moment a person's payment could be in the same store. Two
+    # numbers, because the reader's question is "how much of this did the queue do", not "how many commands ran".
+    text = ("%d invocation(s) of the re-run queue: %d by the queue, %d typed by hand; %d paid no round; %d round(s) "
+            "paid in all; the last was walk %d at %s"
+            % (walks, queued, hand, int(summary.get("empty") or 0), int(summary.get("paid") or 0),
+               int(summary.get("last_walk") or 0), str(summary.get("last_at") or "")))
     trimmed = int(summary.get("trimmed") or 0)
     if trimmed:
         text += ("; %d earlier walk(s) were trimmed out of the store, so a round naming one of them names a record "
