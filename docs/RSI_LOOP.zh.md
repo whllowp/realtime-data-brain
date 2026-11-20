@@ -9228,6 +9228,71 @@ gate              this page reads the ledger and charges nothing; `brian evolve 
 所以那里不能拒绝。
 
 
+### 3.178 三种「什么都没有」是三件事：`--unrecorded` 的空页也要交文件
+
+`--unrecorded` 在本轮之前，一发现"没有要重跑的轮"就直接 `return 0`——**在写 `--json-out` 之前**。
+于是脚本问"现在有活吗"，得到的是"没有这个文件"；而没有文件和"跑了但失败"在脚本眼里是同一件事
+（第 162 轮的形状，边界 406）。同时，三种完全不同的情况共用一句话：
+
+```
+nothing recorded: this ledger holds no round yet, so there is no file to place and nothing to re-run.
+Every round that still decides something says which file it measured.
+nothing to re-run: 3 round(s) name no file, and none of them still decides anything -- they are retired, or
+their promise is answered.
+```
+
+三句话分别是：**账本是空的**、**每一轮都说了自己在哪个文件上**、**有轮没说文件但它们已经不决定什么了**。
+读者能读出来，脚本不能——它只看到三个空列表。
+
+**改法**：空页也写通道，并给一个字段说明这是哪种空：
+
+```
+{"rounds": 0, "unattributed": 0, "matters": [], "payable": [], "out_of_reach": [],
+ "ceilings": {...}, "why_empty": "no rounds", "gate": {"checked": false, "command": ...}}
+```
+
+`why_empty` 取 `"no rounds"` / `"all placed"` / `"none deciding"`，有活时是 `null`——**null 表示"有活"，
+不是"没记原因"**。真跑的两次：
+
+```
+$ brian evolve --unrecorded --json-out ..\u172empty.json      (空账本)
+nothing recorded: this ledger holds no round yet, so there is no file to place and nothing to re-run.
+gate              this page reads the ledger and charges nothing; `brian evolve --campaign --strict` is the page that does
+wrote ..\u172empty.json
+why_empty: no rounds | rounds: 0 | gate.checked: False
+
+$ brian evolve --unrecorded --json-out ..\u172full.json       (var/demo151，2 行进不了队的)
+wrote ..\u172full.json
+why_empty: None matters: 2 gate: {'asked': False, 'checked': False, 'command': '...'}
+```
+
+**一页只能占一行（边界 413）**。空页要写通道，最省事的写法是再调一次 `_write_payload`，但那份清单
+是按"调用行数 = 表行数"对账的：多一次调用就要多一行表，而"同一个页面写两次"这件事本身不该在清单里
+出现两次。所以加了页面级的 `_write_unrecorded_payload(args, payload)`，两个分支都交给它，清单里仍是
+**一行**。
+
+**记账的计数器把自己也算进去了（边界 412）**。加完这个 helper，清单对账突然报
+`the page lists 24 payload writer(s) and this source has 25`。原因不是新代码——是扫描器那一行
+`if "_write_payload(" in line and ...` 里就含着自己要找的字面量，所以"24 writers"一直是
+**23 次调用 + 计数器自己**。这是"没人复算的数字就是一句声明"的最短版本：它每天都在跑，每天都对自己点头。
+修法是把字面量排除掉，并且把计数规则抽成一个函数 `payload_writer_calls(text)`，**命令和测试都调它**——
+测试里原来各有一份复制的谓词，正是两份规则漂移的入口：
+
+```python
+def payload_writer_calls(text):
+    return [line for line in text.splitlines()
+            if "_write_payload(" in line and "def _write_payload" not in line
+            and '"_write_payload("' not in line]
+```
+
+改完真值变了：**24 行表 = 24 次调用**（此前是 23 次调用硬凑一张 24 行的表，靠计数器补了那一行）。
+新增的测试用一段人造源码证明"含引号字面量的那一行不算调用"。
+
+**边界 412**：一个从源码里数东西的检查器，必须把自己那段文字排除在计数之外；否则它印出的数字恒高一位，
+而"没人复算的数字"就是一句声明——它每跑一次都在给自己盖章。
+**边界 413**：一个页面只该占清单里的一行；需要第二次写入时，给它一个页面级写入函数，而不是第二行表——
+第二次调用是实现的偶然，清单记的是页面的承诺。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9878,6 +9943,7 @@ missing for the next level
      `--sensitivity` 的）。现在四张只读账本的页（`--history`、`--sensitivity`、`--withheld`、
      `--unrecorded`）都印同一行、payload 都带 `gate`，`checked` 由 `_done()` 统一写；`--history --strict`
      被承认（`asked: true`）而不是拒绝——那页的 cap 要标行，拒绝会砸掉它（边界 410/411）。
-158. `--unrecorded` 在"没有欠账"的时候**不写 payload 就返回**，于是脚本拿不到 `gate`，也分不清"没有欠账"
-     与"这条命令没跑成"（第 162 轮"缺文件与写失败不可区分"的形状换了个地方）。让它在空表时也写 payload
-     （`matters: []`），并把空表的三种情形（本来就没有、刚被清空、无法归因）各自说清楚。
+158. `--unrecorded` 的空页也要交通道：账本空、全部有文件、有没文件的但都不再决定什么，这三种是一句话三件事，脚本分不出来；`why_empty` 记下来，页面和清单一起说。
+     （已完成：空页也写 `--json-out`，`why_empty` 取 `no rounds` / `all placed` / `none deciding`，有活时为 `null`；新增 `_write_unrecorded_payload` 让一页只占 `PAYLOAD_WRITERS` 的一行；扫描器不再把自己的字面量算成一次调用——"24 writers" 曾经是 23 次调用加计数器自己，计数规则抽成 `payload_writer_calls(text)` 供命令与测试共用，见 §3.178 与边界 412/413。）
+
+159. 让 `--unrecorded` 的空页也进清单说明：`why_empty` 的三种取值现在是三句独立的句子，而 `PAYLOAD_WRITERS` 那一行只说 `why_empty`；把三种取值也写进页面（哪一行会说哪一句），并让 `--payload-writers --check` 验证每种取值都在源码里出现一次。

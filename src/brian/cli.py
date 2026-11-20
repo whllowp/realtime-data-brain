@@ -507,7 +507,7 @@ PAYLOAD_WRITERS: Tuple[Tuple[str, str, str], ...] = (
     ("--backfill-claims", '{"filled", "dry_run"}', "records, unless --dry-run"),
     ("--backfill-walks", '{"backfilled", "would_backfill", "dry_run"}', "records"),
     ("--backfill-walks (a dry run)", '{"backfilled": [], "would_backfill", "dry_run"}', "reports"),
-    ("--unrecorded", '{"rounds", "unattributed", "matters", "payable", "out_of_reach", "ceilings", "gate"}',
+    ("--unrecorded", '{"rounds", "unattributed", "matters", "payable", "out_of_reach", "ceilings", "why_empty", "gate"}',
      "reports"),
     ("--campaign", "the campaign report (drift, debt, queue, claims, offer)", "reports"),
     ("--sensitivity", '{"bar", "bars", "rounds", "refused", "recorded", "unreadable", "rows", "gate"}',
@@ -572,6 +572,30 @@ def format_payload_writers() -> str:
     return "\n".join(lines)
 
 
+def payload_writer_calls(text: str) -> List[str]:
+    """Round 172 (item 158): the lines that hand a payload to the one writer, counted by one rule.
+
+    `payload_writer_problems` and the tests both need this number, and two copies of a predicate is how a count
+    drifts (boundary 412). The quoted form is excluded because this module's own checker contains the literal it
+    searches for: a counter that counts its own text prints one too many, and "24 writers" would mean 23 calls.
+    """
+    return [line for line in text.splitlines()
+            if "_write_payload(" in line and "def _write_payload" not in line
+            and '"_write_payload("' not in line]
+
+
+def _write_unrecorded_payload(args: argparse.Namespace, payload: Dict[str, Any]) -> bool:
+    """Round 172 (item 158): `--unrecorded` writes one payload shape from two branches.
+
+    The empty branch returns before the table, so it needs the write too; two calls of the low-level writer
+    would inflate the inventory (which counts calls against rows), and one page needing two rows would be a
+    worse answer than one writer that both branches use (boundary 413).
+    """
+    if not getattr(args, "json_out", None):
+        return True
+    return _write_payload(args.json_out, payload, recorded=False)
+
+
 def payload_writer_problems(source: Optional[str] = None) -> List[str]:
     """Round 165: the table says "N command(s), one writer" -- this evaluates that claim from the source.
 
@@ -586,8 +610,7 @@ def payload_writer_problems(source: Optional[str] = None) -> List[str]:
             text = Path(__file__).read_bytes().decode("utf-8")
         except OSError as error:  # pragma: no cover - the file is this module
             return ["cannot read my own source to check the inventory: %s" % error]
-    calls = [line for line in text.splitlines()
-             if "_write_payload(" in line and "def _write_payload" not in line]
+    calls = payload_writer_calls(text)
     if len(calls) != len(PAYLOAD_WRITERS):
         problems.append("the page lists %d payload writer(s) and this source has %d: the table and the calls have to "
                         "move together" % (len(PAYLOAD_WRITERS), len(calls)))
@@ -3581,6 +3604,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             return 2
         matters = _unrecorded_matters(root)
         unknown = sum(1 for record in rounds if not str(record.get("stream_path") or ""))
+        # Round 172 (item 158): one dict for the empty payload and the full one. Two copies of seven keys
+        # is how the two pages drifted apart in round 160 (boundary 385).
+        unrecorded_ceilings = {"missing": ceiling_missing, "rounds": ceiling_rounds,
+                               "payable": ceiling_payable,
+                               # Round 151: the same three parts the page names, so a consumer subtracting
+                               # "missing - payable" by hand cannot mistake a repair for a queue debt.
+                               "named": ceiling_named,
+                               "unpayable": ceiling_unpayable,
+                               "after": max(0, ceiling_missing - ceiling_payable),
+                               "by_domain": ceiling_rows}
         _print("=" * 96)
         _print("brian evolve - rounds whose totals cannot be placed on a sampling")
         _print("=" * 96)
@@ -3595,8 +3628,31 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    "would fall %.0f%% -> %.0f%%"
                    % (queue["ready"], queue["paid"], 100.0 * queue["share_now"], 100.0 * queue["share_after"]))
         if not matters:
+            # Round 172 (item 158): this page used to return here, before its `_write_payload` call, so a
+            # script asking "is there work?" got no file at all -- and a missing file reads exactly like a
+            # failed run (round 162's shape, boundary 406). It now always writes the payload, and the three
+            # empty ledgers get three sentences: they are three different facts.
             _print("")
-            _print("Every round that still decides something says which file it measured.")
+            if not rounds:
+                why = "no rounds"
+                _print("nothing recorded: this ledger holds no round yet, so there is no file to place and "
+                       "nothing to re-run.")
+            elif not unknown:
+                why = "all placed"
+                _print("Every round that still decides something says which file it measured.")
+            else:
+                why = "none deciding"
+                _print("nothing to re-run: %d round(s) name no file, and none of them still decides anything "
+                       "-- they are retired, or their promise is answered." % unknown)
+            unrecorded_gate = report_footer(False)
+            if not _write_unrecorded_payload(args, payload={"rounds": len(rounds), "unattributed": unknown,
+                           "matters": [], "payable": [], "out_of_reach": [],
+                           "ceilings": unrecorded_ceilings,
+                           # Round 172: the empty page says which nothing this is -- "no rounds", "all placed"
+                           # or "none deciding" -- because three empty lists spell none of them (boundary 410).
+                           "why_empty": why,
+                           "gate": unrecorded_gate}):
+                return 2
             return 0
         # Round 151 (item 137): the table mixed two different situations in one list. A round with one
         # candidate file can be paid by the queue; a round with none, or with several, cannot be re-run by any
@@ -3639,8 +3695,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # Round 171 (item 157): a list of work, not a verdict -- the row reader still needs to know that
         # nothing on this page charged anything (boundary 410).
         unrecorded_gate = report_footer(False)
-        if args.json_out and not _write_payload(
-                args.json_out, payload={"rounds": len(rounds), "unattributed": unknown,
+        if not _write_unrecorded_payload(args, payload={"rounds": len(rounds), "unattributed": unknown,
                        "matters": [{"domain": d, "round": n, "why": w, "files": f}
                                    for d, n, w, f in matters],
                        # Round 151: the same split the page prints, so a consumer does not re-derive the rule.
@@ -3648,18 +3703,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                    for d, n, w, f in payable_rows],
                        "out_of_reach": [{"domain": d, "round": n, "why": w, "files": f}
                                         for d, n, w, f in reachless_rows],
-                       # Round 72: which of these rows would also record their ceilings, and what the debt
-                       # would look like afterwards -- the two numbers a reader deciding whether to run the
-                       # queue has to add up by hand otherwise.
-                       "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
-                                    "payable": ceiling_payable,
-                                    # Round 151: the same three parts the page names, so a consumer subtracting
-                                    # "missing - payable" by hand cannot mistake a repair for a queue debt.
-                                    "named": ceiling_named,
-                                    "unpayable": ceiling_unpayable,
-                                    "after": max(0, ceiling_missing - ceiling_payable),
-                                    "by_domain": ceiling_rows},
-                       "gate": unrecorded_gate}, recorded=False):
+                       # Round 172 (item 158): the same dict the empty page carries -- computed once.
+                       "ceilings": unrecorded_ceilings,
+                       # Round 172 (item 158): null when there is work; the empty page names which of the
+                       # three "nothing"s it is, so a script does not have to infer it from three empty lists.
+                       "why_empty": None,
+                       "gate": unrecorded_gate}):
                 return 2
         return 0
 

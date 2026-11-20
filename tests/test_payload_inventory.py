@@ -31,8 +31,7 @@ def test_no_command_writes_a_payload_by_hand():
 
 
 def test_the_number_of_payload_writers_is_counted():
-    calls = [line for line in SOURCE.splitlines()
-             if "_write_payload(" in line and "def _write_payload" not in line]
+    calls = cli.payload_writer_calls(SOURCE)
     assert len(calls) == EXPECTED_PAYLOAD_WRITERS, (
         "a command started or stopped writing a payload: %d call(s) now, %d expected"
         % (len(calls), EXPECTED_PAYLOAD_WRITERS))
@@ -63,8 +62,7 @@ def test_a_report_payload_finds_its_directory(tmp_path, monkeypatch):
 
 
 def test_the_page_and_the_count_are_the_same_inventory():
-    calls = [line for line in SOURCE.splitlines()
-             if "_write_payload(" in line and "def _write_payload" not in line]
+    calls = cli.payload_writer_calls(SOURCE)
     assert len(cli.PAYLOAD_WRITERS) == EXPECTED_PAYLOAD_WRITERS
     assert len(cli.PAYLOAD_WRITERS) == len(calls), (
         "the page lists %d writer(s) and the source has %d: the table must move with the calls"
@@ -128,3 +126,16 @@ def test_a_preview_of_a_repairing_command_says_it_recorded_nothing(tmp_path, mon
     assert "nothing was written; drop --dry-run to record the claim" in printed
     assert "nothing was recorded: this command only reports" in printed
     assert "what this command recorded is already in the store" not in printed
+
+
+def test_the_count_does_not_count_the_checker_that_prints_it():
+    """Round 172 (item 158): the scanner's own line contains the literal it searches for, and counted itself."""
+    text = (
+        "def _write_payload(path, payload, recorded=True):\n"
+        "    pass\n"
+        '    if "_write_payload(" in line and "def _write_payload" not in line:\n'
+        "    _write_payload(one)\n"
+        "    return _write_payload(two)\n"
+    )
+
+    assert cli.payload_writer_calls(text) == ["    _write_payload(one)", "    return _write_payload(two)"]
