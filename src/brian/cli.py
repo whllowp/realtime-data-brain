@@ -4008,12 +4008,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print_repair_plan(repair_plan(root))
                 # A walk that measured nothing is still a walk: it is the observation behind "nobody has measured
                 # this", and leaving it out would let a queue that is stuck read as a queue nobody visits.
+                empty_walk = {"limit": from_queue, "runnable": 0, "measured": 0, "skipped": skipped,
+                              "skipped_origins": skipped_origins, "cleared": 0, "worst": 0,
+                              "stopped_at": 0, "attempted": []}
                 try:
-                    record_queue_run(root, {"limit": from_queue, "runnable": 0, "measured": 0, "skipped": skipped,
-                                            "skipped_origins": skipped_origins, "cleared": 0, "worst": 0,
-                                            "stopped_at": 0, "attempted": []})
+                    empty_entry = record_queue_run(root, empty_walk)
                 except OSError:
-                    pass
+                    empty_entry = empty_walk
+                # Round 142: a walk that measured nothing is still a walk, and what it hands over is the record it
+                # just wrote -- the same numbers the campaign page reads (boundary 340).
+                if getattr(args, "json_out", None):
+                    _write_payload(args.json_out, {"walks": [empty_entry]})
                 return 0
             if from_queued is not None and not from_queue:
                 # Round 102: a plan, not a measurement. It lists exactly the records `--from-queue N` would walk, in
@@ -4041,6 +4046,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("")
                 _print("nothing was measured. Run the same command with --from-queue N to measure the first N of "
                        "them on the files they were born with.")
+                if getattr(args, "json_out", None):
+                    # Round 142: a plan records no walk, so there is nothing to hand over -- and saying that is the
+                    # difference between "no file" and "the flag was ignored" (boundary 336).
+                    _print("no payload      a plan measures nothing, so there is no walk to hand over (boundary 339).")
                 return 0
             chosen = runnable[:max(1, from_queue)]
             _print("from queue       %d of %d runnable promise(s) hold no verdict on the file they were born "
@@ -4075,6 +4084,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # The file is the point: it is the record's own origin, not the record's current path and not
                 # whatever `--stream-file` happened to say.
                 inner.stream_file = origin
+                # Round 142: the inner record writes no payload of its own -- the walk writes one for all of them,
+                # below. Nulling it here is what makes that one payload possible, so it is no longer silent work.
                 inner.json_out = None
                 code = cmd_evolve(inner, settings)
                 worst = max(worst, code)
@@ -4096,24 +4107,30 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                    if item.get("queued") is True) - queued_before
             except OSError:
                 cleared_here = 0
+            walk = {
+                "limit": from_queue,
+                "runnable": len(runnable),
+                "measured": len(measured_now),
+                "skipped": skipped,
+                "skipped_origins": [str(item.get("origin") or "") for item in queued
+                                    if not item.get("origin_exists")],
+                "cleared": max(0, cleared_here),
+                "worst": worst,
+                "stopped_at": stopped_at,
+                # Round 106: the refusal carries its reason, so a later walk can tell a refusal that still
+                # stands from one the ledger has already answered.
+                "attempted": [{"version": version, "code": codes.get(version, 0),
+                               "why": refused.get(version, "")} for version in measured_now],
+            }
             try:
-                record_queue_run(root, {
-                    "limit": from_queue,
-                    "runnable": len(runnable),
-                    "measured": len(measured_now),
-                    "skipped": skipped,
-                    "skipped_origins": [str(item.get("origin") or "") for item in queued
-                                        if not item.get("origin_exists")],
-                    "cleared": max(0, cleared_here),
-                    "worst": worst,
-                    "stopped_at": stopped_at,
-                    # Round 106: the refusal carries its reason, so a later walk can tell a refusal that still
-                    # stands from one the ledger has already answered.
-                    "attempted": [{"version": version, "code": codes.get(version, 0),
-                                   "why": refused.get(version, "")} for version in measured_now],
-                })
+                walk_entry = record_queue_run(root, walk)
             except OSError:
-                pass
+                walk_entry = walk
+            # Round 142: the walk used to null `json_out` for every inner record (one file per record would overwrite
+            # itself) and hand the caller nothing. One record for the whole walk is what it owes, and it is the record
+            # the store just kept (boundary 340).
+            if getattr(args, "json_out", None) and not _write_payload(args.json_out, {"walks": [walk_entry]}):
+                worst = max(worst, 2)
             _print("")
             if stopped_at:
                 # Round 103: a walk that ends on a build defect must say what it left behind -- and when the answer

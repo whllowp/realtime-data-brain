@@ -7702,6 +7702,55 @@ $ echo $LASTEXITCODE
 一个绕过 `json`、六个不吭声；没有人写错，只是没有人把它当成同一件事。
 
 
+### 3.148 走一圈的手，要交回那一圈的成绩单
+
+第 141 轮把八处写载荷的地方收进 `_write_payload` 之后，`--json-out` 只剩下一个静默点，而且偏偏是这层里花钱最多的那个命令：`--verify --from-queue N`。
+
+它遍历队列，对每个记录调一次内层的 `--verify`；内层必须把 `json_out` 置空——一个记录写一个文件，第二个会把第一个覆盖掉（第 140 轮已经踩过一次：两个族共用一个根目录时，读回来的还是旧载荷）。置空是对的，错的是**置空之后什么都没交回来**：一整趟队列跑完，测了哪几个版本、各拿到什么退出码、哪一条被账本拒了，全都只在 `var/evolve/queue_runs.json` 里，读者得自己去翻那个文件。一个花掉 N 次测量的命令，产出不该只留在自己的日志里。
+
+现在的形状是：**一整趟队列，一份载荷，内容就是这趟刚写进仓库的那条记录。**
+
+```
+wrote walk.json
+1 promise(s) measured on the file they were born with. A copied end is measured, never applied; a contradiction is still refused.
+```
+
+```json
+{
+  "walks": [
+    {
+      "at": "2026-11-20T07:09:27.207515+00:00",
+      "limit": 1, "runnable": 1, "measured": 1, "skipped": 0,
+      "skipped_origins": [], "cleared": 0, "worst": 0, "stopped_at": 0,
+      "attempted": [{"version": 20, "code": 0, "why": ""}]
+    }
+  ]
+}
+```
+
+`attempted` 里每个版本带着它的退出码和拒绝理由，`stopped_at` 说明这趟是不是撞在矛盾上停下——和 `--campaign` 读的是同一条记录，不是给这个旗标另写一份摘要。**交出去的必须是仓库留下的那条**，否则两处数字迟早会分开。
+
+三件事跟着这一改：
+
+1. **空的一趟也是一趟**。队列里全是"出生文件不在这个检出里"的记录时，它照样写一条 `runnable: 0, measured: 0, attempted: []` 的记录（第 103 轮的理由：没人测过的东西，也要有"没人去过"的观测），于是也一样交回这份载荷。差别只在数字上，不在形状上。
+2. **计划不交东西，并且说出来**。`--from-queue 0` 只列出要跑哪些记录、一个都不测，也不写仓库记录——那就没有"这一趟"可以交。此时若给了 `--json-out`，页面打印
+
+```
+no payload      a plan measures nothing, so there is no walk to hand over (boundary 339).
+```
+
+空数组会是一句谎话：它说的不是"这趟没写记录"，而是"仓库里没有记录"。所以这里不写文件、只说一句话。这和第 140 轮预览分支的那句话是同一条规矩，用在了第三种"没有产出"上。
+
+3. **载荷写不出来，退出码要变**。第 141 轮的 `_write_payload` 返回 False 时，遍历把 `worst = max(worst, 2)`——测量已经发生、账本已经改过，那么失败的就只是载荷，退出码说的必须正是这一件事（边界 337 的第二处应用）。
+
+于是 `--json-out` 在这层里不再有静默点：一次命令要么交出 `wrote <path>`，要么交出一句"为什么没有东西可交"，要么交出一句"写不了，记录已经在仓库里"。
+
+**边界 339：一个什么都没记录的命令，不能假装交了空的东西；它要么说清"没有这一趟"，要么说清"这一趟测了零个"。**
+
+**边界 340：批量写入的载荷必须是整批的一份，而且必须就是仓库留下的那条记录；另写一份摘要，等于给同一件事准备第二个说法。**
+
+**边界 341：在循环里把旗标置空，只有在循环外有人替它交回等价的东西时才合法；否则那是一次静默的丢弃。**
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8255,6 +8304,9 @@ missing for the next level
       建父目录、写 `<target>.tmp` 再 `replace` 落位、印 `wrote <path>`；写不出来时印
       `cannot write the payload to …` + `what this command recorded is already in the store: only the payload is
       missing` 并退 2，而不是在账已经改完之后抛回溯。`--repair-links` 那处的 `__import__("json")` 一并清掉。见 §3.147。
-128. 让 `--from-queue` 的遍历也能交付一份载荷：它现在每个记录都把 `json_out` 置空（第 141 轮确认这条是唯一
-      剩下的静默点，为的是不互相覆盖），于是一整趟队列跑完，读者拿不到"这一趟测了哪几个版本、各是什么结论"。
+128.       剩下的静默点，为的是不互相覆盖），于是一整趟队列跑完，读者拿不到"这一趟测了哪几个版本、各是什么结论"。
       要么按记录写进一个目录（`--json-out DIR`），要么在文件里追加一个 `{"walks": [...]}`。
+
+129. 让 `--campaign` 的行走记录也进 JSON（`walks` 块：最后一趟的 `attempted`、`stopped_at`、`cleared`），
+      并让 `--from-queue` 的载荷带一个 `store` 字段说明它是仓库里的第几条记录——今天读者要靠时间戳才能
+      把载荷和 `var/evolve/queue_runs.json` 对上。
