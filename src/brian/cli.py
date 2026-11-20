@@ -1788,6 +1788,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("--max-withdrawn-days caps a --strict charge; without --strict nothing reads it")
         return 2
 
+    if getattr(args, "dry_run", False) and not (getattr(args, "settle_reaffirm_file", None)
+                                                or getattr(args, "settle_restore_file", None)):
+        # Round 130: `--dry-run` exists for the two batch commands. Anywhere else it would be silently ignored, and
+        # a flag that looks like a safety belt must not be decorative (rounds 103/117/120/127/128, boundary 305).
+        _print("--dry-run previews --settle-reaffirm-file or --settle-restore-file; without one of those the "
+               "command would go ahead and record nothing you could see first")
+        return 2
     if getattr(args, "from_queue", None) is not None and not getattr(args, "verify", False):
         # Round 103: only the verify branch reads `--from-queue`. Without it the command measures a fresh round and
         # the flag is silently inert -- which is how a queue walk was mistaken for one (the run landed in a round
@@ -3072,12 +3079,23 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("%s has no stale decision to re-take: its decisions agree with the books as they stand"
                    % (row.get("origin") or target))
             return 0
-        _print("re-taking      %d decision(s) on %s in one command (%d never re-taken, %d re-taken before and "
-               "moved again)" % (len(pairs), row.get("origin") or target, int(row.get("never") or 0),
-                                 int(row.get("again") or 0)))
+        dry = bool(getattr(args, "dry_run", False))
+        # Round 130: a batch writes N records at once, so the plan comes before the write (round 83's rule). The
+        # preview lists the pairs by name because "3 decisions on that file" is not something the reader can check.
+        _print("%s  %d decision(s) on %s in one %s (%d never re-taken, %d re-taken before and moved again)"
+               % ("would re-take" if dry else "re-taking     ", len(pairs), row.get("origin") or target,
+                  "dry run: nothing was recorded" if dry else "command",
+                  int(row.get("never") or 0), int(row.get("again") or 0)))
         if skipped:
             _print("leaving        %d decision(s) of the other kind alone: `--settle-kind %s` was asked for, and "
                    "the two kinds are different work (boundary 285)" % (skipped, kind))
+        if dry:
+            for pair in pairs:
+                record = pair.split("=", 1)[0]
+                entry = next((item for item in wanted if str(item.get("record") or "") == record), {})
+                _print("  %s  (%s)" % (pair, str(entry.get("kind") or "never")))
+            _print("nothing was written; drop --dry-run to re-take them (boundary 304).")
+            return 0
         inner = argparse.Namespace(**vars(args))
         inner.settle_reaffirm_file = None
         inner.settle_reaffirm = pairs
@@ -3151,12 +3169,22 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("no unanswered withdrawal is recorded against %s: `brian evolve --campaign` lists the files "
                    "that hold one" % target)
             return 2
-        _print("re-taking      %d decision(s) on %s in one command"
-               % (len(pairs), match[0].get("origin") or target))
+        dry = bool(getattr(args, "dry_run", False))
+        _print("%s  %d decision(s) on %s in one %s"
+               % ("would take up" if dry else "re-taking     ", len(pairs), match[0].get("origin") or target,
+                  "dry run: nothing was recorded" if dry else "command"))
+        if dry:
+            by_record = {str(entry.get("record") or ""): entry for entry in (match[0].get("records") or [])}
+            for pair in pairs:
+                entry = by_record.get(pair.split("=", 1)[0]) or {}
+                _print("  %s  (withdrawn %s, %.1f day(s) ago)"
+                       % (pair, str(entry.get("at") or "?"), float(entry.get("age_days") or 0.0)))
+            _print("nothing was written; afterwards that file would owe no unanswered withdrawal. Drop --dry-run to "
+                   "take them up again (boundary 304).")
+            return 0
         inner = argparse.Namespace(**vars(args))
         inner.settle_restore_file = None
         inner.settle_restore = pairs
-        inner.json_out = None
         return cmd_evolve(inner, settings)
 
     if getattr(args, "settle_restore", None):
@@ -5279,6 +5307,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-note", metavar="RECORD=SUCCESSOR", default=None,
                         help="append the explanation a recorded settlement lacked: the decision keeps its date "
                              "and successor; needs --settle-why")
+    evolve.add_argument("--dry-run", action="store_true",
+                        help="with --settle-reaffirm-file or --settle-restore-file: print the pairs the command "
+                             "would act on, and write nothing")
     evolve.add_argument("--settle-reaffirm-file", default=None, metavar="STREAM",
                         help="re-take every stale decision on one stream file in a single command, with the same "
                              "--settle-why and --settle-by; the pairs come from the plan `--campaign` prints")

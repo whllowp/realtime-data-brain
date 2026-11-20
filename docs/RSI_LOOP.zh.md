@@ -7034,6 +7034,53 @@ no unanswered withdrawal is recorded against data/smd/stream-two.json: `brian ev
 - **303** 批量里被拒的一对不能打断其余（边界 277），而且最后必须给出「几对成功、几对被拒」的总数——一份逐对输出而没有合计的
   记录，等于让读者自己数。
 
+### 3.136 批量命令要先能看，后能跑
+
+第 83 轮给 `--repair-links` 立过一条规矩：会改历史记录的命令，必须能先看一眼再动手。那条规矩到第 130 轮才轮到
+批量命令——而批量命令恰恰是最需要的：它一次写 N 条决定，跑之前唯一能知道「会动哪几条」的办法就是跑一遍，
+而跑一遍就意味着理由已经写进去了。
+
+`--dry-run` 只对 `--settle-reaffirm-file` 与 `--settle-restore-file` 生效，输出的是同一份计划里的同一批对
+（边界 283：页面印的清单，就是命令要跑的清单）：
+
+```
+$ brian evolve --settle-restore-file data/smd/stream-two.json \
+      --settle-why "both claims are dated after their decisions" --settle-by alice --dry-run
+would take up  2 decision(s) on data/smd/stream-two.json in one dry run: nothing was recorded
+  round-ninth.json=round-tenth.json  (withdrawn 2026-11-18T05:08:40.317322+00:00, 2.0 day(s) ago)
+  round-sixth.json=round-seventh.json  (withdrawn 2026-11-18T05:08:40.317322+00:00, 2.0 day(s) ago)
+nothing was written; afterwards that file would owe no unanswered withdrawal. Drop --dry-run to take them up again (boundary 304).
+
+$ brian evolve --settle-reaffirm-file data/smd/stream-one.json --settle-why "read today's books" --dry-run
+would re-take  3 decision(s) on data/smd/stream-one.json in one dry run: nothing was recorded (2 never re-taken, 1 re-taken before and moved again)
+  round-fourth.json=round-new.json  (never)
+  round-old.json=round-new.json  (again)
+  round-third.json=round-new.json  (never)
+nothing was written; drop --dry-run to re-take them (boundary 304).
+```
+
+`--settle-kind` 在干跑里照旧生效（它决定的是「这次要付哪一种活」，与写不写无关），被留下的那一族照样打印
+`leaving N decision(s) of the other kind alone`。文件上什么都没有时，拒绝先于预览：`no unanswered withdrawal is
+recorded against …`，exit 2——干跑不是「什么都答应」。
+
+`--dry-run` 落在别的命令上直接 exit 2，而不是被安静忽略：
+
+```
+$ brian evolve --audit --dry-run
+--dry-run previews --settle-reaffirm-file or --settle-restore-file; without one of those the command would go ahead and record nothing you could see first
+```
+
+这一轮还顺手修掉第 129 轮的一处不对称：`--settle-restore-file` 递归时把 `inner.json_out` 清空了，于是批量付了
+N 条决定却一个 payload 也不写，而 `--settle-reaffirm-file` 会写。「干跑什么都不写」与「真的跑了要交代」是两件
+义务，前者靠提前 return，后者靠把参数透传下去（边界 306）。修完之后 `--json-out` 拿到
+`{"restored": [...], "restore_refused": 0}`。
+
+边界：
+
+- **304** 批量命令必须先能看后能跑：一次写 N 条记录的命令，若只能用「跑一遍」来预览，那预览已经把理由写进去了。
+- **305** 安全阀不能被安静忽略：`--dry-run` 落在不读它的命令上必须报错退出，否则它看起来像系好了安全带。
+- **306** 干跑什么都不写、真跑必须交代：两者不能靠同一个开关实现，前者是提前 return，后者是把输出参数传下去。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7544,6 +7591,11 @@ missing for the next level
      一次交回给 `--settle-restore` 那条（现在是 `nargs="+"`）分支，所以逐对输出、被拒一对不打断其余、`--json-out`
      列表这些行为全部继承；计划里的 `batch` 改成付整个文件的命令，只留一个待办时才回落到单对命令。边界 301、302、303。
 
-116. 让 `--settle-restore-file`（以及 `--settle-reaffirm-file`）在动手之前先干跑一次：`--dry-run` 只打印它会
-     交回哪几对、谁会让整个文件归零，不写 `settlements.json`——一次改动 N 条记录的批量命令，应当能先看一眼
-     （第 83 轮 `--repair-links` 的 plan/apply 同一条规矩）。
+116. **已完成**（第 130 轮）：`--dry-run` 只对 `--settle-reaffirm-file` / `--settle-restore-file` 生效：列出它会动的
+     每一对（含种类、撤销时间与天数），一行也不写；作用于其它命令时直接 exit 2 而不是被忽略。顺带修掉第 129 轮留下的一处
+     不对称：`--settle-restore-file` 的 `--json-out` 被显式清空，批量付了 N 条却不留 payload。边界 304、305、306。
+
+117. 让干跑也报「跑完之后账会变成什么样」：`--dry-run` 现在列出要动的对与文件清空后的状态，但没说这次之后
+     `--campaign` 上哪一行会消失、哪一个闸门会从 1 变 0——干跑应当能回答「值得跑吗」，而不只是「会动哪几对」。
+     做法：干跑时把 `campaign(root)` 里与该文件相关的三行（withdrawal_plan / have no answer / repair next）
+     前后各算一次并打印差异，且明确标注「这些数字没有写入任何记录」。
