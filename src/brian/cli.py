@@ -83,6 +83,7 @@ from .evolve import (
     repair_legacy,
     moved_clearable,
     reaffirm_link,
+    reaffirm_plan,
     settlement_moment,
     settle_link,
     settle_note,)
@@ -116,6 +117,7 @@ from .promote import (
     in_force_overrides,
     legacy_state_note,
     load_promotions,
+    queue_runs,
     observe_in_force_disputes,
     stale_in_force_disputes,
     promotions_for_domain,
@@ -365,7 +367,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  in_force_stale: int = 0, in_force_untested: int = 0,
                  unexplained_stale: int = 0,
                  unexplained_days: Optional[float] = None,
-                 restaled: int = 0, max_restaled: Optional[int] = None) -> int:
+                 restaled: int = 0, max_restaled: Optional[int] = None,
+                 per_file_restaled: int = 0, max_restaled_per_file: Optional[int] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -451,6 +454,13 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("  a claim arrived on the same successor after the decision, so it covers a pair the ledger no")
         _print("  longer describes: `--settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME`")
         _print("  re-takes it against today's books: --strict exits 1 (boundary 273).")
+    if per_file_restaled:
+        _print("%d decision(s) on one stream file rest on books that have moved, above the %d asked for for a "
+               "single file:" % (per_file_restaled, int(max_restaled_per_file or 0)))
+        _print("  the cap is per file because the work is per file: eleven stale decisions on eleven files is eleven")
+        _print("  afternoons, and eleven on one file is one. Re-take that file's decisions with")
+        _print("  `brian evolve --settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT`, which `brian evolve")
+        _print("  --campaign` lists one command per pair (boundary 279).")
     if broken_links:
         return 2
     if unreconstructable:
@@ -615,7 +625,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     ceiling_capped = (max_ceiling_debt is not None and ceiling_missing
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
-                 or ceiling_capped or in_force_stale or unexplained_stale or restaled) else 0
+                 or ceiling_capped or in_force_stale or unexplained_stale or restaled
+                 or per_file_restaled) else 0
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -1642,6 +1653,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _moved_rows = []
     _moved_cap = getattr(args, "max_moved", None)
     _restaled = len(_moved_rows) if (_moved_cap is not None and len(_moved_rows) > int(_moved_cap)) else 0
+    # Round 121: the same debt capped in the unit a reader pays in. Eleven stale decisions spread over eleven files
+    # are eleven afternoons of work; eleven on one file are one -- a total cannot tell them apart (boundary 279).
+    _per_file_cap = getattr(args, "max_moved_per_file", None)
+    try:
+        _plan_rows = reaffirm_plan(history(root, include_retired=True), load_settlements(root),
+                                   queue_runs(root)["runs"])
+    except (OSError, ValueError):
+        _plan_rows = []
+    _worst_file = max(_plan_rows, key=lambda row: (int(row.get("stale") or 0), str(row.get("origin") or "")),
+                      default={})
+    _worst_stale = int(_worst_file.get("stale") or 0)
+    _per_file_restaled = _worst_stale if (_per_file_cap is not None and _worst_stale > int(_per_file_cap)) else 0
     unexplained_stale = ([row for row in unexplained_rows
                           if float(row.get("age_days") or 0.0) >= float(_unexplained_cap)]
                          if _unexplained_cap is not None else [])
@@ -1695,6 +1718,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("--max-ceiling-debt caps a --strict charge; without --strict nothing reads it")
         return 2
 
+    if getattr(args, "max_moved_per_file", None) is not None and not getattr(args, "strict", False):
+        # Round 121: same rule as the other caps -- a flag the gate never reads looks armed.
+        _print("--max-moved-per-file caps a --strict charge; without --strict nothing reads it")
+        return 2
     if getattr(args, "max_moved", None) is not None and not getattr(args, "strict", False):
         # Round 119: same rule as --max-unexplained-days -- a cap nobody reads is a flag that looks armed.
         _print("--max-moved caps a --strict charge; without --strict nothing reads it")
@@ -2592,7 +2619,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             in_force_untested=sum(1 for row in in_force_stale_rows if row.get("untested")),
                             unexplained_stale=len(unexplained_stale),
                             unexplained_days=_unexplained_cap,
-                            restaled=_restaled, max_restaled=_moved_cap)
+                            restaled=_restaled, max_restaled=_moved_cap,
+                            per_file_restaled=_per_file_restaled, max_restaled_per_file=_per_file_cap)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -2734,7 +2762,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                                   if row.get("untested")),
                             unexplained_stale=len(unexplained_stale),
                             unexplained_days=_unexplained_cap,
-                            restaled=_restaled, max_restaled=_moved_cap)
+                            restaled=_restaled, max_restaled=_moved_cap,
+                            per_file_restaled=_per_file_restaled, max_restaled_per_file=_per_file_cap)
 
     if args.grade:
         try:
@@ -4949,6 +4978,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="re-take decisions against today's books: keeps each first date, records the claims "
                              "it covered; takes one or more RECORD=SUCCESSOR pairs; needs --settle-why")
+    evolve.add_argument("--max-moved-per-file", type=int, default=None, metavar="N",
+                        help="with --strict: charge exit 1 when any one stream file holds more than N stale "
+                             "decisions, which is the unit a reader pays in")
     evolve.add_argument("--max-moved", type=int, default=None, metavar="N",
                         help="with --strict: fail when more than N decisions rest on books that have moved and "
                              "could be re-taken with --settle-reaffirm")

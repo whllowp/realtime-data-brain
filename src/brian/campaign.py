@@ -23,8 +23,8 @@ from .evolve import (
                      withheld_records, withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
                       current_state, domain_slug,
-                      load_promotions, never_tested_at_origin, repair_history, repair_plan, shape_note,
-                      walks_phrase)
+                      load_promotions, never_tested_at_origin, queue_runs, repair_history, repair_plan,
+                      shape_note, walks_phrase)
 
 __all__ = ["Campaign", "CampaignRow", "budget_text", "campaign", "format_campaign", "span_text"]
 
@@ -571,7 +571,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.settlement_summary = settlement_summary(result.settlements)
     # Round 118: the same reading the audit page prints, from the same two files.
     result.settlement_moved = moved_settlements(everything, result.settlements)
-    result.reaffirm_plan = reaffirm_plan(everything, result.settlements)
+    result.reaffirm_plan = reaffirm_plan(everything, result.settlements, queue_runs(root)["runs"])
     # Round 117: attribute each decision to the stream of the round it settled, so the row a reader opens can
     # say "one decision here has no explanation". `load_settlements` names round files; the source lives on the
     # round record, retired ones included, because a decision can settle a round that has since been superseded.
@@ -1240,10 +1240,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                                       for item in result.settlement_moved)))
         for item in result.reaffirm_plan[:1]:
             commands = [str(command) for command in item.get("commands") or [] if str(command)]
-            lines.append("links             re-take next: %s -- %d stale of %d recorded decision(s)%s -- %s"
+            walks = item.get("walks_since")
+            # Round 121: "stale since when" is the other half of "how many are stale". A file re-taken this morning
+            # and walked three times since is a different problem from one nobody has opened in a month (item 107).
+            when = ("last re-taken %s" % str(item.get("last_retaken") or "")) if item.get("last_retaken") \
+                else "never re-taken"
+            since = "unknown" if walks is None else ("%d walk(s) since" % int(walks))
+            lines.append("links             re-take next: %s -- %d stale of %d recorded decision(s)%s, %s, %s -- %s"
                          % (str(item.get("origin") or "(unnamed stream)"), int(item.get("stale") or 0),
                             int(item.get("decisions") or 0),
                             " (%d re-taken)" % int(item.get("retaken") or 0) if item.get("retaken") else "",
+                            when, since,
                             commands[0] if commands else "brian evolve --settle-reaffirm <record>=<successor>"))
     # Round 111: the ranking said which file to open first; this says whether last time's opening helped.
     last = (result.repair_history or {}).get("last") or {}

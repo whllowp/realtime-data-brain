@@ -2734,6 +2734,19 @@ def _is_later(moment: str, than: str) -> bool:
         return moment > than
 
 
+def _walks_since(runs: Optional[Sequence[Mapping[str, Any]]], moment: str) -> Optional[int]:
+    """How many recorded queue walks happened after `moment`; None when the caller supplied no runs.
+
+    Round 121: `last_retaken` alone cannot separate "re-taken this morning, then three walks" from "re-taken this
+    morning and nobody has walked since", and those say different things about a file that still owes.
+    """
+    if runs is None:
+        return None
+    if not moment:
+        return len(runs)
+    return sum(1 for run in runs if str(run.get("at") or "") > moment)
+
+
 def _effective_moment(item: Mapping[str, Any]) -> str:
     """The moment a decision speaks about: its own date, or a later re-affirmation of it (round 119).
 
@@ -2810,7 +2823,8 @@ def reaffirm_link(root: Path, record: str, successor: str, *, why: str = "", by:
 
 
 def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
-                  settlements: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+                  settlements: Sequence[Mapping[str, Any]],
+                  runs: Optional[Sequence[Mapping[str, Any]]] = None) -> List[Dict[str, Any]]:
     """Which decisions need re-taking, grouped by the file they are about (round 120).
 
     Round 119 gave the debt a command, one pair at a time, and said nothing about how many pairs a reader was
@@ -2832,6 +2846,10 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
         bucket = files.setdefault(origin, {"origin": origin, "decisions": 0, "stale": 0, "retaken": 0,
                                            "records": [], "commands": []})
         bucket["decisions"] += 1
+        bucket.setdefault("_retaken", []).extend(
+            str(entry.get("at") or "") for entry in item.get("reaffirmations") or []
+            if isinstance(entry, Mapping) and str(entry.get("at") or ""))
+        bucket["_taken"] = max(str(bucket.get("_taken") or ""), str(item.get("at") or ""))
         if item.get("reaffirmations"):
             bucket["retaken"] += 1
         if (record, successor) in moved:
@@ -2839,6 +2857,13 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
             bucket["records"].append(record)
             bucket["commands"].append("brian evolve --settle-reaffirm %s=%s" % (record, successor))
     rows = [bucket for bucket in files.values() if bucket["stale"]]
+    for row in rows:
+        moments = row.pop("_retaken", None) or []
+        taken = str(row.pop("_taken", "") or "")
+        # A file nobody has re-taken is measured from its newest decision, so the count answers "how much has
+        # happened since anyone last looked" instead of "since the beginning of time".
+        row["last_retaken"] = max(moments) if moments else ""
+        row["walks_since"] = _walks_since(runs, row["last_retaken"] or taken)
     rows.sort(key=lambda row: (-row["stale"], row["origin"]))
     return rows
 

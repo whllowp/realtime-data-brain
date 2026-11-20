@@ -6523,6 +6523,50 @@ re-taken       2 of 2 decision(s), 0 kept its date (already re-taken), 0 refused
 **这一轮没有做的事**
 
 `reaffirm_plan` 只按文件分组，没有按时间排序；「哪一天重开、隔了几次走查」留给第 107 项。`--max-moved` 仍然是按条数设上限，按文件设上限也留给第 107 项。
+### 3.127 同一笔债，按文件算和按条数算不是一件事
+
+第 120 轮让 `--campaign` 把「哪些文件上的裁定过期了」列出来，并给了每个文件一条可以直接粘贴的命令。这一轮补的是同一句话的另一半：**什么时候**看过，以及从现在起又走了几趟。
+
+- `reaffirm_plan` 的每一行多了 `last_retaken`（最近一次重新确认的时刻；从没重开过就是空串）和 `walks_since`（在那之后记录的走查次数）。`_walks_since(runs, moment)` 在 `runs is None` 时返回 `None`，页面把它印成 `unknown` —— 「没人问过」和「从那以后确实没走过」是两条不同的事实（边界 280）。
+- `--campaign` 的 `re-take next` 行因此读作：
+
+```
+links             re-take next: data/smd/stream-two.json -- 1 stale of 2 recorded decision(s) (1 re-taken), last re-taken 2026-11-20T03:21:35.406202+00:00, 0 walk(s) since -- brian evolve --settle-reaffirm round-fifth.json=round-new.json
+```
+
+- 新增 `--max-moved-per-file N`：和 `--max-moved N` 并列，但计的单位是一个文件。同一个账本上，`--max-moved-per-file 0` 退出 1 并印出：
+
+```
+1 decision(s) on one stream file rest on books that have moved, above the 0 asked for for a single file:
+  the cap is per file because the work is per file: eleven stale decisions on eleven files is eleven
+  afternoons, and eleven on one file is one. Re-take that file's decisions with
+  `brian evolve --settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT`, which `brian evolve
+  --campaign` lists one command per pair (boundary 279).
+```
+
+  而 `--max-moved 5` 在同一份账本上退出 0：总数远远没到上限，但那一个文件的账确实没人读过。两个上限回答的是两个问题，谁也不能替谁。
+- `--max-moved-per-file` 和别的上限一样，不带 `--strict` 时直接退出 2（`--max-moved-per-file caps a --strict charge; without --strict nothing reads it`）：一个闸门从不读的旗子看起来像是上膛了。
+- `--campaign --json-out` 的 `reaffirm_plan` 行现在带全时间线：
+
+```
+[{'origin': 'data/smd/stream-two.json', 'decisions': 2, 'stale': 1, 'retaken': 1,
+  'records': ['round-fifth.json'],
+  'commands': ['brian evolve --settle-reaffirm round-fifth.json=round-new.json'],
+  'last_retaken': '2026-11-20T03:21:35.406202+00:00', 'walks_since': 0}]
+```
+
+三条读数：
+
+1. **上限的单位就是读者付钱的单位**。十一笔过期裁定散在十一个文件上，是十一个下午；十一笔挤在一个文件上，是一个下午。总数上限把两者读成同一个数字，而这个人要打开的是文件，不是总数（边界 279）。
+2. **「过期」没有日期就是半句话**。`last_retaken` 让「这个文件上有 1 笔过期」变成「今天早上重开过、之后又走了三趟」或「一个月没人碰过」——同一个计数，两种处置。
+3. **没人算过的计数要印成 unknown，不能印成 0**。`walks_since = 0` 是一条测量：账本里确实没有更晚的走查；`None` 是「调用方没给走查记录」。把后者印成 0，等于让页面对一个它没看过的文件作证（边界 280）。
+
+**边界 279：上限要写在读者付钱的那个单位上。** 十一笔散在十一个文件上是十一个下午，十一笔在一个文件上是一个下午；按总条数设上限，会把这两种欠账算成同一笔，而处置它们的人手只有一双。
+
+**边界 280：没人算过的计数必须印成 unknown，不是 0。** `0` 是一条测量（确实没有更晚的走查），缺失是一次没问；把没问的印成 0，是让页面对没看过的东西作证。
+
+**边界 281：页面上并列的两个上限，要在同一行里各自说出自己的问题和答案。** `--max-moved` 与 `--max-moved-per-file` 相邻而治不同的欠账；只印其中一个的判定，读者会以为另一个也过了。
+
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
@@ -6998,4 +7042,6 @@ missing for the next level
     - 文档缺陷：第 118 轮说「追加第 105 项」，而文件里没有第 105 项——只在末尾追加的队列，末尾是它唯一的锚点。
 106. 已完成（第 120 轮）：`--campaign` 现在按来源文件给出「几条决定被重开过、几条仍然陈旧」（`reaffirm_plan`，含一条可直接运行的命令），`--settle-reaffirm` 接受多个 `RECORD=SUCCESSOR`（一条理由、一条 `--settle-by`、被拒的一对不中止其余），`--json-out` 的形状不再随参数个数变化。
 
-107. 下一步：把重开的决定按来源文件在 `--campaign` 的 JSON 里给出时间线（哪一天重开、隔了几次走查），并让 `--max-moved` 能按文件而不是按条数设上限，使「这个文件的账还没人读过」变成一次可计量的欠账。
+107. 已完成：重开的决定在 `--campaign` 的 JSON 里带整条时间线（`last_retaken` / `walks_since`，未知印成 `unknown`），并新增 `--max-moved-per-file N`，让「这个文件的账还没人读过」按文件计价；边界 279/280/281。
+
+108. 下一步：让 `--campaign` 把「重开了但仍然过期」和「从来没重开过」分成两列，并给前者一条按文件重开整批的命令（一次给出该文件全部过期裁定，而不是逐条粘贴）。
