@@ -567,6 +567,27 @@ PAYLOAD_KEYS: Dict[str, Tuple[str, ...]] = {
                   "stream_path_moves"),
     "--unrecorded": ("ceilings", "gate", "matters", "out_of_reach", "payable", "rounds", "unattributed",
                      "why_empty"),
+    # Round 175 (item 161): derived from the two places that build this payload -- the 59 keys of
+    # `Campaign.to_dict()` in src/brian/campaign.py and the 9 keys the campaign branch assigns beside the
+    # write -- not copied from a run's output, because a run only shows the branches it took (boundary 419).
+    "--campaign": ("accepted", "backfilled_links", "blocked_dossier", "budget", "ceiling_drift", "ceilings_differ",
+                "ceilings_unrecorded", "claim_counts", "claims", "comparisons_inconsistent",
+                "comparisons_unreconstructable", "debt_plan", "domains", "domains_pooling_files",
+                "frequent_retakes", "gate", "in_force_cleared", "in_force_cleared_history",
+                "in_force_disputed", "in_force_stale", "in_force_untested", "limits",
+                "measurements_not_repeated", "origin_queue", "queue_history", "queue_paid_by_domain",
+                "queue_paid_families", "queue_paid_unstated", "queue_run", "reaffirm_plan",
+                "reanchorable", "refusal_history", "refusals_carried", "refusals_from_retired",
+                "refusals_withheld", "rejected", "repair_history", "repair_plan", "rerun_offer",
+                "reruns", "retake_timeline", "rounds", "rounds_applied", "rounds_retired",
+                "rounds_without_file_legacy", "rounds_without_file_this_build",
+                "rounds_without_recorded_file", "rounds_without_stream", "settlement_summary",
+                "settlements", "settlements_moved", "settlements_restored", "settlements_unanswered",
+                "settlements_withdrawn", "stale_refusals", "trials", "verdicts_moved",
+                "verdicts_relabelled", "versions_holding", "versions_never_checked",
+                "versions_not_comparable", "versions_overdue", "versions_reverted", "walks",
+                "withdrawal_plan", "withheld_due_for_check", "withheld_no_longer_holding",
+                "withheld_oldest_evidence_days"),
 }
 
 # Round 173 (item 159): the three nothings `--unrecorded` can find, and what each one means. The page names them
@@ -579,6 +600,22 @@ WHY_EMPTY_REASONS: Tuple[Tuple[str, str], ...] = (
 )
 
 
+def _key_chunks(keys: Tuple[str, ...], width: int = 96) -> List[str]:
+    """Round 175 (item 161): the key list as lines that fit a terminal, one key never split."""
+    chunks: List[str] = []
+    current = ""
+    for key in keys:
+        piece = ("" if not current else " ") + '"%s",' % key
+        if current and len(current) + len(piece) > width:
+            chunks.append(current)
+            current = piece.strip()
+        else:
+            current = (current + " " + piece.strip()).strip()
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def format_payload_writers() -> str:
     """The inventory as a page: what each command exports, and what the one writer says when it cannot write."""
     lines = ["brian payload writers: %d command(s), one writer" % len(PAYLOAD_WRITERS)]
@@ -586,8 +623,15 @@ def format_payload_writers() -> str:
     for command, payload, kind in PAYLOAD_WRITERS:
         # Round 174 (item 160): a declared row is rendered from the declaration, so the page cannot describe a
         # payload the writer would refuse -- prose rows keep their prose and are named as such below.
-        shown = '{"' + '", "'.join(PAYLOAD_KEYS[command]) + '"}' if command in PAYLOAD_KEYS else payload
-        lines.append("  %-42s %-23s %s" % (command, kind, shown))
+        # Round 175 (item 161): `--campaign` declares 68 keys, so a declared row wraps instead of running off
+        # the terminal; the keys are still the declaration, in its order, one key per token.
+        if command in PAYLOAD_KEYS:
+            chunks = _key_chunks(PAYLOAD_KEYS[command])
+            lines.append("  %-42s %-23s %s" % (command, kind, chunks[0]))
+            for chunk in chunks[1:]:
+                lines.append(" " * (2 + 42 + 23) + chunk)
+        else:
+            lines.append("  %-42s %-23s %s" % (command, kind, payload))
     lines.append("")
     lines.append("the file-level forms %s write" % ", ".join(PAYLOAD_BATCH_FORMS))
     lines.append("the record list of their single form: one writer, because the single form is the one that writes it.")
@@ -615,9 +659,11 @@ def format_payload_writers() -> str:
     lines.append("")
     lines.append("A payload's keys are declared for %d row(s) -- %s -- and checked where the payload is built:"
                  % (len(PAYLOAD_KEYS), ", ".join(sorted(PAYLOAD_KEYS))))
-    lines.append("_write_payload refuses a payload whose keys disagree with the declaration (boundary 416). Every")
-    lines.append("other row describes its payload in prose: `--campaign` alone writes far more keys than the four")
-    lines.append("words it lists, and none of them is declared yet (boundary 417).")
+    undeclared = len(PAYLOAD_WRITERS) - len(PAYLOAD_KEYS)
+    lines.append("_write_payload refuses a payload whose keys disagree with the declaration (boundary 416);")
+    lines.append("the %d row(s) not declared here describe their payload in prose, so a key can be added"
+                 % undeclared)
+    lines.append("there and no check notices (boundary 417).")
     lines.append("")
     lines.append("A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this")
     lines.append("table and its count move together (boundary 392).")
@@ -3933,7 +3979,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unanswered_file=str(_worst_withdrawn.get("origin") or ""),
                             into=gate_report)
         gate_report["exit"] = gate_code
-        if args.json_out and not _write_payload(args.json_out, payload, recorded=False):
+        if args.json_out and not _write_payload(args.json_out, payload, recorded=False,
+                                               keys=PAYLOAD_KEYS["--campaign"]):
             return 2
         return gate_code
 

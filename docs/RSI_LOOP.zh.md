@@ -9398,6 +9398,61 @@ payload shape     the payload this command built does not match the inventory:
 **边界 417**：一份只覆盖 3/24 的清单必须自己说出覆盖率；"检查通过"不能替未被检查的 21 行背书。
 **边界 418**：从声明渲染出来的东西，再读回来核对，测的是渲染器与它自身的一致性——那不是检查，是自证。
 
+### 3.181 68 个键从哪儿来：声明要来自构造它的每一处，不是来自一次运行
+
+第 174 轮给三张页子声明了键集合（`--audit` 14 个、`--history` 7 个、`--unrecorded` 8 个），第 161 项剩下的那一半是
+`--campaign`：一页 68 个键，页面上原本写着"远超它列出的四个词"——四个词是散文，68 个键才是事实。
+
+**为什么不能"跑一次、把输出抄下来"**：一次运行只走它踩到的那些分支。`--campaign` 的 payload 里，`in_force_disputed`
+只在有争议时有内容，`walk` 相关字段只在有队列历史时出现——照输出抄，抄到的是"今天这份账本走到过的键"，而不是
+"这条命令会写的键"。所以声明必须来自构造它的**代码**：两处，`Campaign.to_dict()` 的 59 个键，加上写之前那 9 次
+`payload["…"] = …`。
+
+**两颗我自己踩的钉子，读法比结论更值钱。**
+
+第一颗：`src/brian/campaign.py` 里有**两个** `to_dict`——`CampaignRow.to_dict()`（31 个键）在前，`Campaign.to_dict()`
+（59 个键）在后。我的第一个脚本用了 `text.index("    def to_dict(self)")`，抓到的是前一个，于是"并集 40 个键"。40 和
+68 差 28，差的是整页的队列、结算、修复历史——**读错一个类，不是少抄几行，是少了一整块事实**。脚本里现在先定位
+`"\nclass Campaign:"`，再从那个位置找 `to_dict`。
+
+第二颗：先按"遇到第一行四个空格缩进就截断"切字面量，结果既截短了（68 个键里丢了尾部），又在测试里把文件下面
+几个辅助函数的嵌套键扫了进来——测试第一次跑报了 `Campaign.to_dict writes keys the page does not declare:
+['max_drain_by_domain', 'max_drain_minutes', 'max_minutes', 'max_minutes_by_domain']`，而这四个键根本不是 payload 的键，
+是 payload 里 `limits` 那个**嵌套**字典的键。修法两条：字面量按它自己的收尾 `"\n        }\n"` 界定，顶层键按 **12 个
+空格**的缩进取。**嵌套字典的键不是 payload 的键，这件事解析器不认识，只有缩进认识。**
+
+**页面上的样子**（68 个键一行是 1423 个字符，那不是页面是日志）：
+
+```
+  --campaign                                 reports                 "accepted", "backfilled_links", "blocked_dossier", "budget", "ceiling_drift", "ceilings_differ",
+                                                                   "ceilings_unrecorded", "claim_counts", "claims", "comparisons_inconsistent",
+                                                                   "comparisons_unreconstructable", "debt_plan", "domains", "domains_pooling_files",
+                                                                   …
+A payload's keys are declared for 4 row(s) -- --audit, --campaign, --history, --unrecorded -- and checked where the payload is built:
+the 20 row(s) not declared here describe their payload in prose, so a key can be added
+there and no check notices (boundary 417).
+```
+
+最宽一行 165 字符，声明里的顺序就是页面上的顺序；"还有 20 行是散文"这句话是算出来的，不是手写的——声明一行，
+这句话就跟着变（第 170 轮那条"句子要跟着数走"的规矩落在它自己身上）。
+
+**声明是活的**：`--campaign --json-out` 现在把 `keys=PAYLOAD_KEYS["--campaign"]` 交给写者，键对不上就拒绝并退出 2。
+把 `gate` 从声明里挖掉再跑同一条命令：
+
+```
+payload shape     the payload this command built does not match the inventory:
+                  built but not declared: gate
+                  PAYLOAD_KEYS in src/brian/cli.py is the declaration; both sides move together
+exit 2
+```
+
+报告已经印完，文件没写，退出码说的是"这份报告少了一个我声明过的键"——第 141 轮定下的顺序原封不动。
+
+**边界 419**：一份声明必须来自构造它的**每一处**；一次运行只证明它今天走过的那条路。
+**边界 420**：文档一页 68 个键就要折行——文档本身是交付物，一行 1400 字符的"页面"没人读，而没人读的声明等于没有。
+**边界 421**：解析代码时要按**它自己的收尾标记**界定范围，不能按"下一行缩进就停"；截断的字面量和越界扫到的嵌套字典，
+都会把"声明少了键"变成"声明多了键"，这两种错误长得一样，方向相反。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -10056,5 +10111,8 @@ missing for the next level
 160. 让 `--payload-writers --check` 也核对表格里每一行的 payload 键集合（已完成一半，见 §3.180）：3 行有
      声明（`--audit`/`--history`/`--unrecorded`），页面从声明渲染，`_write_payload(keys=…)` 在写入处拒绝，
      页面自报覆盖率。剩下 21 行仍是散文。
-161. 把剩下 21 行的键集合也声明出来，从 `--campaign` 开始（它一个 payload 就有 70 个键，页面上还只是四个词）：
-     声明要**从源码的构造处读**，不能凭一次运行的输出抄——抄下来的集合没人核，就成了第二个页面。
+161. 把剩下 21 行的键集合也声明出来，从 `--campaign` 开始（见 §3.181，**已完成 `--campaign` 这一行**）：
+     `Campaign.to_dict()` 的 59 个键加写之前的 9 次赋值 = 68 个键，写者按它拒绝；页面折行后 4/24 行已声明。
+162. 把剩下 20 行也声明出来，同样按源码构造处解析，一次一批：先做会写记录的（`--set-domain-limit`、
+     `--retire`、`run`、`evaluate`），再做只读报告。每声明一行，页面上“还有 N 行是散文”那句话自己会减一；
+     每行的解析脚本留在 var/ 里，声明本身进 cli.py，测试按同一套解析重新读一遍源码。

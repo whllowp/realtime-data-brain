@@ -13,10 +13,16 @@ from brian import cli
 
 
 def _row_text(command):
-    page = cli.format_payload_writers()
-    for line in page.splitlines():
+    """The row and its continuation lines, joined (round 175: a declared row wraps)."""
+    page = cli.format_payload_writers().splitlines()
+    for index, line in enumerate(page):
         if line.strip().startswith(command + " "):
-            return line
+            parts = [line]
+            for following in page[index + 1:]:
+                if not following.startswith(" " * 60) or following.strip()[:1] == "`":
+                    break
+                parts.append(following)
+            return " ".join(part.strip() for part in parts)
     raise AssertionError("no row for %s" % command)
 
 
@@ -72,7 +78,9 @@ def test_the_page_says_which_rows_are_declared_and_which_are_prose():
     assert "%d row(s)" % len(cli.PAYLOAD_KEYS) in page
     for command in cli.PAYLOAD_KEYS:
         assert command in page
-    assert "`--campaign` alone writes far more keys" in page
+    # Round 175 (item 161): the prose rows are counted, not named by hand, so declaring another row
+    # changes the sentence without anybody remembering to edit it.
+    assert "the %d row(s) not declared here" % (len(cli.PAYLOAD_WRITERS) - len(cli.PAYLOAD_KEYS)) in page
 
 
 def _ledger(root):
@@ -94,7 +102,7 @@ def _ledger(root):
     (store / "ledger.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
 
 
-@pytest.mark.parametrize("flag", ["--unrecorded", "--history", "--audit"])
+@pytest.mark.parametrize("flag", ["--unrecorded", "--history", "--audit", "--campaign"])
 def test_each_declared_page_writes_exactly_its_declared_keys(tmp_path, monkeypatch, capsys, flag):
     monkeypatch.chdir(tmp_path)
     _ledger(tmp_path)
@@ -125,3 +133,48 @@ def test_the_declaration_is_not_empty():
     """A rule that checks three rows and calls itself the inventory must say how many it covers."""
     assert len(cli.PAYLOAD_KEYS) >= 3
     assert all(isinstance(keys, tuple) and keys for keys in cli.PAYLOAD_KEYS.values())
+
+
+def test_the_campaign_declaration_comes_from_the_sources_that_build_it():
+    """Round 175 (item 161): a run shows the branches it took; the declaration must come from the code.
+
+    Two places build this payload -- `Campaign.to_dict()` in src/brian/campaign.py and the assignments beside the
+    write in src/brian/cli.py -- so both are read here, by shape, and every key either one names must be declared.
+    """
+    import re
+
+    from brian import campaign as campaign_module
+
+    expected = set(cli.PAYLOAD_KEYS["--campaign"])
+
+    source = __import__("pathlib").Path(campaign_module.__file__).read_text(encoding="utf-8")
+    class_at = source.index("\nclass Campaign:")
+    start = source.index("    def to_dict(self)", class_at)
+    literal = source[start:]
+    literal = literal[literal.index("return {"):]
+    # The literal ends at the first line that closes it (eight spaces and a brace); reading to the next `@` or to
+    # the end of the file walked into the helpers below and counted their nested keys as top-level ones.
+    literal = literal[: literal.index("\n        }\n") + 1]
+    # Top-level keys are the ones indented twelve spaces; a nested dict's keys are deeper, and this payload has
+    # several (`limits`, `queue_paid_by_domain`), whose keys are not keys of the payload.
+    declared = set(re.findall(r'\n {12}"([a-z_]+)":', literal))
+
+    assert declared, "the parse found no keys in Campaign.to_dict"
+    assert declared <= expected, "Campaign.to_dict writes keys the page does not declare: %s" % sorted(declared - expected)
+
+    cli_source = __import__("pathlib").Path(cli.__file__).read_text(encoding="utf-8")
+    line_start = cli_source.index("if args.campaign:")
+    branch = cli_source[line_start:cli_source.index("\n    if args.sensitivity:", line_start)]
+    assigned = set(re.findall(r'\n\s+payload\["([a-z_]+)"\] = ', branch))
+    assert assigned, "the parse found no assignments in the campaign branch"
+    assert assigned <= expected, "the campaign branch writes keys the page does not declare: %s" % sorted(assigned - expected)
+
+
+def test_a_declared_row_wraps_instead_of_running_off_the_terminal():
+    """A 68-key row on one line is 1,400 characters: the page is the deliverable, so it must fit."""
+    page = cli.format_payload_writers().splitlines()
+
+    assert max(len(line) for line in page) <= 170
+    start = next(index for index, line in enumerate(page) if line.strip().startswith("--campaign "))
+    assert page[start + 1].strip().startswith('"'), "the campaign row does not continue on the next line"
+    assert len(cli.PAYLOAD_KEYS["--campaign"]) > 60
