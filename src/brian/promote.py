@@ -1803,6 +1803,106 @@ def record_queue_run(root: Path, run: Mapping[str, Any], now: Optional[datetime]
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
     return entry
 
+# Round 144: the second queue. `--from-queue` keeps `queue_runs.json` and pays no rounds; the re-run queue
+# (`--rerun-unrecorded`, `--with-ceilings`) pays rounds and until now kept no record of itself at all -- so a
+# round's `queue` block said who paid it and not which invocation, and "walk 3" had nothing to point at.
+RERUN_RUNS = "rerun_runs.json"
+RERUN_RUN_FORMAT = "brian.rerun/1"
+RERUN_RUN_LIMIT = 20
+
+
+def _rerun_runs_path(root: Path) -> Path:
+    return _evolve_dir(root) / RERUN_RUNS
+
+
+def rerun_runs(root: Path, limit: int = RERUN_RUN_LIMIT) -> Dict[str, Any]:
+    """The recorded re-run queue invocations, oldest first, plus how many older ones were dropped (round 144).
+
+    One entry per invocation, whether it paid one round or twenty: "the command ran" and "the command paid" are
+    two facts, and a drain that paid nothing (every round refused) still happened.
+    """
+    path = _rerun_runs_path(root)
+    empty = {"format": RERUN_RUN_FORMAT, "runs": [], "trimmed": 0}
+    if not path.is_file():
+        return empty
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty
+    if not isinstance(payload, Mapping):
+        return empty
+    runs = [dict(item) for item in payload.get("runs") or [] if isinstance(item, Mapping)]
+    return {"format": str(payload.get("format") or RERUN_RUN_FORMAT), "runs": runs[-limit:],
+            "trimmed": int(payload.get("trimmed") or 0)}
+
+
+def _write_rerun_runs(root: Path, runs: List[Dict[str, Any]], trimmed: int) -> None:
+    path = _rerun_runs_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"format": RERUN_RUN_FORMAT, "runs": runs, "trimmed": trimmed}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+
+
+def begin_rerun_run(root: Path, run: Mapping[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Reserve this invocation's place in the store **before** it measures anything (round 144).
+
+    The ordinal has to exist while the rounds are being written, because each round records the walk that paid
+    it, and a walk recorded only at the end would leave every round it paid naming a number nobody could look
+    up. Writing the entry first also settles the unattended case: a command that dies mid-walk leaves an entry
+    with `finished: ""`, which says "a walk started and never ended" instead of nothing at all.
+    """
+    moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
+    held = rerun_runs(root)
+    runs = held["runs"] + [{
+        "at": moment.isoformat(),
+        "started": moment.isoformat(),
+        "finished": "",
+        "limit": int(run.get("limit") or 0),
+        "ceiling_limit": run.get("ceiling_limit"),
+        "families": [str(item) for item in run.get("families") or []],
+        "with_ceilings": bool(run.get("with_ceilings")),
+        "paid": 0,
+        "paid_ceilings": 0,
+        "failures": 0,
+        "stopped": False,
+        "rounds": [],
+    }]
+    trimmed = int(held["trimmed"] or 0)
+    if len(runs) > RERUN_RUN_LIMIT:
+        trimmed += len(runs) - RERUN_RUN_LIMIT
+        runs = runs[-RERUN_RUN_LIMIT:]
+    _write_rerun_runs(root, runs, trimmed)
+    return {"walk": len(runs), "of": len(runs) + trimmed}
+
+
+def finish_rerun_run(root: Path, walk: int, run: Mapping[str, Any],
+                     now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    """Write what the reserved entry accomplished, without moving it (round 144).
+
+    Updating the entry rather than appending a second one is the point: the ordinal is the identity, so the walk
+    a round names must stay the same record after the walk finishes. A store trimmed between the two calls
+    returns None instead of guessing -- the rounds still name an ordinal that the store no longer holds, and
+    that is the truth about them.
+    """
+    moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
+    held = rerun_runs(root)
+    runs = held["runs"]
+    index = int(walk or 0) - 1
+    if index < 0 or index >= len(runs):
+        return None
+    entry = dict(runs[index])
+    entry["finished"] = moment.isoformat()
+    entry["paid"] = int(run.get("paid") or 0)
+    entry["paid_ceilings"] = int(run.get("paid_ceilings") or 0)
+    entry["failures"] = int(run.get("failures") or 0)
+    entry["stopped"] = bool(run.get("stopped"))
+    entry["rounds"] = [str(item) for item in run.get("rounds") or []]
+    runs = list(runs)
+    runs[index] = entry
+    _write_rerun_runs(root, runs, int(held["trimmed"] or 0))
+    return entry
+
+
 
 def blocked_versions(root: Path) -> Dict[int, Dict[str, Any]]:
     """Versions whose most recent walk ended on a build defect, and when that walk was.

@@ -133,6 +133,8 @@ from .promote import (
     promotions_for_domain,
     provenance_block,
     record_clearing,
+    begin_rerun_run,
+    finish_rerun_run,
     record_queue_run,
     revert_promotion,
     set_state_budget,
@@ -1229,6 +1231,20 @@ def _recorded_candidates(record: Mapping[str, Any]) -> List[Candidate]:
     return out
 
 
+def _paid_round_names(root: Path, walk: int) -> List[str]:
+    """The rounds whose `queue` block names this invocation (round 144).
+
+    Read back from the records rather than accumulated in the loop: the loop counts what it paid, and a round
+    that recorded itself but failed to retire would be counted twice by a second accumulator and once here.
+    """
+    names = []
+    for record in history(root, include_retired=True):
+        entry = record.get("queue")
+        if isinstance(entry, Mapping) and int(entry.get("walk") or 0) == int(walk or 0):
+            names.append(str(record.get("round") or ""))
+    return [name for name in names if name]
+
+
 def _rerun_limit(args: Any, ready: int) -> int:
     """How many of the ready rounds this invocation re-runs (round 54).
 
@@ -1512,7 +1528,7 @@ def _ceiling_command(payable: int, named: int) -> Optional[str]:
 
 
 def _queue_entry(kind: str, domain: str, name: str, largest_start: Optional[Mapping[str, Any]],
-                 progress: Mapping[str, Any], shape: Mapping[str, Any]) -> Dict[str, Any]:
+                 progress: Mapping[str, Any], shape: Mapping[str, Any], walk: int = 0) -> Dict[str, Any]:
     """What one invocation of the re-run queue records in the round it paid (round 58, extended in round 78).
 
     The record lives in the round because the terminal is gone by the time a reader asks why the ledger moved.
@@ -1522,6 +1538,10 @@ def _queue_entry(kind: str, domain: str, name: str, largest_start: Optional[Mapp
     rounds" push different books).
     """
     entry: Dict[str, Any] = {"paid": domain, "paid_round": name, "family": kind, "shape": dict(shape)}
+    # Round 144: which invocation of the re-run queue paid for this round. The family says who paid; the ordinal
+    # says which walk, and `var/evolve/rerun_runs.json` holds the entry it names (boundary 345). 0 means the
+    # record was written before this store existed.
+    entry["walk"] = int(walk or 0)
     if kind == "file":
         # Only the file family moves the unrecorded share, so only it has a before/after share and an aim.
         entry["largest_at_start"] = dict(largest_start or {})
@@ -2480,7 +2500,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # finished rounds is exactly where a reader asks "what paid for this one".
             queue_entry = record.get("queue")
             if isinstance(queue_entry, Mapping) and queue_entry.get("family"):
-                mark += "  [paid by the %s queue]" % queue_entry.get("family")
+                walk = int(queue_entry.get("walk") or 0)
+                if walk:
+                    # Round 144: "the file queue paid" does not say which run of it, and a queue run twelve
+                    # times has twelve entries in `rerun_runs.json`. The ordinal is what makes the sentence
+                    # checkable (boundary 342's rule, one book over).
+                    mark += "  [paid by the %s queue, walk %d]" % (queue_entry.get("family"), walk)
+                else:
+                    mark += "  [paid by the %s queue]" % queue_entry.get("family")
                 # Round 80: and which record it replaced. The retired round already says what took its
                 # place; this is the same sentence from the other side, so a reader never has to match two
                 # stamps by eye to answer "which measurement is behind this row".
@@ -2706,6 +2733,31 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         largest_start = _largest_debt(root)
         paid_domains: Dict[str, int] = {}
         rules = _rules_from_args(args)
+        # Round 144: this invocation's place in the re-run queue's own store, reserved before the first measurement
+        # so every round it pays can name it. `0` means the store could not be written; the rounds then record
+        # "no walk", which is what happened rather than a number nobody can look up.
+        # Round 144: this invocation's place in the re-run queue's own store, reserved before the first measurement
+        # so every round it pays can name it. `0` means the store could not be written; the rounds then record
+        # "no walk", which is what happened rather than a number nobody can look up.
+        #
+        # Only an invocation with work to do gets a slot: a command that finds nothing payable spends no
+        # measurement, so there is no walk for a later reader to look up, and a store of empty entries would make
+        # "walk 12" mean "somebody typed the command twelve times before it had anything to do" (boundary 346).
+        walk_no = 0
+        if list(ready[:limit]) or list(ceiling_ready[:ceiling_limit]):
+            try:
+                opened = begin_rerun_run(root, {
+                    "limit": limit, "ceiling_limit": ceiling_limit if ceiling_ready else None,
+                    "families": [name for name, opened_ in (("file", bool(ready)),
+                                                            ("ceiling", bool(ceiling_ready))) if opened_],
+                    "with_ceilings": bool(ceiling_ready),
+                })
+                walk_no = int(opened.get("walk") or 0)
+            except OSError:
+                walk_no = 0
+        if walk_no:
+            _print("walk              %d of the re-run queue's recorded invocation(s); each round it pays names it"
+                   % walk_no)
         # Round 73: the per-round work is one function because a second family of rounds needs it -- the rounds
         # that named their file and never recorded a ceiling. The queue reaches them through `--with-ceilings`,
         # which is the only reason the gate may charge that debt (boundary 154).
@@ -2742,7 +2794,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 78: the record also says which family this entry paid and what the invocation opened --
             # a round paid by the ceiling queue and one paid by the file queue are different work, and the
             # record is the only place that survives the terminal (boundary 163).
-            result.queue = _queue_entry(kind, domain, name, largest_start, progress, queue_shape)
+            result.queue = _queue_entry(kind, domain, name, largest_start, progress, queue_shape,
+                                      walk=walk_no)
             _print("")
             _print(format_round(result))
             written = persist(root, result, write_versions=False)
@@ -2811,6 +2864,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # names, one line lower.
                 paid_now += 1
                 paid_domains[domain] = paid_domains.get(domain, 0) + 1
+        if walk_no:
+            try:
+                finished = finish_rerun_run(root, walk_no, {
+                    "paid": paid_now, "paid_ceilings": paid_ceilings, "failures": failures,
+                    "stopped": stopped, "rounds": sorted(_paid_round_names(root, walk_no)),
+                })
+            except OSError:
+                finished = None
+            if finished is None:
+                _print("walk              the invocation it reserved is no longer in the store, so the rounds "
+                       "it paid name an entry that is gone")
         if ceiling_ready:
             still = len(_ceiling_matters(root))
             _print("")

@@ -7794,6 +7794,73 @@ JSON 的另一半是 `--campaign --json-out` 里的 `walks` 块，整份仓库�
 
 **边界 344：页面只印 N 条里的最后一条时，必须说明 N；"最后一次"不是坐标。**
 
+## 3.150 两本账簿：重跑队列也留住自己的行走
+
+第 130 条是上一轮写下的，它假定只有一个仓库。实际有两个，而且两个队列付的钱不是一种钱：
+
+- `--from-queue` 走的是**承诺**：它去原始文件上重新量一遍已发布版本，写下 `verification`，不产生任何一轮。
+  它的行走记在 `var/evolve/queue_runs.json`（第 103 轮），第 143 轮又给它加了序号。
+- `--rerun-unrecorded` / `--with-ceilings` 走的是**轮**：它把没人认领的旧轮重新量一遍、退休、写一个继承者。
+  它付的每一轮里都有一个 `queue` 块（第 58/78 轮），而**它自己没有任何行走记录**——所以第 130 条要求的
+  "记下这是第几次行走"，今天没有可指的仓库。
+
+于是一轮说"是 file 队列付的"，读者却无法回答"哪一次"。修复分四步：
+
+1. `src/brian/promote.py` 新增 `var/evolve/rerun_runs.json`（`brian.rerun/1`、上限 20 条、`trimmed` 计数）。
+2. `begin_rerun_run(root, run)` **在第一次测量之前**占位，返回 `{"walk": n, "of": m}`。占位必须早于花钱：
+   轮是在测量过程中写的，如果行走只在结束时记，那么它付的每一轮都会指向一个当时并不存在的序号。占位
+   也顺带说明了无人看管的情况——中途死掉的命令留下一条 `finished: ""` 的记录，说的是"这次行走开始过、
+   没有结束"，而不是什么也没有。
+3. `finish_rerun_run(root, walk, run)` 回来**改写同一条**记录。序号是身份，所以收尾不能再追加一条：那会把
+   序号变回时间戳（第 142 轮才刚把时间戳从页面上拿掉）。若中途被裁剪，它返回 `None`，页面照实说"它付的
+   轮指的那条记录已经不在了"。
+4. `_queue_entry(..., walk=n)` 把序号写进轮里的 `queue.walk`；`--history` 的行从
+   `[paid by the file queue]` 变成 `[paid by the file queue, walk 1]`；`_paid_round_names(root, walk)` 从记录
+   里读回这个名字（不在循环里另攒一份——那样一个写了记录却没退休成功的轮会被两份账各算一次）。
+
+**没有活的时候不占位。** 第一次实现是无条件占位，于是空队列也留下一条 `paid: 0` 的记录，页面还打印
+`walk 1 of …`。这会让序号的含义变成"有人在这队列还没活的时候敲了十二次命令"。现在只有
+`ready[:limit]` 或 `ceiling_ready[:ceiling_limit]` 非空才占位：
+
+```
+brian evolve --rerun-unrecorded --rerun-limit 1     # 队列为空
+families          0: 0 round(s) from the file queue
+                                                    # 没有 walk 行，也没有 rerun_runs.json
+```
+
+有活的时候（`var/demo144`，从 `var/demo127` 造出来的一轮被抹掉 `stream_path` 并补回候选定义）：
+
+```
+walk              1 of the re-run queue's recorded invocation(s); each round it pays names it
+---- re-running round-old.json on data/smd/stream-one.json
+```
+
+测试里把 `measure` 换成固定值，走的是同一条 CLI 路径，因此能看到钱真的付出去之后的形状：新轮的
+`queue["walk"] == 1`，而 `rerun_runs.json` 的第 1 条是 `{"paid": 1, "rounds": ["round-…"]}`。
+
+同一条路径也真的走了一遍（`var/demo144`，Laya 在 `127.0.0.1:8077`，`reasoner offline`）：`recorded round
+var\evolve\round-20261120T073000Z.json` 之后，那轮的 `queue` 块是
+
+```
+{"paid": "SMD", "paid_round": "round-old.json", "family": "file", "walk": 1, …}
+```
+
+而 `--history` 的两行正好把两种记录并排放着——旧的一轮只有家族，新的一轮说到行走：
+
+```
+ 2  …  [paid by the file queue]  [replacing round-old.json]  …
+ 9  …  [paid by the file queue, walk 1]  [replacing round-old.json]
+```
+
+**边界 345：一条记录声称"是谁付的"，这个声称就必须在一个"付之前就写下的仓库"里能对上。**
+事后补写的序号不是证据，它只是一句和记录同源的断言。
+
+**边界 346：没有活的行走不算行走。** 只在有钱可花时占位；否则序号数的不是工作量，是敲键盘的次数。
+
+**边界 347：收尾要改它占的那条，不要追加第二条。** 追加会让序号在完成的那一刻失效——同一件事有两条
+记录，而只有一条是轮里指的那个。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8353,5 +8420,7 @@ missing for the next level
 129.       并让 `--from-queue` 的载荷带一个 `store` 字段说明它是仓库里的第几条记录——今天读者要靠时间戳才能
       把载荷和 `var/evolve/queue_runs.json` 对上。
 
-130. 让每一轮记下"它是第几次行走产生的"（轮记录里加 `queue.walk`），这样 `--history` 的一行能和
-      `var/evolve/queue_runs.json` 的第 N 条对上——今天 `queue.family` 只说谁付的钱，不说哪一趟付的。
+130. （已完成）让每一轮记下"它是第几次行走产生的"，`queue.walk` 指回重跑队列自己的仓库
+    （`var/evolve/rerun_runs.json`）；`--history` 的行因此能说 `walk N`。见 §3.150。
+131. 让 `--campaign` 也读重跑队列的行走：一共走过几次、其中几次一轮也没付、最后一次是什么时候；并且
+    当一轮指的序号已经被 `RERUN_RUN_LIMIT` 裁掉时，`--history` 要明说"它指的那次行走已经不在仓库里"。
