@@ -8012,6 +8012,59 @@ re-run walks      17 invocation(s) of the re-run queue: 0 by the queue, 17 typed
 清单越长，漏掉一项的机会越多，而漏掉的那一项恰恰是新命令——它最需要预览。
 
 
+## 3.154 一张表，三种读法：家族清单不再是手写的第二份副本
+
+第 135、147 两轮各加了一条批量命令，各自只更新了同一对东西里的一半——要么守卫的判断，要么守卫打印的句子——于是守卫
+拒绝了那次改动刚刚造出来的预览。`--dry-run` 的帮助文本是第三份副本，它只点了五条里的两条。这一轮把清单收成一张表：
+
+```python
+BATCH_PREVIEWS: Tuple[Tuple[str, str], ...] = (
+    ("--settle-reaffirm-file", "settle_reaffirm_file"),
+    ("--settle-restore-file", "settle_restore_file"),
+    ("--settle-drop-file", "settle_drop_file"),
+    ("--settle-reanchor-file", "settle_reanchor_file"),
+    ("--backfill-walks", "backfill_walks"),
+)
+```
+
+判断读它（`previewing_flags(args)`），句子读它（`previews_sentence()`），帮助文本也读它。于是三者不可能再说不同的
+话——拒绝与帮助现在逐字给出同一串：
+
+```
+  --dry-run             with --settle-reaffirm-file, --settle-restore-file,
+                        --settle-drop-file, --settle-reanchor-file or
+                        --backfill-walks: print what the batch command would
+--dry-run previews --settle-reaffirm-file, --settle-restore-file, --settle-drop-file, --settle-reanchor-file or --backfill-walks; without one of those the command would go ahead and record nothing you could see first
+```
+
+**但"有一张表"不等于"这张表被守住"**。真正让下一次改动无法只做一半的，是一条**结构测试**：从解析器里读出
+`evolve` 的全部选项，凡以 `--settle-` 开头、以 `-file` 结尾的都在这个家族里，再加上 `--backfill-walks` 这个
+命名规则盖不住的例外；两边取合集，必须与表逐项相等。于是新增第六条 `--settle-*-file` 而不进表，测试立刻红。
+
+这条测试必须被证明会触发（边界 359）。`var/prove_148.py` 逐行把表里的那一行删掉，再问测试自己的判据是否还会通过：
+
+```
+table == parser family: 5 flag(s), --settle-reaffirm-file, --settle-restore-file, --settle-drop-file, --settle-reanchor-file, --backfill-walks
+drop --settle-reaffirm-file   -> the table/parser test fails (caught)
+drop --settle-restore-file    -> the table/parser test fails (caught)
+drop --settle-drop-file       -> the table/parser test fails (caught)
+drop --settle-reanchor-file   -> the table/parser test fails (caught)
+drop --backfill-walks         -> the table/parser test fails (caught)
+every row is enforced by the structural test
+```
+
+五行全部被抓住，包括那个例外——因为例外是钉在测试里的一段显式代码，而不是"大家记得它特殊"。
+
+**边界 357：一个家族只有在它有命名规则的时候才能被机器守住；盖不住的例外必须钉在守它的那条测试里。**
+`--backfill-walks` 就是这样的例外，它被显式写进 `offered`，于是它和五条同族一样被强制。
+
+**边界 358：帮助文本、拒绝文本、判断条件是一张表的三种读法。**手写的第二份副本总会朝最伤人的方向漂移——漏掉的
+总是最新的那个成员，而它恰恰是唯一还没有被预览过的。
+
+**边界 359：一条"只此一处"的断言，必须被证明会触发；否则它只是一句声明。**`var/prove_148.py` 就是那个证明：
+它不是再跑一遍测试，而是把"漏掉一行"这件事真的做一次，看判据是否出声。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8584,5 +8637,9 @@ missing for the next level
      自报（`backfilled`），不能冒充当时记下的。~~ 已完成（§3.153）：`--backfill-walks`（含 `--dry-run`）读
      `retired.re_measured_as`，去重后写出 17 笔，条目带 `hand`/`backfilled` 与付款本身的时刻；页面分两半印并
      说明"事后补记"。真账本结论：队列付了 0 笔。
-134. 把 `--dry-run` 的家族清单收敛成一张表（一个 `BATCH_FLAGS` 注册表），句子与判断都从它生成——这是同一
-     形态第三次出现（第 135、147 轮），下一次加批量命令不该再靠"记得改两处"。
+134. ~~把 `--dry-run` 的家族清单收敛成一张表，句子与判断都从它生成。~~ 已完成（§3.154）：`BATCH_PREVIEWS`
+     一张表供判断、拒绝句子与帮助文本三种读法；结构测试从解析器读出 `--settle-*-file` 家族加例外
+     `--backfill-walks`，逐项比对；`var/prove_148.py` 逐行删除以证明测试会触发。2050 tests。
+135. 让 `--campaign` 的"重跑行走"那行带上**能改变它的那条命令**：真账本现在是
+     `0 by the queue, 17 typed by hand`，页面只陈述过去，不指出下一笔该由谁来付（哪条命令、今天能付几轮）。
+     第 147 轮的结论不该只留在 §3.153 里。

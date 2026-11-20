@@ -449,6 +449,34 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
 
 PLAN_STEPS = ("restore", "drop", "retake")
 
+# Round 148: the batch commands `--dry-run` can preview, in one table (boundary 356). Rounds 135 and 147 each added a
+# batch command and updated one of the two lists -- the guard's condition, or the sentence it printed -- so the guard
+# refused the very preview the change had just made possible, and the help text named two of five. Both are generated
+# from this table now: a flag that is in it is accepted *and* printed by construction, which is the only version of
+# "remember to update both places" that a person cannot forget.
+BATCH_PREVIEWS: Tuple[Tuple[str, str], ...] = (
+    ("--settle-reaffirm-file", "settle_reaffirm_file"),
+    ("--settle-restore-file", "settle_restore_file"),
+    ("--settle-drop-file", "settle_drop_file"),
+    ("--settle-reanchor-file", "settle_reanchor_file"),
+    ("--backfill-walks", "backfill_walks"),
+)
+
+
+def previewing_flags(args: argparse.Namespace) -> List[str]:
+    """Which batch commands this invocation asked for, in the table's own order (round 148)."""
+    return [flag for flag, attribute in BATCH_PREVIEWS if getattr(args, attribute, None)]
+
+
+def previews_sentence() -> str:
+    """The family as one phrase -- "a, b, c or d" -- so the guard, the help and any page say the same thing."""
+    flags = [flag for flag, _attribute in BATCH_PREVIEWS]
+    if not flags:
+        return "no command"
+    if len(flags) == 1:
+        return flags[0]
+    return ", ".join(flags[:-1]) + " or " + flags[-1]
+
 
 def _plan_counts(rounds_all: List[Mapping[str, Any]], stored: List[Mapping[str, Any]],
                  runs: Sequence[Mapping[str, Any]], target: str) -> Tuple[int, int, int]:
@@ -2143,19 +2171,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # looks like a question must not be answered with silence (boundary 305 again).
         _print("--what-if-records asks the campaign page a question; without --campaign nothing prints it")
         return 2
-    if getattr(args, "dry_run", False) and not (getattr(args, "settle_reaffirm_file", None)
-                                                or getattr(args, "settle_restore_file", None)
-                                                or getattr(args, "settle_drop_file", None)
-                                                or getattr(args, "settle_reanchor_file", None)
-                                                or getattr(args, "backfill_walks", False)):
+    if getattr(args, "dry_run", False) and not previewing_flags(args):
         # Round 130: `--dry-run` exists for the batch commands. Anywhere else it would be silently ignored, and
         # a flag that looks like a safety belt must not be decorative (rounds 103/117/120/127/128, boundary 305).
-        # Round 147: the list grows with the family; a guard that names four of five commands refuses the fifth's
-        # own preview (round 135's defect, in a third place).
-        _print("--dry-run previews --settle-reaffirm-file, --settle-restore-file, --settle-drop-file, "
-               "--settle-reanchor-file or --backfill-walks; without "
-               "one of those the "
-               "command would go ahead and record nothing you could see first")
+        # Round 148: the condition and the sentence are one table's two readings (boundary 356) -- rounds 135 and
+        # 147 both shipped a batch command the guard refused to preview, and the help text named two of five.
+        _print("--dry-run previews %s; without one of those the command would go ahead and record nothing you "
+               "could see first" % previews_sentence())
         return 2
     if getattr(args, "from_queue", None) is not None and not getattr(args, "verify", False):
         # Round 103: only the verify branch reads `--from-queue`. Without it the command measures a fresh round and
@@ -5990,8 +6012,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --campaign: print what that stream file would still owe if its unresolved "
                              "decisions were paid off now (a recomputation; nothing is written)")
     evolve.add_argument("--dry-run", action="store_true",
-                        help="with --settle-reaffirm-file or --settle-restore-file: print the pairs the command "
-                             "would act on, and write nothing")
+                        help="with %s: print what the batch command would do, and write nothing"
+                             % previews_sentence())
     evolve.add_argument("--settle-reaffirm-file", default=None, metavar="STREAM",
                         help="re-take every stale decision on one stream file in a single command, with the same "
                              "--settle-why and --settle-by; the pairs come from the plan `--campaign` prints")
