@@ -603,6 +603,17 @@ PAYLOAD_KEYS: Dict[str, Tuple[str, ...]] = {
                 "versions_not_comparable", "versions_overdue", "versions_reverted", "walks",
                 "withdrawal_plan", "withheld_due_for_check", "withheld_no_longer_holding",
                 "withheld_oldest_evidence_days"),
+    # Round 177 (item 163): the last five shapes, read off the site that builds each one rather than off a run --
+    # a run only takes the branches it took (boundary 419). Two of them are a report class's own to_dict plus the
+    # fields the branch adds, which is why the source is the only complete list.
+    "--set-domain-limit / --set-domain-drain": ("cleared", "files", "in_force", "recorded"),
+    "--sensitivity": ("bar", "bars", "gate", "recorded", "refused", "rounds", "rows", "unreadable"),
+    "--withheld": ("bar", "gate", "withheld"),
+    "evaluate": ("actions", "alert_id", "confidence", "created_at", "decision_id", "degraded", "evidence",
+                 "hypotheses", "latency_ms", "lineage", "model_id", "prompt_version", "rca_id",
+                 "recommendation", "root_cause", "service", "summary"),
+    "dataset --summary-out": ("answers_total", "label_sources", "n_examples", "per_question", "per_scenario",
+                              "state_words", "trainable_answers_total"),
 }
 
 # Round 173 (item 159): the three nothings `--unrecorded` can find, and what each one means. The page names them
@@ -696,12 +707,18 @@ def format_payload_writers() -> str:
                  % len(PAYLOAD_KEYS))
     for chunk in _wrap_items(sorted(PAYLOAD_KEYS)):
         lines.append("  " + chunk)
-    lines.append("_write_payload refuses a payload whose keys disagree with those declarations (boundary 416).")
     undeclared = len(PAYLOAD_WRITERS) - len(PAYLOAD_KEYS)
-    lines.append("_write_payload refuses a payload whose keys disagree with the declaration (boundary 416);")
-    lines.append("the %d row(s) not declared here describe their payload in prose, so a key can be added"
-                 % undeclared)
-    lines.append("there and no check notices (boundary 417).")
+    lines.append("_write_payload refuses a payload whose keys disagree with the declaration (boundary 416).")
+    if undeclared:
+        lines.append("the %d row(s) not declared here describe their payload in prose, so a key can be added"
+                     % undeclared)
+        lines.append("there and no check notices (boundary 417).")
+    else:
+        # Round 177 (item 163): with every row declared, the old sentence read "the 0 row(s) not declared here
+        # describe their payload in prose, so a key can be added there and no check notices" -- a page warning
+        # about a hole it has just closed, which is worse than either truth (boundary 424).
+        lines.append("every row is declared above, so a key added to any of these payloads is refused where that")
+        lines.append("payload is built, and a payload that drops one is refused there too (boundary 424).")
     lines.append("")
     lines.append("A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this")
     lines.append("table and its count move together (boundary 392).")
@@ -2780,7 +2797,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        "files": list(dict.fromkeys(state_files))}
             # Round 163 (item 149): the payload writers were counted, and eight of them still wrote the file
             # themselves -- the round-141 rule had only reached the settlement commands (boundary 389).
-            if not _write_payload(args.json_out, payload):
+            if not _write_payload(args.json_out, payload,
+                                  keys=PAYLOAD_KEYS["--set-domain-limit / --set-domain-drain"]):
                 return 2
         return 0
 
@@ -4038,8 +4056,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # Round 171 (item 157): this page re-decides stored refusals under a ladder of bars; it records
         # nothing and charges nothing, so it says which page would (boundary 410).
         sensitivity_gate = report_footer(False)
+        # Round 177 (item 163): the declared shape of this payload is Sensitivity.to_dict() plus the footer, and
+        # the declaration is written down where the writer can refuse a mismatch (boundary 416).
         if args.json_out and not _write_payload(
-                args.json_out, dict(result.to_dict(), gate=sensitivity_gate), recorded=False):
+                args.json_out, dict(result.to_dict(), gate=sensitivity_gate), recorded=False,
+                keys=PAYLOAD_KEYS["--sensitivity"]):
             return 2
         return 0
 
@@ -4058,7 +4079,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload = {"bar": rules.replication_bar,
                        "withheld": [record.to_dict() for record in records],
                        "gate": withheld_gate}
-            if not _write_payload(args.json_out, payload, recorded=False):
+            if not _write_payload(args.json_out, payload, recorded=False,
+                                  keys=PAYLOAD_KEYS["--withheld"]):
                 return 2
         return 0
 
@@ -5961,7 +5983,9 @@ def cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
     if args.json_out:
         payload = report.to_dict()
         payload["recommendation"] = recommendation
-        if not _write_payload(args.json_out, payload):
+        # Round 177 (item 163): the report class's own keys plus the one this branch adds -- a declaration that
+        # came from a run would have missed the branches the run did not take (boundary 419).
+        if not _write_payload(args.json_out, payload, keys=PAYLOAD_KEYS["evaluate"]):
             return 2
     return 0
 
@@ -6541,7 +6565,8 @@ def cmd_export(args: argparse.Namespace, settings: Settings) -> int:
     path = write_jsonl(examples, args.out)
     _print("")
     _print("wrote %s (%d examples)" % (path, len(examples)))
-    if args.summary_out and not _write_payload(args.summary_out, summary):
+    if args.summary_out and not _write_payload(args.summary_out, summary,
+                                               keys=PAYLOAD_KEYS["dataset --summary-out"]):
         return 2
     return 0
 

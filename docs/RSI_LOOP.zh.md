@@ -9520,6 +9520,70 @@ exit 2                                       # 把声明挖空之后：拒绝，
 **边界 423**：单元素元组要靠逗号才成立；`("k")` 是一条字符串，迭代出来是字符，于是每一个键检查都会给出**看起来像
 乱写、实际是类型**的报错——这类错误只能靠"问题条数 = 键长度"认出来。
 
+### 3.183 最后五行：声明要抄「构造它的那一处」，而「都声明完了」这句话本身也要改
+
+第 174 轮声明了 3 行，第 175 轮 68 个键的 `--campaign`，第 176 轮一次 15 行——剩下五行一直是散文：
+`--set-domain-limit`/`--set-domain-drain`、`--sensitivity`、`--withheld`、`evaluate`、`dataset --summary-out`。
+这一轮把它们补齐，**24 行的表第一次全部有声明**。
+
+五行里前三行有字面量，后两行的键是「一个类的 `to_dict()` 加上这个分支自己加的那一个字段」，所以只能各按各的
+出处抄：
+
+| 行 | 键的出处 | 键数 |
+| --- | --- | --- |
+| `--set-domain-limit / --set-domain-drain` | 写入点旁边的 `payload = {...}`（`in_force` 是嵌套字典，只取顶层） | 4 |
+| `--sensitivity` | `Sensitivity.to_dict()`（7）+ 分支加的 `gate` | 8 |
+| `--withheld` | 写入点旁边的 `payload = {...}` | 3 |
+| `evaluate` | `RcaReport.to_dict()`（16）+ 分支加的 `recommendation` | 17 |
+| `dataset --summary-out` | `export.summarise()` 的返回字面量（空集时只有 `n_examples`，是它的子集） | 7 |
+
+现场把能驱动的三行真跑了一遍（声明错了写者会当场拒绝并退出 2，所以「写出来了」就是「声明对了」）：
+
+```
+s.json ['bar', 'bars', 'gate', 'recorded', 'refused', 'rounds', 'rows', 'unreadable']
+w.json ['bar', 'gate', 'withheld']
+d.json ['cleared', 'files', 'in_force', 'recorded']
+```
+
+后两行不进流水线也能对：`RcaReport(alert_id=…).to_dict() | {"recommendation"}` 与声明**逐键相等**；
+`summarise([])` 是声明子集，`summarise([example])` 与声明相等。这两个检查留在测试里，因为它们要构造对象，
+不需要一次真的评估。
+
+**这一轮真正的发现是那句话**。补齐之后页面上写着：
+
+```
+the 0 row(s) not declared here describe their payload in prose, so a key can be added
+there and no check notices (boundary 417).
+```
+
+**零行未声明**，然后警告「在那里加一个键没人会发现」——页面在跟自己的上一句吵架。前 23 轮的每一轮都只往
+这个句子里**加**（未声明行数变少），没人注意它的意思是「还有洞」；洞补完的那一轮，它才第一次读出矛盾。
+现在分两支：
+
+```
+every row is declared above, so a key added to any of these payloads is refused where that
+payload is built, and a payload that drops one is refused there too (boundary 424).
+```
+
+**「都声明完了」这件事本身也得被检查。** 表有 24 行、声明有 19 条时，从任何一行看都像已经做完了——只有集合差
+说得清。所以新测试的第一条是集合相等，而不是「页面里提到没提到」：
+
+```python
+rows = {name for name, _payload, _kind in cli.PAYLOAD_WRITERS}
+assert rows == set(cli.PAYLOAD_KEYS)
+assert len(cli.PAYLOAD_KEYS) == len(cli.PAYLOAD_WRITERS) == 24
+```
+
+并且**证明它会失败**：`var/prove_177.py` 删掉 `--withheld` 那一条、只跑这个文件、再原样还原（`restored: True`），
+结果 `3 failed, 4 passed`——迟到的行会被点名，页面那两句也会跟着红。
+
+**边界 424**：一句话的前提被这一轮改掉时，这句话本身也要改；否则它会把「还剩多少」读成「永远还剩」。
+**边界 425**：一张表「做完了没有」只有集合差能回答——逐行读过去，缺的那行永远在视线之外。
+
+**遗留的缺口**：`evaluate`/`dataset --summary-out` 的声明只在测试里对着类检查过，`--payload-writers --check`
+目前只验「键在源码里出现过」，不验「与构造它的那个类一致」。第三项笔记里写着——下一轮让 `--check` 也把这两行
+的来源找出来对一遍。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -10186,3 +10250,8 @@ missing for the next level
 163. 剩下的 5 行也声明出来：`--set-domain-limit`/`--set-domain-drain`、`--sensitivity`、`--withheld`、
      `evaluate`、`dataset --summary-out`。它们不是单纯的字面量——要么 payload 来自 `result.to_dict()`
      （按 `--campaign` 的做法定位类与方法），要么来自一份报告对象，得先把键的来源说清楚再声明。
+     **这一轮 24/24**：五行各按出处声明好（嵌套字典只取顶层；`Sensitivity.to_dict()` + `gate`；
+     `RcaReport.to_dict()` + `recommendation`；`summarise()` 的两种形状取并集）。前三行真跑三个 JSON 验证，
+     后两行构造对象逐键比对。补齐之后那句「0 行未声明 …… 加一个键没人会发现」自相矛盾，改成两支；
+     并加了集合相等的完整性测试，`var/prove_177.py` 删掉一行证明它会失败（§3.183）。
+164. 让 `--payload-writers --check` 也核对那两条「类 + 一个字段」的声明：`evaluate` 对着 `RcaReport.to_dict()`、`dataset --summary-out` 对着 `export.summarise()`，这样 CI 不跑流水线也能发现类的字段变了（第 177 轮把这两条检查留在了测试里）。

@@ -80,7 +80,14 @@ def test_the_page_says_which_rows_are_declared_and_which_are_prose():
         assert command in page
     # Round 175 (item 161): the prose rows are counted, not named by hand, so declaring another row
     # changes the sentence without anybody remembering to edit it.
-    assert "the %d row(s) not declared here" % (len(cli.PAYLOAD_WRITERS) - len(cli.PAYLOAD_KEYS)) in page
+    undeclared = len(cli.PAYLOAD_WRITERS) - len(cli.PAYLOAD_KEYS)
+    if undeclared:
+        assert "the %d row(s) not declared here" % undeclared in page
+    else:
+        # Round 177 (item 163): a page with nothing left to declare says so, rather than warning about 0 rows.
+        assert "the 0 row(s) not declared here" not in page
+        assert "every row is declared above" in page
+        assert "refused where that" in page
 
 
 def _ledger(root):
