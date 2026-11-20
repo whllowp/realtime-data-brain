@@ -1823,6 +1823,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (len(settled_rows),
                       ", ".join("%s -> %s" % (str(entry.get("record")), str(entry.get("successor")))
                                 for entry in settled_rows)))
+            # Round 115: the settled row is where a reader looks for "was this decision ever explained", so the
+            # notes belong here, with their author -- and a decision explained twice says so (boundary 241: the
+            # count on one line, the pairs named, never repeated per row).
+            annotated = [entry for entry in settled_rows if entry.get("notes")]
+            if annotated:
+                _print("links             %d of them were explained later: %s"
+                       % (len(annotated),
+                          ", ".join("%s -> %s (%d note(s), last by %s on %s)"
+                                    % (str(entry.get("record")), str(entry.get("successor")),
+                                       len(entry.get("notes") or []),
+                                       str(((entry.get("notes") or [{}])[-1]).get("by") or "")
+                                       or "no one named",
+                                       str(((entry.get("notes") or [{}])[-1]).get("at") or ""))
+                                    for entry in annotated)))
         _print("ceilings          %d of %d round(s) record the wait ceilings they were judged under; %d do not"
                % (len(recorded_limits), len(rounds), len(rounds) - len(recorded_limits)))
         history_rows: List[Dict[str, Any]] = []
@@ -2698,6 +2712,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                    why=str(args.settle_why or ""), by=str(getattr(args, "settle_by", "") or ""))
         except (OSError, ValueError) as error:
             _print("cannot settle that link: %s" % error)
+            # Round 115: a refusal that says "you need a reason" and stops there hides the fact that the old
+            # records are the ones that need explaining. The hint counts them, because "N of your decisions
+            # have no reason" is the sentence that sends a reader to the right command (boundary 129).
+            if "needs a reason" in str(error):
+                unexplained = [item for item in load_settlements(root)
+                               if not str(item.get("why") or "").strip()]
+                if unexplained:
+                    _print("hint            %d recorded decision(s) have no reason at all; `--settle-note "
+                           "RECORD=SUCCESSOR --settle-why TEXT` explains one without moving its date"
+                           % len(unexplained))
             return 2
         if not decision["changed"]:
             _print("settled         %s -> %s was already recorded on %s; nothing to change"

@@ -6178,6 +6178,61 @@ its date, and a later note does not make it explained at the time`。
 看不见的写入——而看不见的写入正是第 83 轮之后所有工作的主题。
 
 
+### 3.121 补写的说明也要有署名
+
+第 114 轮让一条旧决定能补上说明，但只补了"是什么"，没补"是谁"。于是三种完全不同的情况在页面上长得一样：
+一个人解释了三条决定、三个人各解释一条、一条说明没有署名。第 115 轮把这三件事拆开。
+
+```
+$ brian evolve --campaign
+links             1 of those decisions were explained after the fact: the record keeps its date, and a later
+                  note does not make it explained at the time
+links             explained later by: alice 1
+```
+
+没有署名的那条不并进任何名字里，它自己一桶（`and no explainer named 1`）——边界 166（缺失字段必须自成一类）
+在"说明者"这个字段上的第三次应用。
+
+`--history` 的结算行原来只有"哪几对被裁定了"，读者要判断"这条决定解释过没有"得去翻 `settlements.json`。
+现在同一行下面多一句：
+
+```
+links             1 pair(s) were settled by a recorded decision, not by agreement: round-old.json -> round-new.json
+links             1 of them were explained later: round-old.json -> round-new.json (1 note(s), last by alice on 2026-11-20T01:56:49.911843+00:00)
+```
+
+两行而不是每行都标一遍（边界 241）：配对与条数属于这段历史，不属于某一条 round 行。
+
+第三处是这轮最实际的一条。第 113/114 轮的规则合起来会产生一个死角：新的结算必须有理由，而**旧的决定**没有理由
+——一个调用者拿旧的一条去重试 `--settle-link`，得到的是 `settled … was already recorded; nothing to change`
+（看起来成功了），拿新的一条去试，得到的是"需要理由"。两种回答都没有说：真正缺理由的是那几个旧记录，而
+`--settle-note` 就是修它们的命令。
+
+```
+$ brian evolve --settle-link round-other.json=round-new.json
+cannot settle that link: a settlement needs a reason: --settle-why TEXT. A decision nobody can explain is the
+record nobody dares review. If the decision is already recorded, `--settle-note RECORD=SUCCESSOR --settle-why
+TEXT` adds the explanation without moving its date
+hint            1 recorded decision(s) have no reason at all; `--settle-note RECORD=SUCCESSOR --settle-why TEXT`
+                explains one without moving its date
+exit: 2
+```
+
+`hint` 只在真的存在这种记录时才打印，并且给出条数：一句"你可以用另一个命令"没有数字，读者就没法判断值不值得跑。
+
+三条边界：
+
+**边界 260：说明的署名是说明的一部分。** 一个人解释三条决定与三个人各解释一条不是同一个事实，一条没署名的说明
+也不是"某个人"的说明。三者必须分开数，否则"这些决定都解释过了"会把"没人愿意署名"读成"有人负责"。
+
+**边界 261：拒绝必须指向能修它的命令。** `--settle-link` 拒绝一个没有理由的新决定时，如果不说旧记录可以用
+`--settle-note` 补写，读者只知道自己这条不合规，不知道账本里那几条是可以修的——规则之间存在死角时，
+报错文本就是唯一能指出另一条路的地方（边界 185 在"校验"上的版本）。
+
+**边界 262：一页列出被裁定的决定，就要在同一页说清它有没有被解释。** "settled" 读起来像"已经决定并且已经说清"，
+而实际可能只是"有人裁了，没人解释"。说明放在这一段历史的头上，而不是每一行，因为它是分组的属性（边界 241）。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6630,6 +6685,11 @@ missing for the next level
       `repair_history`（action 为 `settle-note`，计划没动也照实打印）；`--audit` 把"补写的说明"排在
       "决定自带的理由"之后并单独成段，`--campaign` 单独数"事后才补上理由的决定"。第 114 轮做完了这件事
       （1664 → 1677 个测试）。留下的问题见第 101 项。
-101. 让 `--campaign` 把"事后补写的说明"按人拆开，并且在 `--settle-link` 被拒时（没有 `--settle-why`）直接
-      指向 `--settle-note`：现在一次失败的结算只会说"需要理由"，不会说旧记录可以用补写的方式修；另外让
-      `--history` 的结算行也带上 note 的条数与最后一位说明者的名字，让一条决定的历史在一页里读完。
+101. 让 `--campaign` 把"事后补写的说明"按人拆开（`explained later by: alice 2, and no explainer named 1`），
+     `--history` 的结算行带上 note 的条数与最后一位说明者，`--settle-link` 因缺理由被拒时两步都说清出路：
+     错误文本里点名 `--settle-note`，被拒绝时再按现存记录数打印一行 `hint`。第 115 轮做完了这件
+     （1677 → 1687 个测试）。留下的问题见第 102 项。
+102. 让"事后说明"进入 `--audit` 的严格闸门与 `--campaign` 的 JSON：现在一条被补写过的决定只是在页面上多一行
+      文字，`--json-out` 里没有它的条数与说明者，脚本无法据此判断"还有几条决定没人能解释"；另外让
+      `--settle-note` 拒绝覆盖一条已有 note（同一对、同一时刻两条不同理由），并让 `--history` 在结算行上
+      标出"这条决定仍未解释"，把"没有理由"从一句遍在的说明变成每行可查的状态。

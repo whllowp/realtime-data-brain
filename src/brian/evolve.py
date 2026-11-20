@@ -2718,8 +2718,12 @@ def settle_link(root: Path, record: str, successor: str, why: str = "", by: str 
                 "changed": False}
     reason = str(why or "").strip()
     if not reason:
+        # Round 115: a refused new decision must name the other route, because the common case is a *recorded*
+        # decision that has no reason yet -- that one is explained, never rewritten (rounds 114/257).
         raise ValueError("a settlement needs a reason: --settle-why TEXT. "
-                         "A decision nobody can explain is the record nobody dares review")
+                         "A decision nobody can explain is the record nobody dares review. "
+                         "If the decision is already recorded, `--settle-note RECORD=SUCCESSOR --settle-why TEXT` "
+                         "adds the explanation without moving its date")
     # `evolve` owns no clock helper of its own: `promote._stamp_moment` is on the other side of the import
     # cycle, so the moment is normalised here (round 112).
     moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)

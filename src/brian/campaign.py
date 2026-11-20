@@ -1176,6 +1176,21 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         if explained:
             lines.append("links             %d of those decisions were explained after the fact: the record keeps "
                          "its date, and a later note does not make it explained at the time" % explained)
+            # Round 115: an explanation has an author, and one person explaining three decisions is a different
+            # fact from three people explaining one each. A note written without --settle-by is its own bucket,
+            # never folded into the named ones (boundary 166).
+            explainers: Dict[str, int] = {}
+            for item in result.settlements:
+                for note in item.get("notes") or []:
+                    if not isinstance(note, Mapping):
+                        continue
+                    who = str(note.get("by") or "").strip()
+                    explainers[who] = explainers.get(who, 0) + 1
+            if explainers:
+                ordered = sorted(explainers.items(), key=lambda pair: (-pair[1], pair[0]))
+                lines.append("links             explained later by: %s"
+                             % ", ".join("%s %d" % (who if who else "and no explainer named", count)
+                                         for who, count in ordered))
     # Round 111: the ranking said which file to open first; this says whether last time's opening helped.
     last = (result.repair_history or {}).get("last") or {}
     if isinstance(last, Mapping) and last.get("at"):
