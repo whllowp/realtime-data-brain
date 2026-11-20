@@ -1883,8 +1883,9 @@ def refusal_history(root: Path) -> Dict[int, Dict[str, Any]]:
     runs = [run for run in held["runs"] if isinstance(run, Mapping)]
     standing = blocked_versions(root)
     history: Dict[int, Dict[str, Any]] = {}
-    # Newest first: the first stamp seen for a promise is the newest refusal, the last one is the oldest.
-    for run in reversed(runs):
+    # Oldest first, so each attempt can name the walk it happened in: "refused in walk 2 of 4" is a sentence a reader
+    # can find in the store, while "refused at 00:37:28.706167" only matches a stamp (boundary 242).
+    for ordinal, run in enumerate(runs, start=1):
         moment = str(run.get("at") or "")
         for item in run.get("attempted") or []:
             if not isinstance(item, Mapping) or int(item.get("code") or 0) != 2:
@@ -1893,9 +1894,11 @@ def refusal_history(root: Path) -> Dict[int, Dict[str, Any]]:
             if not version:
                 continue
             row = history.setdefault(version, {"version": version, "count": 0, "first_at": "", "last_at": "",
-                                              "reasons": [], "walks": len(runs), "_moments": []})
+                                              "reasons": [], "walks": len(runs), "_moments": [],
+                                              "_ordinals": []})
             row["count"] += 1
             row["_moments"].append(moment)
+            row["_ordinals"].append(ordinal)
             why = str(item.get("why") or "")
             if why and why not in row["reasons"]:
                 row["reasons"].append(why)
@@ -1908,7 +1911,29 @@ def refusal_history(root: Path) -> Dict[int, Dict[str, Any]]:
         if moments:
             row["first_at"] = next((item for item in moments if item), "")
             row["last_at"] = next((item for item in reversed(moments) if item), "")
+        ordinals = sorted(int(item or 0) for item in row.pop("_ordinals", []))
+        if ordinals:
+            row["first_walk"] = ordinals[0]
+            row["last_walk"] = ordinals[-1]
     return history
+
+
+def latest_refusals(root: Path) -> Dict[str, Any]:
+    """Which promises the most recent walk refused, if any (round 108).
+
+    The history answers "how often was this promise refused"; a reader also wants "what did the last walk hit", because
+    that is the state of the queue as somebody left it. Kept apart from `refusal_history` so neither has to guess the
+    other's shape.
+    """
+    held = queue_runs(root)
+    runs = [run for run in held["runs"] if isinstance(run, Mapping)]
+    if not runs:
+        return {"walk": 0, "walks": 0, "at": "", "versions": []}
+    run = runs[-1]
+    versions = sorted({int(item.get("version") or 0) for item in run.get("attempted") or []
+                       if isinstance(item, Mapping) and int(item.get("code") or 0) == 2})
+    return {"walk": len(runs), "walks": len(runs), "at": str(run.get("at") or ""),
+            "versions": [version for version in versions if version]}
 
 
 def _blocked_reason(root: Path, version: int) -> str:
@@ -1986,6 +2011,7 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
             if isinstance(item, Mapping) and int(item.get("code") or 0) == 2:
                 version = int(item.get("version") or 0)
                 attempts[version] = attempts.get(version, 0) + 1
+    history = refusal_history(root)
     dossier: Dict[str, Dict[str, Any]] = {}
     for version, row in blocked.items():
         origin = origins.get(version, "") or "(unnamed)"
@@ -2006,6 +2032,16 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
     for entry in dossier.values():
         entry["records"] = sorted(entry["records"])
         entry["reasons"] = sorted(entry["reasons"])
+        # Round 108: how many of the recorded walks refused any promise born with this file, all its promises
+        # together. The per-promise count lives in `refusal_history`; this is the file's bill.
+        entry["refused"] = sum(int(history.get(version, {}).get("count") or 0) for version in entry["records"])
+        entry["last_walk"] = max((int(history.get(version, {}).get("last_walk") or 0)
+                                  for version in entry["records"]), default=0)
+        entry["first_walk"] = min((int(history.get(version, {}).get("first_walk") or 0)
+                                   for version in entry["records"]), default=0)
+        # The window the ordinals are counted in: "walk 3" means nothing without "of 4".
+        entry["walks"] = max((int(history.get(version, {}).get("walks") or 0)
+                              for version in entry["records"]), default=0)
     return dict(sorted(dossier.items()))
 
 

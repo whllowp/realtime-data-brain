@@ -1088,8 +1088,11 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         count = int(entry.get("count") or 0)
         if not count:
             continue
-        lines.append("links             v%03d was refused by the queue %d time(s) among %d recorded walk(s): first %s, last %s%s"
+        # Round 108: the walk ordinal, so the sentence points at a row a reader can open rather than at a stamp.
+        lines.append("links             v%03d was refused by the queue %d time(s) among %d recorded walk(s): "
+                     "walk %s to %s, first %s, last %s%s"
                      % (int(entry.get("version") or 0), count, int(entry.get("walks") or 0),
+                        str(entry.get("first_walk") or "?"), str(entry.get("last_walk") or "?"),
                         str(entry.get("first_at") or "?"), str(entry.get("last_at") or "?"),
                         ", and the refusal still stands" if entry.get("standing")
                         else ", and it no longer stands"))
@@ -1111,10 +1114,13 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             versions = ", ".join("v%03d" % int(item) for item in entry.get("records") or [])
             records = [int(item) for item in entry.get("records") or []]
             retried = [int(item) for item in entry.get("retried") or []]
-            line = ("links             blocked by the books: %s %d promise(s) (%s), %d refusal(s) across %s, last "
-                    "%s" % (origin, len(records), versions, int(entry.get("attempts") or 0),
-                            ("%d retried promise(s)" % len(retried)) if retried else "none retried",
-                            str(entry.get("last_at") or "unknown")))
+            # Round 108: the file's bill -- the refusals of every promise born with it, not only the standing ones.
+            line = ("links             blocked by the books: %s %d promise(s) (%s), %d refusal(s) across %s, "
+                    "last %s (walk %s of %d; its promises were refused %d time(s) in the recorded walks)"
+                    % (origin, len(records), versions, int(entry.get("attempts") or 0),
+                       ("%d retried promise(s)" % len(retried)) if retried else "none retried",
+                       str(entry.get("last_at") or "unknown"), str(entry.get("last_walk") or "?"),
+                       int(entry.get("walks") or 0), int(entry.get("refused") or 0)))
             reasons = [str(item) for item in entry.get("reasons") or [] if str(item)]
             if reasons:
                 # Named here rather than on each history row: this is the one place the contradiction is printed

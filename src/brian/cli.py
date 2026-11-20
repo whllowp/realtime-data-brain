@@ -101,6 +101,7 @@ from .promote import (
     in_force_history,
     blocked_versions,
     refusal_history,
+    latest_refusals,
     last_queue_run,
     in_force_overrides,
     legacy_state_note,
@@ -1728,11 +1729,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         for version in sorted(refusal_rows):
             entry = refusal_rows.get(version) or {}
             _print("refusals          v%03d was refused by the queue %d time(s) among %d recorded walk(s): "
-                   "first %s, last %s%s"
+                   "walk %s to %s, first %s, last %s%s"
                    % (version, int(entry.get("count") or 0), int(entry.get("walks") or 0),
+                      str(entry.get("first_walk") or "?"), str(entry.get("last_walk") or "?"),
                       str(entry.get("first_at") or "?"), str(entry.get("last_at") or "?"),
                       ", and the refusal still stands" if entry.get("standing")
                       else ", and it no longer stands"))
+        # Round 108: the state of the queue as the last walk left it, which no per-promise history can state.
+        latest = latest_refusals(root)
+        if int(latest.get("walk") or 0):
+            refused_now = [int(item) for item in latest.get("versions") or []]
+            _print("refusals          the last walk (%d of %d) refused %s"
+                   % (int(latest.get("walk") or 0), int(latest.get("walks") or 0),
+                      ", ".join("v%03d" % version for version in refused_now) if refused_now
+                      else "no promise"))
         if link_defects:
             _print("links             %d replacement link(s) disagree with their other end: %s"
                    % (len(link_defects), ", ".join(sorted({str(item["round"]) for item in link_defects}))))

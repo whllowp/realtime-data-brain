@@ -5828,6 +5828,50 @@ refusals          v020 was refused by the queue 1 time(s) among 1 recorded walk(
 **边界 241**：同一条事实在每一行上重复，不是强调而是噪声；一条承诺由多条记录产出时，计数属于表头，行只留短标记。
 这是边界 235 的第二个字段：上一轮是"哪本书挡的"，这一轮是"挡了几次"。
 
+### 3.114 第几趟，比几点几分更有用：拒绝史要用趟号说话
+
+第 107 轮把拒绝做成了历史，但每一条都只带时间戳：
+
+```
+refusals          v020 was refused by the queue 2 time(s) among 4 recorded walk(s):
+                  first 2026-11-20T00:34:56.791204+00:00, last 2026-11-20T00:37:12.104887+00:00
+```
+
+读者拿到这一行，没有任何办法把它对上 `var/evolve/queue_runs.json` 里的某一条。时间戳只能和时间戳匹配，而一趟
+走访在存储里是有位置的：第几趟、一共几趟。第 108 轮把位置写进句子：
+
+```
+refusals          v020 was refused by the queue 2 time(s) among 2 recorded walk(s):
+                  walk 1 to 2, first 2026-11-20T01:04:44.307262+00:00, last 2026-11-20T01:06:16.776565+00:00,
+                  and the refusal still stands
+refusals          the last walk (2 of 2) refused v020
+```
+
+第二行是另一件事实：版本的拒绝史说"它被拒过几次"，最后一趟说"队列被留在什么状态"。一句属于版本，一句属于队列，
+所以分成两行。`latest_refusals(root)` 只读最新一条 run 的 `attempted`，空队列返回
+`{"walk": 0, "walks": 0, "at": "", "versions": []}`——"没走过"和"走过但没拒人"是两种状态，不能都印成空白
+（对应 162 号边界）。
+
+**同一个总数，两种事实。** 第 105 轮的档案只数"现在还被挡着的承诺"，于是"这个文件名下被拒了几次"没有行。补上
+`refused` 之后又出现一次误读：先把 `(walk 3 of 3 count this file's promises)` 里的 "of" 写成拒绝次数，于是同一行
+同时印出 `walk 3 of 2`——一个窗口序号配一个拒绝计数。修法是给档案条目补 `walks`（名下各承诺的窗口取最大），句子
+变成：
+
+```
+blocked by the books: data/smd/stream-real.json 1 promise(s) (v020), 2 refusal(s) across 1 retried
+promise(s), last 2026-11-20T01:06:16.776565+00:00 (walk 2 of 2; its promises were refused 2 time(s) in
+the recorded walks)
+```
+
+一句里同时有"几趟里第几趟"和"这个名字下被拒了几次"，因为读者要判断的是花不花一轮去修账本，而这两件事一起才
+构得成判断。
+
+**边界 242：一份用时间戳命名事件的历史，读者打不开；事件在它窗口里的序号，才是可定位的。**
+
+**边界 243：一个承诺被拒三次和一个文件下三个承诺各被拒一次，是不同的故障；总数必须同时给出计数和窗口，否则两
+种情况印成同一句。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6253,4 +6297,11 @@ missing for the next level
 
 93. （已完成）给每条被挡过的承诺一份拒绝史：`refusal_history()` 按承诺汇总"被挡几趟、第一次、最后一次、是否还成立"；`--history` 用一行 `refusals` 表头承载计数与时间戳、行上只留短标记；`--campaign` 与 `--json-out` 用同一份数字。文档 §3.113，测试 `tests/test_refusal_history.py`（10 项）。
 
-94. 让 `--campaign` 把拒绝史和档案连起来：档案行（按原件文件分组）里补上"这份原件上的承诺合起来被挡过几趟"，并让 `--history` 的 `refusals` 表头点出最近一趟走的所有被挡承诺，使"这个文件上问题最集中的一处"能一眼看到；同时给 `refusal_history()` 一份 `first_walk`/`last_walk` 的趟号（在窗口内的序号），让"第 3 趟被挡、第 4 趟修好"这种句子可以直接写出来。
+94. 已完成：拒绝史用趟号说话（第 108 轮）。`refusal_history()` 的每一行现在带 `first_walk`/`last_walk`（按时间
+    排序后在窗口里的序号），`latest_refusals()` 单列"最后一趟拒了谁"，`blocked_dossier()` 为每个原始文件记上
+    `refused`（这个文件名下的承诺合起来被拒了几次）与 `walks`（窗口多大）。`--history` 打两行（版本自己的拒绝
+    史 + 最后一趟的结论），`--campaign` 的档案行末尾写
+    `(walk 2 of 2; its promises were refused 2 time(s) in the recorded walks)`。1587 → 1597 tests。
+95. 让拒绝史与档案互相指认：`--campaign` 的档案行直接说出"这一趟拒了它，之前还有哪几趟拒过"，并让
+    `--verify --from-queue 0` 的清单为每条被挡的承诺标出它的拒绝史（几次、哪几趟、是否还成立），
+    这样"要不要花一轮去修账本"能在同一页上判断。

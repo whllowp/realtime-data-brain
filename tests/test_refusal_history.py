@@ -82,7 +82,8 @@ def test_the_history_page_names_the_count_and_the_first_and_last(tmp_path, monke
     monkeypatch.chdir(tmp_path)
     assert cli.cmd_evolve(argparse.Namespace(history=True), None) == 0
     printed = capsys.readouterr().out
-    assert "was refused by the queue 2 time(s) among 2 recorded walk(s): first " in printed
+    assert "was refused by the queue 2 time(s) among 2 recorded walk(s): walk 1 to 2, first " in printed
+    assert "the last walk (2 of 2) refused v020" in printed
     # The row itself says only the short fact; the counts live on the header line (boundary 235).
     assert "[refused by the queue, still standing]" in printed
 
