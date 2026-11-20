@@ -8163,6 +8163,68 @@ left to pay       nothing for the queue to pay today: every round that still dec
 函数，否则"它承诺付什么"和"还剩下什么"是两本账。**边界 365**：同一句话出现在两个时刻，就必须有标签说明
 是哪一刻，否则一个数字看起来在反驳它自己。
 
+### 3.157 付不动的那一半：把"没有命令能付"从句子里的减法变成页面上的两段
+
+第 71 轮把上限欠账按域数出来，第 72 轮只收"付得动"的那部分，第 74 轮让句子点名付它的命令。三件事都对，合起来
+仍然缺一句话。真账本上的欠账行是：
+
+```
+ceiling debt      47 of 56 round(s) do not record the ceilings they were judged under, and none of them can be re-run, so the default --max-limit-drift cap stays a warning
+```
+
+`none of them can be re-run` 是真的，也是全部信息量。47 轮分两种：一种轮记录了自己的文件、只是没记上限，第 73 轮
+之后 `--with-ceilings` 能重跑它；另一种既没记文件、也不再影响任何在册版本或拒付，任何命令都碰不到它，缺的是
+**修记录**，不是跑队列。第 150 轮第一次在真账本上真正付掉 9 轮之后，第一种清了，剩下 47 轮全是第二种——句子没说
+这件事，读者得自己做减法。
+
+于是这一轮加两处。
+
+**一、欠账行点名付不动的那部分。** `format_ceiling_shortfall` 收第三个计数 `unpayable`，并把它夹到
+`missing - payable - named` 之内（句子里的三个数必须能对上账）：
+
+```
+ceiling debt      2 of 3 round(s) do not record the ceilings they were judged under; re-running 1 of them would leave 1 without one, so the default --max-limit-drift cap stays a warning; 1 of them are out of reach: no command can pay a round that names no single file, or that no longer decides anything; measure them with brian evolve --rerun-unrecorded --rerun-limit 0
+```
+
+`unpayable == 0` 时这段是空串，历史句子逐字节不变——一个新子句只在一个新数字非零时出现，这样旧记录的复述不会被
+这一轮改写。三个分支（有可付、无可付有具名、完全付不动）都接上它。
+
+**二、`--unrecorded` 的表分成两段。** 同一张表里，前一类行的下一步是"跑一条命令"，后一类行的下一步是"修记录"，
+把两种行排在一起，等于给第一类递了命令、给第二类递了同一个命令：
+
+```
+rounds            2 of 3 cannot be attributed; 2 of them still decide something
+queue             1 round(s) can be re-run here; 0 already re-measured; the share would fall 67% -> 33%
+
+payable           1 round(s) name exactly one candidate file, so the queue can re-run them
+
+out of reach      1 round(s) name no single file (none, or several), so no command can re-run them while the record stands
+
+domain           round                            likely file                        why it still matters
+----------------------------------------------------------------------------------------------------------------------------------
+SMD              round-ceilings-missing.json      data/smd/stream-one.json           wrote 1 version(s) still on the page; 1 refusal(s) still carried  [+ceilings]
+SMD              round-out-of-reach.json          unknown                            wrote 1 version(s) still on the page  [+ceilings]
+```
+
+脚注也跟着分成两句：可付行"重跑一条，名单就短一条"，付不动行"缺的是一条修好的记录，不是一次重跑"。JSON 里
+`matters` 之外新增 `payable` / `out_of_reach` 两个列表，`ceilings` 块补 `named` / `unpayable`——取数的人不必自己
+再实现一遍"哪一行付得动"的规则。
+
+三个地方（页面、欠账行、payload）现在读同一个 `ceiling_unpayable`，它和另外两个计数一起在分支之前算出来。第一次
+把它写在 `--campaign` 分支里，`--unrecorded --json-out` 当场 `UnboundLocalError`——"同一个数在三处出现"这句
+话，落地的时候就是"一处算，三处读"。
+
+**三条读法。** 一是"付不动"不是一个数字，是一个分类：读者要决定的是下一步跑命令还是修记录，页面的形状应当替
+他答。二是欠账的减法要写在句子里：`47 里 47 付不动` 比 `47` 更能说明这一轮该做什么。三是一个只在新数字非零时
+出现的子句，是让旧句子保持不变的最省办法。
+
+**边界 366：欠账计数必须点名"没有任何命令能降低"的那部分。** 让读者自己做减法，等于让读者自己判断一条记录缺陷
+和一笔队列欠账的区别，而那正是这个页面存在的理由。
+
+**边界 367：一张表混着两种下一步时，要按"下一步不同"拆开。** 可付的行邀请一条命令，付不动的行邀请一次修记录；
+同一张表把它们排在一起，等于建议了一条对一半行无效的命令。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8747,6 +8809,8 @@ missing for the next level
      两处印）。~~ 已完成（§3.156）：`offer` 与 `left to pay` 两行都由 `_rerun_offer()` 生成；顺手修掉了第 149 轮
      的分母——"能付"只数恰好一个候选文件的轮，说不清文件的单独计数（`unplaceable`），真账本第一趟队列付款
      （walk 18，9 轮）就是这次拖干的产出。
-137. 让 `--campaign` 的上限欠账行也说清 47 轮里有多少轮是"任何命令都付不动"的（今天只说 `none of them can be
-     re-run`），并把 `--unrecorded` 的行分成"可付"与"付不动"两段，好让读者一眼看出哪一半缺的是命令、哪一半
-     缺的是记录。
+137. ~~让 `--campaign` 的上限欠账行也说清 47 轮里有多少轮是"任何命令都付不动"的，并把 `--unrecorded` 的行
+     分成"可付"与"付不动"两段。~~（第 151 轮：§3.157）
+
+138. 让 `--unrecorded` 的"付不动"那一段也能被修好：写一条命令（`--set-stream-path` 或重新测量）把"没有单一
+     文件"的轮补上文件，跑完之后这一段自己变短；今天页面只能说"缺的是修好的记录"，说不出该修哪一条。

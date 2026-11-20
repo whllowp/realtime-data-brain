@@ -2280,6 +2280,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # clause vanish (named was clamped to missing - payable == 0).
     ceiling_file_payable = ceiling_payable
     ceiling_payable += ceiling_named
+    # Round 151: the third part of the debt -- rounds no command can lower, because they name no single file or
+    # no longer decide anything. It is computed here, with the other two, so the campaign sentence, the
+    # --unrecorded page and its payload cannot disagree about how the debt splits (boundary 366).
+    ceiling_unpayable = max(0, ceiling_missing - ceiling_file_payable - ceiling_named)
 
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
         written: List[Tuple[str, Optional[float], Optional[float], bool, bool]] = []
@@ -3185,6 +3189,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("")
             _print("Every round that still decides something says which file it measured.")
             return 0
+        # Round 151 (item 137): the table mixed two different situations in one list. A round with one
+        # candidate file can be paid by the queue; a round with none, or with several, cannot be re-run by any
+        # command as the record stands -- the missing thing there is a record, not a measurement. Two tables,
+        # because a reader who runs the queue wants to know which rows the command will actually take.
+        payable_rows = [row for row in matters if len(row[3]) == 1]
+        reachless_rows = [row for row in matters if len(row[3]) != 1]
+        if payable_rows:
+            _print("")
+            _print("payable           %d round(s) name exactly one candidate file, so the queue can re-run them"
+                   % len(payable_rows))
+        if reachless_rows:
+            _print("")
+            _print("out of reach      %d round(s) name no single file (none, or several), so no command can "
+                   "re-run them while the record stands" % len(reachless_rows))
         _print("")
         _print("%-16s %-32s %-34s %s" % ("domain", "round", "likely file", "why it still matters"))
         _print("-" * 130)
@@ -3193,12 +3211,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # because the reader is deciding which rows to run, not how many.
         lacking = {str(record.get("round") or ""): not record.get("limits")
                    for record in history(root, include_retired=False)}
-        for domain, name, why, files in matters:
+        for domain, name, why, files in payable_rows + reachless_rows:
             note = "  [+ceilings]" if lacking.get(str(name)) else ""
             _print("%-16s %-32s %-34s %s%s" % (domain, name, _candidate_label(files), why, note))
         _print("")
-        _print("Re-run one with `brian evolve --stream-file <file>`: the new record names the file, and this")
-        _print("list shrinks. The likely-file column is matched by geometry, not written anywhere: a file whose")
+        if reachless_rows:
+            _print("Re-run one of the reachable rows with `brian evolve --stream-file <file>`: the new record")
+            _print("names the file, and this list shrinks. The out-of-reach rows stay: no command re-measures a")
+            _print("round that names no single file, so what they need is a repaired record, not a re-run.")
+        else:
+            _print("Re-run one with `brian evolve --stream-file <file>`: the new record names the file, and this")
+            _print("list shrinks.")
+        _print("The likely-file column is matched by geometry, not written anywhere: a file whose")
         _print("summary disagrees with the round's is never proposed, and a round that matches none is shown")
         _print("as such rather than given the nearest name (boundary 102).")
         if args.json_out:
@@ -3206,11 +3230,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _json({"rounds": len(rounds), "unattributed": unknown,
                        "matters": [{"domain": d, "round": n, "why": w, "files": f}
                                    for d, n, w, f in matters],
+                       # Round 151: the same split the page prints, so a consumer does not re-derive the rule.
+                       "payable": [{"domain": d, "round": n, "why": w, "files": f}
+                                   for d, n, w, f in payable_rows],
+                       "out_of_reach": [{"domain": d, "round": n, "why": w, "files": f}
+                                        for d, n, w, f in reachless_rows],
                        # Round 72: which of these rows would also record their ceilings, and what the debt
                        # would look like afterwards -- the two numbers a reader deciding whether to run the
                        # queue has to add up by hand otherwise.
                        "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
                                     "payable": ceiling_payable,
+                                    # Round 151: the same three parts the page names, so a consumer subtracting
+                                    # "missing - payable" by hand cannot mistake a repair for a queue debt.
+                                    "named": ceiling_named,
+                                    "unpayable": ceiling_unpayable,
                                     "after": max(0, ceiling_missing - ceiling_payable),
                                     "by_domain": ceiling_rows}}),
                 encoding="utf-8")
@@ -3256,8 +3289,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # Round 71/72: the shortfall and the queue's reach were computed once before the branches, so the page
         # and the gate cannot disagree about how many rounds lack ceilings or how many of them a re-run pays.
         # Round 74: the sentence names the command that lowers the debt, and it keeps the two families apart.
+        # Round 151 (item 137): the third count is the part of the debt no command can lower -- a round that
+        # names no single file, or no longer decides anything. The gate charges only what is payable (boundary
+        # 154), and the sentence now says so instead of leaving the reader to subtract (boundary 366).
         ceiling_note = format_ceiling_shortfall(ceiling_rows, payable=ceiling_file_payable,
-                                                named=ceiling_named,
+                                                named=ceiling_named, unpayable=ceiling_unpayable,
                                                 command=_ceiling_command(ceiling_file_payable, ceiling_named))
         # Round 149: `0 by the queue` is a fact about the past; the page also says what the queue could pay
         # today and names the command, computed once so the page and the payload print one sentence (boundary 360).

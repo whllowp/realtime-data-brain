@@ -4550,7 +4550,8 @@ def ceiling_shortfall(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
 
 
 def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0,
-                             named: int = 0, command: Optional[str] = None) -> Optional[str]:
+                             named: int = 0, command: Optional[str] = None,
+                             unpayable: int = 0) -> Optional[str]:
     """One sentence about the rounds that do not record their ceilings, and whether a command could change it.
 
     The number is only worth printing when it can move: `payable` is how many of the missing rounds the re-run
@@ -4561,6 +4562,12 @@ def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0
     Round 74: when a command can lower the debt the sentence ends by naming it. A reader told "this would arm
     the gate" and not told what to type has a diagnosis instead of a next step (round 59's lesson, applied to
     the part of the debt that is still missing rather than to the queue's order).
+
+    Round 151 (item 137): a third kind of round is neither payable nor merely unnamed -- it names no single
+    file, or it no longer decides anything, so **no command** can re-measure it and the debt it represents is
+    a record defect rather than a queue debt. `unpayable` says how many of those there are; the clause is
+    appended only when it is non-zero, so every sentence written before this round stands unchanged when
+    nothing is out of reach (boundary 366).
     """
     missing = sum(int(row.get("missing") or 0) for row in rows)
     total = sum(int(row.get("rounds") or 0) for row in rows)
@@ -4569,23 +4576,29 @@ def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0
     text = "%d of %d round(s) do not record the ceilings they were judged under" % (missing, total)
     payable = max(0, min(int(payable), missing))
     named = max(0, min(int(named), missing - payable))
+    unpayable = max(0, min(int(unpayable), missing - payable - named))
+    reach_out = ("; %d of them are out of reach: no command can pay a round that names no single file, or that no "
+                 "longer decides anything" % unpayable) if unpayable else ""
     # Round 73: a round that named its file is one the queue could not reach before (`_unrecorded_matters` lists
     # only rounds whose *file* is unknown), so it was counted as unpayable and the sentence said so. The queue
     # now has a path for it, and the sentence names how many of the remainder became reachable.
     reachable = "; %d of them name their file, so --with-ceilings can re-measure them" % named if named else ""
     if not payable:
         if named:
-            body = text + ", and none of them can be re-run from the record as it stands" + reachable
+            body = text + ", and none of them can be re-run from the record as it stands" + reachable + reach_out
+        elif unpayable:
+            body = (text + ", and none of them can be re-run" + reach_out +
+                    ", so the default --max-limit-drift cap stays a warning")
         else:
             body = text + ", and none of them can be re-run, so the default --max-limit-drift cap stays a warning"
     else:
         left = missing - payable
         if not left:
             body = (text + "; re-running %d of them would leave none, so the default --max-limit-drift cap "
-                           "would arm%s" % (payable, reachable))
+                           "would arm%s%s" % (payable, reachable, reach_out))
         else:
             body = (text + "; re-running %d of them would leave %d without one, so the default --max-limit-drift "
-                           "cap stays a warning%s" % (payable, left, reachable))
+                           "cap stays a warning%s%s" % (payable, left, reachable, reach_out))
     if command and (payable or named):
         body += "; measure them with %s" % command
     return body
