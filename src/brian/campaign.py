@@ -591,6 +591,22 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
             _row.settlement_state["unexplained"] = _row.settlement_state.get("unexplained", 0) + 1
         else:
             _row.settlement_state["explained"] = _row.settlement_state.get("explained", 0) + 1
+    # Round 123: the file row splits the stale work in two; the domain row kept only the sum. Both come from
+    # `reaffirm_plan`, so a reader comparing the file line and the domain row sees one set of numbers (round 109).
+    _payable = {(str(item.get("record") or ""), str(item.get("successor") or ""))
+                for item in result.settlement_moved if item.get("clearable")}
+    for _plan_row in result.reaffirm_plan:
+        for _pair in _plan_row.get("pairs") or []:
+            if (str(_pair.get("record") or ""), str(_pair.get("successor") or "")) not in _payable:
+                # A retargeted or vanished record cannot be re-affirmed (round 119 refuses it), so it is a
+                # decision to take again, not a reading to redo: counted under `moved`, never under a kind.
+                continue
+            _owner = _round_source.get(str(_pair.get("record") or ""))
+            _row = rows.get(_owner) if _owner is not None else None
+            if _row is None:
+                continue
+            _key = "stale_again" if str(_pair.get("kind") or "") == "again" else "stale_never"
+            _row.settlement_state[_key] = _row.settlement_state.get(_key, 0) + 1
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two

@@ -2856,7 +2856,11 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
         if (record, successor) in moved:
             bucket["stale"] += 1
             bucket["records"].append(record)
-            bucket["pairs"].append({"record": record, "successor": successor})
+            # Round 123: the pair carries its kind, because the two kinds are paid as separate commands. A batch
+            # that could only take "everything stale" forced a reader to do the cheap work and the expensive work
+            # in the same breath, and the reason typed for one then covers the other.
+            bucket["pairs"].append({"record": record, "successor": successor,
+                                    "kind": "again" if item.get("reaffirmations") else "never"})
             bucket["commands"].append("brian evolve --settle-reaffirm %s=%s" % (record, successor))
             # Round 122: two kinds of stale owe different work. `never` is a promise nobody has read the books
             # for; `again` is one where the books moved *after* the last reading, so re-stamping it would cover a

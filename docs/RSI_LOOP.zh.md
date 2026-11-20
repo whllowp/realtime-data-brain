@@ -6623,6 +6623,50 @@ $ echo $?
 
 **边界 284：复用单条分支是正确做法，复制一份实现不是。** 拒绝规则、理由规则、输出形状、退出码都只该有一份；第二份实现不会报错，它只会慢慢和第一份不一致。
 
+### 3.129 两种欠账要能分开付：`--settle-kind`，以及域名行漏掉的那一栏
+
+第 122 轮把「一个文件上的 stale 数」拆成了 `never re-taken` 与 `re-taken before and moved again`，但命令仍然是一次把整个文件都重开。于是出现一个很奇怪的动作：只欠「复查」的人必须把「第一次读」也一起读了，而一条理由只能写一次——
+
+```
+$ brian evolve --settle-reaffirm-file data/smd/stream-one.json --settle-kind never --settle-why "first readings" --settle-by alice
+re-taking      2 decision(s) on data/smd/stream-one.json in one command (2 never re-taken, 1 re-taken before and moved again)
+leaving        1 decision(s) of the other kind alone: `--settle-kind never` was asked for, and the two kinds are different work (boundary 285)
+reaffirmed     round-fourth.json -> round-new.json
+reaffirmed     round-third.json -> round-new.json
+re-taken       2 of 2 decision(s), 0 kept its date (already re-taken), 0 refused
+```
+
+`--settle-kind never|again|all`（默认 `all`）只重开一种。留下的那条不会被顺带标成「读过」——付便宜的那一半，不会把贵的那一半也盖章：
+
+```
+$ brian evolve --settle-reaffirm-file data/smd/stream-one.json --settle-kind again --settle-why "the books moved again" --settle-by alice
+re-taking      1 decision(s) on data/smd/stream-one.json in one command (0 never re-taken, 1 re-taken before and moved again)
+reaffirmed     round-old.json -> round-new.json
+```
+
+载荷也说了它留下了什么：`--json-out` 里除了 `reaffirmed` 与 `reaffirm_refused`，还有 `reaffirm_skipped`。一个批量命令只说「我做了 N 条」而不说「我跳过了 M 条」时，跳到下一条的命令和同一条命令跑两遍看起来是一样的。
+
+### 域名行也要有这两栏
+
+第 122 轮把两栏加到了**文件**行上，域名行仍然只有一个 `moved`。于是一个欠三条「第一次读」的域和一个欠三条「复查」的域，在 `--campaign` 的行里长得一模一样。这一轮把两栏按「决定所属轮次的流」归到域名行：
+
+```
+$ brian evolve --campaign --json-out
+domains[0].settlements == {"moved": 3, "stale_never": 2, "stale_again": 1}
+```
+
+### 一个被测试逼出来的修正
+
+第一版把 `reaffirm_plan` 里**所有** pairs 都按 kind 记进域名行。第 118 轮的一个测试随即失败：一条记录被删掉了退场标记，它确实 stale，但没有任何命令能付它——`--settle-reaffirm` 会拒绝（重开等于断言账本否认的事）。把它记成 `stale_never` 之后，域名行的两个数加起来比任何命令能做的活都多。
+
+所以分类跟着**可付集合**走（`moved_clearable`，也正是门禁收费的那个集合）：不可付的那条只记在 `moved` 里，不进任何 kind。
+
+**边界 285：两种活不能共用一个理由。** 第一次读要把整份记录读一遍，复查只需要对比上次确认之后的变化；一次命令把两种都做掉，贵的活就隐形了，而且一条理由同时替两件事作证。
+
+**边界 286：按文件分的栏，也要按域分。** 一个域欠三条「第一次读」和一个域欠三条「复查」，在只印总数的行里是同一个页面；而它们该看到的下一页不同。
+
+**边界 287：数的东西必须是命令能付的东西。** 把无人可付的条目并进某一类工作里，读者会按那个数去排期，而排出来的活干不完——分类跟着可付集合走，跟着计划列表走就会多算。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7101,4 +7145,6 @@ missing for the next level
 
 108. ✓（第 121 轮）计划要带时间线，欠账要能按文件收费：`reaffirm_plan` 现在带 `last_retaken` 与 `walks_since`（没人算过的数印 `unknown`，不是 `0`），`--max-moved-per-file N` 按「一个文件上有几条决定」收费，和按条数的 `--max-moved` 并排各自给出自己的判决。
 
-109. （下一轮）批量重开需要一份「上次读到现在」的差量：`--settle-reaffirm-file` 目前只能整份重开，应该能只重开 `last_retaken` 之后变脏的那些，并在页面上区分「本次重开了几条、其中几条其实没变」，同时把每个文件的 `never` / `again` 两栏写进 `--campaign --json-out` 的行里。
+109. ✓（第 123 轮，改写了原意）原本排的是「只重开 `last_retaken` 之后变脏的那些」，但 `reaffirm_plan` 里列出的每一条**已经**是「上次确认之后变脏」的那一类——再按时间过滤等于什么都不选。真正缺的是两件事：把 `never` / `again` 两种活分开付（`--settle-kind`，并在输出里说留下了什么），以及把两栏按域分进 `--campaign --json-out` 的行里。
+
+110. （下一轮）重开的记录该有一条自己的时间线：`settlements.json` 只存了最后一次确认，应该能回答「这条决定被重开过几次、每次覆盖了哪几条主张、哪次之后又脏的」，`--campaign` 按「从未读过 / 读过一次 / 反复重开」分三栏，并把反复重开的那几条点到名字——重开多次说明这条决定本身有问题，而不是书总在动。

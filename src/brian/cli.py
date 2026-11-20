@@ -2940,18 +2940,38 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    "hold one" % target)
             return 2
         row = match[0]
+        # Round 123: the two kinds are two jobs. A first reading has to read the whole record; a repair after
+        # movement only has to compare what arrived with what the last confirmation covered. Taking them together
+        # under one reason made the expensive job invisible and let one explanation stand for both (boundary 285).
+        kind = str(getattr(args, "settle_kind", None) or "all").strip().lower()
+        if kind not in ("never", "again", "all"):
+            _print("--settle-kind takes never, again or all, and %s is none of them: `never` is a decision nobody "
+                   "has read the books for, `again` is one the books moved under after the last reading" % kind)
+            return 2
+        wanted = [item for item in row.get("pairs") or []
+                  if kind == "all" or str(item.get("kind") or "") == kind]
+        skipped = len(row.get("pairs") or []) - len(wanted)
         pairs = ["%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
-                 for item in row.get("pairs") or []]
+                 for item in wanted]
         if not pairs:
+            if kind != "all":
+                _print("%s has no stale decision of the kind `%s`: it owes %d decision(s) of the other kind -- run "
+                       "`--settle-reaffirm-file %s` without --settle-kind to pay them"
+                       % (row.get("origin") or target, kind, skipped, row.get("origin") or target))
+                return 0
             _print("%s has no stale decision to re-take: its decisions agree with the books as they stand"
                    % (row.get("origin") or target))
             return 0
         _print("re-taking      %d decision(s) on %s in one command (%d never re-taken, %d re-taken before and "
                "moved again)" % (len(pairs), row.get("origin") or target, int(row.get("never") or 0),
                                  int(row.get("again") or 0)))
+        if skipped:
+            _print("leaving        %d decision(s) of the other kind alone: `--settle-kind %s` was asked for, and "
+                   "the two kinds are different work (boundary 285)" % (skipped, kind))
         inner = argparse.Namespace(**vars(args))
         inner.settle_reaffirm_file = None
         inner.settle_reaffirm = pairs
+        inner.settle_reaffirm_skipped = skipped
         return cmd_evolve(inner, settings)
 
     if getattr(args, "settle_reaffirm", None):
@@ -3026,7 +3046,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print_repair_delta(record_repair(root, "settle-reaffirm", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps({"reaffirmed": done, "reaffirm_refused": refused},
+                handle.write(json.dumps({"reaffirmed": done, "reaffirm_refused": refused,
+                                         "reaffirm_skipped": int(getattr(args, "settle_reaffirm_skipped", 0)
+                                                                 or 0)},
                                         indent=2, sort_keys=False) + "\n")
         return 2 if refused else 0
 
@@ -5013,6 +5035,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-reaffirm-file", default=None, metavar="STREAM",
                         help="re-take every stale decision on one stream file in a single command, with the same "
                              "--settle-why and --settle-by; the pairs come from the plan `--campaign` prints")
+    evolve.add_argument("--settle-kind", default=None,
+                        help="with --settle-reaffirm-file: `never` pays only the decisions nobody has read the "
+                             "books for, `again` only the ones the books moved under after the last reading")
     evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="re-take decisions against today's books: keeps each first date, records the claims "
                              "it covered; takes one or more RECORD=SUCCESSOR pairs; needs --settle-why")
