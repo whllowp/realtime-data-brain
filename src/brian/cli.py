@@ -78,6 +78,7 @@ from .evolve import (
     format_repairs,
     load_settlements,
     unexplained_decisions,
+    moved_settlements,
     settlement_summary,
     repair_legacy,
     settle_link,
@@ -1770,6 +1771,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     if args.history:
+        # Round 118: the same rows the audit page prints, so a reader who opens the ledger never reads a decision
+        # as settled while the books it settled have moved (boundary 264).
+        try:
+            moved_rows = moved_settlements(history(root, include_retired=True), load_settlements(root))
+        except OSError:
+            moved_rows = []
+        if moved_rows:
+            _print("settled         %d decision(s) rest on books that have moved since they were taken:"
+                   % len(moved_rows))
+            for item in moved_rows:
+                _print("  %-26s -> %-26s  (%s)"
+                       % (item["record"] or "(unrecorded)", item["successor"] or "(unrecorded)",
+                          "; ".join(str(reason) for reason in item.get("reasons") or [])))
+            _print("                a decision is a statement about the books as they stood; when they move, "
+                   "take it again")
         if unexplained_rows:
             # Round 117: the count is on the page whether or not a cap exists, because "3 decisions nobody can
             # review" is the fact a reader of the ledger needs, and the cap only decides when it becomes an exit.

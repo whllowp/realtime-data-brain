@@ -2720,6 +2720,72 @@ def unexplained_decisions(settlements: Sequence[Mapping[str, Any]],
     rows.sort(key=lambda row: (row["at"] or "", row["record"]))
     return rows
 
+def _is_later(moment: str, than: str) -> bool:
+    """Whether `moment` is after `than`, both being isoformat stamps; an unreadable or empty pair is not later."""
+    if not moment or not than:
+        return False
+    try:
+        return datetime.fromisoformat(moment) > datetime.fromisoformat(than)
+    except ValueError:
+        return moment > than
+
+
+def moved_settlements(rounds: Sequence[Mapping[str, Any]],
+                      settlements: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Settled decisions whose evidence has changed since they were taken (round 118).
+
+    A settlement is a statement about the books as they stood: "this record's claim is the one we drop". Two
+    things make that statement stale, and both are visible in the ledger itself:
+
+    - `retargeted`: the settled record no longer claims that successor at all (it was re-measured into another
+      round, or its retirement mark is gone). The decision now describes a pair that does not exist.
+    - `new_claimant`: another record now claims the same successor. The decision settled *one* claimant's claim
+      (round 112), so a second claimant is not covered by it -- the contradiction is back, one book larger.
+
+    Reported, not charged: nothing in this build can re-open a decision (that is the next command), and a gate
+    that fails on a sentence no command can clear is the gate nobody runs (boundaries 154/171).
+    """
+    by_name = {str(record.get("round") or ""): record for record in rounds}
+    claims: Dict[str, List[Dict[str, Any]]] = {}
+    for record in rounds:
+        retired = record.get("retired")
+        named = str(retired.get("re_measured_as") or "") if isinstance(retired, Mapping) else ""
+        if named:
+            # When the claim was made: the retirement's own stamp and nothing else. `finished_at` is when the
+            # round ran, not when the retirement was written (rounds 83/93 write them long after), so a claim
+            # without a stamp of its own cannot be dated at all -- boundary 272.
+            claims.setdefault(named, []).append({
+                "record": str(record.get("round") or ""),
+                "at": str((retired or {}).get("at") or "")})
+    rows: List[Dict[str, Any]] = []
+    for item in settlements or []:
+        name = str(item.get("record") or "")
+        successor = str(item.get("successor") or "")
+        record = by_name.get(name)
+        reasons: List[str] = []
+        if record is None:
+            reasons.append("the settled record is no longer in the ledger")
+        else:
+            retired = record.get("retired")
+            named = str(retired.get("re_measured_as") or "") if isinstance(retired, Mapping) else ""
+            if not named:
+                reasons.append("it carries no retirement mark any more")
+            elif named != successor:
+                reasons.append("it now names %s as its successor" % named)
+        own = str(item.get("at") or "")
+        later = [claim for claim in claims.get(successor, [])
+                 if claim["record"] != name and _is_later(claim["at"], own)]
+        if later:
+            reasons.append("%d claim(s) on the same successor arrived after the decision: %s"
+                           % (len(later), ", ".join(sorted(claim["record"] for claim in later))))
+        # An undated claim is neither later nor earlier: it cannot be shown to postdate the decision, so it does
+        # not move the evidence, and it is never counted as one that does (boundary 272).
+        if reasons:
+            rows.append({"record": name, "successor": successor, "at": str(item.get("at") or ""),
+                         "reasons": reasons,
+                         "claimants": sorted(str(claim["record"]) for claim in later)})
+    rows.sort(key=lambda row: (row["at"] or "", row["record"]))
+    return rows
 
 def load_settlements(root: Path) -> List[Dict[str, Any]]:
     """The link decisions somebody wrote down, newest last (round 112).
@@ -3482,6 +3548,8 @@ class Audit:
     #: Round 112: link decisions a person recorded. Printed apart from the findings, because agreement that
     #: came from a decision is not agreement that came from a check.
     settled: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 118: the decisions that rest on books which have moved since the decision was taken.
+    settled_moved: List[Dict[str, Any]] = field(default_factory=list)
     # Round 85: versions the deployment states say are running whose producing record the books dispute or
     # that a repair copied. Round 84 refused to *stack* a promise there; once a version is applied that refusal
     # is not available, so the fact is reported here instead -- and charged when the two books contradict.
@@ -3504,7 +3572,7 @@ class Audit:
         is absent (boundary 184). One property, read by both call sites, is the only place that decides.
         """
         return bool(self.links or self.backfilled or self.in_force or self.in_force_cleared
-                    or self.in_force_stale or self.settled)
+                    or self.in_force_stale or self.settled or self.settled_moved)
 
     @property
     def broken_links(self) -> int:
@@ -3634,6 +3702,7 @@ def audit(root: Path, rules: Optional[EvolveRules] = None,
                  entries=entries, retired=retired,
                  links=replacement_links(history(root, include_retired=True), load_settlements(root)),
                  settled=load_settlements(root),
+            settled_moved=moved_settlements(history(root, include_retired=True), load_settlements(root)),
                  backfilled=backfilled_links(history(root, include_retired=True)),
                  in_force=[dict(item) for item in (in_force or [])],
                  in_force_cleared=[dict(item) for item in (in_force_cleared or [])],
@@ -3929,6 +3998,18 @@ def _link_lines(result: Audit) -> List[str]:
                          % (str(item.get("record") or ""), str(item.get("successor") or ""),
                             str(item.get("at") or ""),
                             ", by %s" % by if by else ", and no decider was recorded"))
+        if result.settled_moved:
+            # Round 118: the decision was about books that have since moved. Reported, not charged: nothing in
+            # this build can re-open a decision, and a gate that fails on a sentence no command clears is the
+            # gate nobody runs (boundaries 154/171/266).
+            lines.append("%d of them rest on books that have moved since the decision was taken:"
+                         % len(result.settled_moved))
+            for item in result.settled_moved:
+                lines.append("  %-26s -> %-26s  (%s)"
+                             % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                                "; ".join(str(reason) for reason in item.get("reasons") or [])))
+            lines.append("A decision is a statement about the books as they stood; when they move, the "
+                         "decision must be taken again (boundary 269).")
         lines.append("A settlement says who decided; it is not a second witness. `--audit` no longer charges "
                      "these pairs,")
         lines.append("and `brian evolve --history` still prints both ends where they disagree.")

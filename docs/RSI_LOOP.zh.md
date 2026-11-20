@@ -6344,6 +6344,63 @@ $ brian evolve --campaign --json-out c117.json
 
 **边界 268：按域印的页面，新数字也要按域印。** 一本账级的"1 条决定没人解释"，在每行都写着域名的页面上等于没说清楚是谁欠的；而"谁欠"正是决定"该去修哪本书"的那一半信息。
 
+### 3.124 一份裁定说的是「书当时长这样」：书动了，裁定就得重来
+
+第 112 轮把一次结算存成一条决定：`round-old.json` 对 `round-new.json` 的主张在这一刻被放弃。第 113–117 轮给这条决定补了理由、署名、补写说明和「没人能解释」的收费。它们都默认一件事：决定一旦写下，它所指的那对账簿就一直长那样。
+
+**本轮要修的是这个默认。** 决定的对象是**账簿当时的状态**，而账簿会动：
+
+1. 被裁定的记录可能被重新测量，改成指向另一个后继（`it now names X as its successor`）；
+2. 它可能连退休标记都没了（`it carries no retirement mark any more`）；
+3. 它可能整个从账簿里消失（`the settled record is no longer in the ledger`）；
+4. **同一后继**上可能出现一条决定之后才到达的主张（`N claim(s) on the same successor arrived after the decision`）。
+
+前三条都是「决定描述的那对东西不在了」。第四条不一样：决定当时只覆盖了它看到的那些主张，一条后来的主张是决定**从未见过**的新事实，而页面如果继续把它印成「已结算」，就等于替那条新主张作了保。
+
+#### 规则：只认「有日期的、晚于决定的」主张
+
+第一版规则把**任何**另一个主张者都算作证据动了。跑测试时 11 条里 7 条立刻挂掉——因为第 112 轮的设计是**只消掉一个主张者的主张**，另一个端点是刻意留着给人看的（边界 252）。照第一版规则，每一次对 `mismatch` 的裁定当场就是陈旧的，这条检测等于永远报警，而永远报警的检测不会被读。
+
+第二版规则要回答的是「这条主张是**在决定之后**才出现的吗」，于是需要给主张找日期。第一次用的是「退休标记的 `at`，没有就用这一轮的 `finished_at`」，结果在演示里又把两条本来摆在面前的旧主张算成了「刚刚到达」——`finished_at` 是那一轮**跑完**的时间，而退休标记是事后（第 83/93 轮）才写下的，两者可以差好几天。**主张算不算「后来」，只能看它自己的 `at`；没有 `at` 的主张既不能证明在先、也不能证明在后，于是它既不移动证据、也不被算成移动（边界 272）。**
+
+```
+1  2026-11-18T06:05:00+00:00  ...  [settled with round-new.json by a recorded decision]  [refused by the queue]
+audit:
+1 replacement link(s) disagree, so the two ends of the relation cannot both be true:
+1 replacement link(s) were settled by a recorded decision, not by agreement:
+1 of them rest on books that have moved since the decision was taken:
+  round-old.json             -> round-new.json              (1 claim(s) on the same successor arrived after the decision: round-third.json)
+A decision is a statement about the books as they stood; when they move, the decision must be taken again (boundary 269).
+```
+
+第二个演示里被裁定的记录干脆不再指认那个后继：
+
+```
+1 of them rest on books that have moved since the decision was taken:
+  round-old.json             -> round-new.json              (it carries no retirement mark any more)
+```
+
+`--history` 印的是同一句话的另一种主语（「自那次决定以来，账簿已经动过」），`--campaign` 把它按流分开计：
+
+```
+settled         1 decision(s) rest on books that have moved since they were taken:
+                a decision is a statement about the books as they stood; when they move, take it again
+campaign json:  {"settlements_moved": [{"record": "round-old.json", "successor": "round-new.json",
+                 "reasons": ["1 claim(s) on the same successor arrived after the decision: round-third.json"],
+                 "claimants": ["round-third.json"]}], "domains": [{"domain": "SMD", "settlements": {"moved": 1}}]}
+```
+
+#### 为什么这一轮一分钱都不收
+
+`--audit --strict` 对「证据动了」仍然是 0。这不是忘了收，而是本版本里**没有任何命令能重开一条决定**：`--settle-link` 对同一对会幂等地返回「已经记过」，`--settle-note` 只加说明。一个付不掉的债收进闸门，只会让 `--strict` 永远红着、然后被关掉（边界 154/171/266 的同一条规则）。第 105 项才是那条命令：一次「重新确认」把决定重新按今天的账簿写一遍，于是「说明有了、证据却动了」才变成可付、可收的状态。
+
+#### 这一轮读出来的三件事
+
+1. **决定是关于时刻的陈述**，不是关于名字的。页面按名字把 `round-old.json -> round-new.json` 印成「已结算」时，它其实在说一句过去时的话，而读者会把它当成现在时（边界 269）。
+2. **记录自己也会动**：被重测、被改指、被删除，决定描述的那一对可能已经不在了。只按名字匹配的检测会把它当成成立（边界 270）。
+3. **收不了的债只能报告**：一处缺陷要先有能清掉它的命令，才配进闸门（边界 271）。这条规则在本仓库已经被独立发现过三次（154/171/266），这是第四次。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6810,4 +6867,6 @@ missing for the next level
       超过 N 天的裁定进闸门，并在 `--history` 里点名是哪几条；同时让 `--campaign --json-out` 的每行带上它对应的
       裁定状态，脚本才能算出"这个 stream 上有几条决定没人能解释"。
      （第 117 轮完成：`unexplained_decisions(settlements, now)`；`--max-unexplained-days DAYS`（默认关，只对 `--strict` 生效，不带 `--strict` 直接退 2）；`--audit`／`--campaign` 两个闸门调用点都传 `unexplained_stale`／`unexplained_days`；`--history` 印 `decisions` 一段并给过期行加 `[past the cap: --strict exits 1]`；`CampaignRow.settlement_state` 进 `--campaign --json-out` 的每一行；`tests/test_unexplained_gate.py` 11 个测试；边界 266/267/268。）
-104. 让 `--settle-note` 也接受「后来没人能复核」的反向状态：如果一条决定曾被补过说明，却在补写之后又出现了互相矛盾的证据，页面要说「这条决定被重新质疑了」，并让 `--campaign` 把「有说明但证据变了」单列一列，而不是继续算作已解释。
+104. **已完成**：让「证据后来又动了」变成一条单独的债。`moved_settlements(rounds, settlements)` 对每条决定检查三个事实——被裁定的记录是否还在账簿里、它的退休标记是否还在、它是否还指向同一个后继——再加上「决定之后才到达的、有自己时间戳的同一后继主张」。`--audit` 打印「其中 N 条所依据的账簿在决定之后已经动过」，`--history` 打印同样的行，`--campaign` 把每行流按 `moved` 单独计数并导出 `settlements_moved`。**不收费**：本版本里没有任何命令能重开一条决定（边界 271），所以 `--audit --strict` 对「证据动了」仍然是 0。测试 `tests/test_settlement_evidence.py`（11 条）。
+    - 第 112 轮的前提被这一轮纠正了一次：第一版规则把「任何另一个主张者」都算作证据动了，结果每一次对 `mismatch` 的裁定当场就是陈旧的（11 条测试里 7 条挂在夹子上）——第 112 轮只消掉**一个**主张者的主张，另一个端点是刻意留着的。规则改成「**晚于**决定的、有日期的主张」。
+    - 第二次纠正：主张的日期只能取退休标记自己的 `at`。`finished_at` 是那一轮**跑完**的时间，不是退休被写下的时间（第 83/93 轮都是事后补写的），拿它当日期会让一条几十天前就摆在那里的主张看起来「刚刚到达」（边界 272）。

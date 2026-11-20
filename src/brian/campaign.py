@@ -16,7 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from .evolve import (BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
+from .evolve import (
+    moved_settlements,BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
                      load_settlements, rejection_provenance, settlement_summary, withheld_due,
                      withheld_evidence_age,
                      withheld_records, withheld_staleness)
@@ -189,6 +190,8 @@ class Campaign:
     # Round 116: the counts a script needs are computed once, beside the copies the page prints, so "how many
     # decisions still have no explanation" is a number in the JSON rather than a sentence to be parsed.
     settlement_summary: Dict[str, Any] = field(default_factory=dict)
+    # Round 118: decisions that rest on books which have moved since they were taken (reported, not charged).
+    settlement_moved: List[Dict[str, Any]] = field(default_factory=list)
     stale_refusals: List[Dict[str, Any]] = field(default_factory=list)
     # Round 107: per promise, how many of the recorded walks refused it, when the first and the last were, and whether
     # the refusal still stands. `blocked_versions` answers the last question only, so a promise refused twice and then
@@ -298,6 +301,7 @@ class Campaign:
             "repair_history": {str(key): value for key, value in self.repair_history.items()},
             "settlements": [dict(item) for item in self.settlements],
             "settlement_summary": dict(self.settlement_summary),
+            "settlements_moved": [dict(item) for item in self.settlement_moved],
             "stale_refusals": [dict(item) for item in self.stale_refusals],
             "refusal_history": {str(key): dict(value) for key, value in self.refusal_history.items()},
             "in_force_untested": self.in_force_untested,
@@ -562,6 +566,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.repair_history = repair_history(root)
     result.settlements = load_settlements(root)
     result.settlement_summary = settlement_summary(result.settlements)
+    # Round 118: the same reading the audit page prints, from the same two files.
+    result.settlement_moved = moved_settlements(everything, result.settlements)
     # Round 117: attribute each decision to the stream of the round it settled, so the row a reader opens can
     # say "one decision here has no explanation". `load_settlements` names round files; the source lives on the
     # round record, retired ones included, because a decision can settle a round that has since been superseded.
@@ -573,7 +579,11 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
         _row = rows.get(_owner)
         if _row is None:
             continue
-        if not str(_decision.get("why") or "").strip() and not _decision.get("notes"):
+        if any(str(item.get("record") or "") == str(_decision.get("record") or "")
+               and str(item.get("successor") or "") == str(_decision.get("successor") or "")
+               for item in result.settlement_moved):
+            _row.settlement_state["moved"] = _row.settlement_state.get("moved", 0) + 1
+        elif not str(_decision.get("why") or "").strip() and not _decision.get("notes"):
             _row.settlement_state["unexplained"] = _row.settlement_state.get("unexplained", 0) + 1
         else:
             _row.settlement_state["explained"] = _row.settlement_state.get("explained", 0) + 1
