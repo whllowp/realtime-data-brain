@@ -67,9 +67,9 @@ def test_a_source_with_more_calls_than_rows_is_a_problem():
     """The first run of `--check` refused this very change: two new calls against a two-dozen-row table."""
     problems = cli.payload_writer_problems(source="x = _write_payload(a)\ny = _write_payload(b)\n")
 
-    assert len(problems) == 1
-    assert "the page lists" in problems[0]
-    assert "this source has 2" in problems[0]
+    # A two-line source also assigns none of the documented `why_empty` values, and round 173 made that a problem of
+    # its own: this source cannot report them. The call count is still the problem this test is about.
+    assert any("the page lists" in problem and "this source has 2" in problem for problem in problems)
 
 
 def test_a_previewable_flag_the_table_does_not_name_is_a_problem(monkeypatch):

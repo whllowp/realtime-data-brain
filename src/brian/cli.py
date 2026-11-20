@@ -507,7 +507,7 @@ PAYLOAD_WRITERS: Tuple[Tuple[str, str, str], ...] = (
     ("--backfill-claims", '{"filled", "dry_run"}', "records, unless --dry-run"),
     ("--backfill-walks", '{"backfilled", "would_backfill", "dry_run"}', "records"),
     ("--backfill-walks (a dry run)", '{"backfilled": [], "would_backfill", "dry_run"}', "reports"),
-    ("--unrecorded", '{"rounds", "unattributed", "matters", "payable", "out_of_reach", "ceilings", "why_empty", "gate"}',
+    ("--unrecorded", '{"rounds", "unattributed", "matters", "payable", "out_of_reach", "ceilings", "why_empty" (no rounds|all placed|none deciding), "gate"}',
      "reports"),
     ("--campaign", "the campaign report (drift, debt, queue, claims, offer)", "reports"),
     ("--sensitivity", '{"bar", "bars", "rounds", "refused", "recorded", "unreadable", "rows", "gate"}',
@@ -540,6 +540,15 @@ PAYLOAD_BATCH_FORMS: Tuple[str, ...] = (
 # named, so the next one is printed rather than left out (an empty tuple is a claim the page can make out loud).
 PAYLOAD_NONE: Tuple[str, ...] = ()
 
+# Round 173 (item 159): the three nothings `--unrecorded` can find, and what each one means. The page names them
+# because `why_empty` is a value a script branches on, and a value nobody documents is a value somebody guesses
+# at; `payload_writer_problems` checks that every one of them is assigned in exactly one place in the source.
+WHY_EMPTY_REASONS: Tuple[Tuple[str, str], ...] = (
+    ("no rounds", "the ledger holds no round yet, so there is no file to place and nothing to re-run"),
+    ("all placed", "every round that still decides something says which file it measured"),
+    ("none deciding", "rounds name no file, but none of them still decides anything"),
+)
+
 
 def format_payload_writers() -> str:
     """The inventory as a page: what each command exports, and what the one writer says when it cannot write."""
@@ -559,6 +568,11 @@ def format_payload_writers() -> str:
         lines.append("every batch command that takes --dry-run exports a payload: round 164 found that "
                      "`--backfill-walks` did not,")
         lines.append("round 165 gave it one -- `{\"backfilled\": [...], \"would_backfill\": [], \"dry_run\": false}`.")
+    lines.append("")
+    lines.append("`--unrecorded` has three empty pages, and `why_empty` says which one the caller got; `null` means")
+    lines.append("the page found work. A script branches on this value, so the page says what each one means:")
+    for reason, meaning in WHY_EMPTY_REASONS:
+        lines.append("  %-14s %s" % (reason, meaning))
     lines.append("")
     lines.append("Every one of them goes through _write_payload: the parent directory is created, the file is renamed")
     lines.append("into place, and the page says `wrote <path>` (boundary 336). A write that fails exits 2 and says which")
@@ -619,6 +633,31 @@ def payload_writer_problems(source: Optional[str] = None) -> List[str]:
     missing = [flag for flag, _attribute in BATCH_PREVIEWS if flag not in named]
     if missing:
         problems.append("the page does not name %s, which --dry-run accepts" % ", ".join(missing))
+    # Round 173 (item 159): a value the page names and the source never assigns is a promise nothing keeps; a
+    # value assigned twice is two statements about the same nothing (boundary 414). The reasons live on the
+    # page rather than in the table's command column, so this reads the page the caller sees.
+    page = format_payload_writers()
+    documented = {reason: meaning for reason, meaning in WHY_EMPTY_REASONS}
+    # Only a line that *starts* with the assignment is one; the lines of this scanner quote the same token and
+    # would otherwise be read as two more reasons (boundary 412, third time in this file).
+    assigned = [line.strip().split('why = "', 1)[1].split('"', 1)[0]
+                for line in text.splitlines() if line.strip().startswith('why = "')]
+    counts: Dict[str, int] = {}
+    for reason in assigned:
+        counts[reason] = counts.get(reason, 0) + 1
+    for reason, count in sorted(counts.items()):
+        if count != 1:
+            problems.append("the source assigns why_empty = %r in %d place(s); the page describes one meaning, so there has to be exactly one assignment" % (reason, count))
+        meaning = documented.get(reason)
+        if meaning is None:
+            problems.append("the source can report why_empty = %r and the page does not say what it means"
+                            % reason)
+        elif meaning not in page:
+            problems.append("the page names %r without saying what it means, so a caller still guesses" % reason)
+    for reason in sorted(documented):
+        if reason not in assigned:
+            problems.append("the page documents the why_empty value %r and no branch of this source assigns it"
+                            % reason)
     return problems
 
 
@@ -2625,7 +2664,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        % len(problems))
                 return 2
             _print("checked           the page and the source agree: %d writer(s), %d file-level form(s), "
-                   "%d named gap(s)" % (len(PAYLOAD_WRITERS), len(PAYLOAD_BATCH_FORMS), len(PAYLOAD_NONE)))
+                   "%d named gap(s), %d why_empty value(s)"
+                   % (len(PAYLOAD_WRITERS), len(PAYLOAD_BATCH_FORMS), len(PAYLOAD_NONE),
+                      len(WHY_EMPTY_REASONS)))
             return 0
         _print(format_payload_writers())
         return 0

@@ -9293,6 +9293,66 @@ def payload_writer_calls(text):
 **边界 413**：一个页面只该占清单里的一行；需要第二次写入时，给它一个页面级写入函数，而不是第二行表——
 第二次调用是实现的偶然，清单记的是页面的承诺。
 
+### 3.179 三种「空的」写在页面上，并且由源码来核对：`why_empty` 的文档化
+
+第 172 轮给 `--unrecorded` 加了 `why_empty`，三种取值各有一句自己的话，可这三句话只活在代码里：清单页上
+那一行 `--unrecorded` 只是在 payload 字符串里塞了一个 `why_empty`，没人知道它可能是什么、`all placed` 与
+`none deciding` 差在哪里。**一个脚本要拿它分支的取值，等于一个没人写过说明的枚举。**
+
+清单页现在多说一段（`brian evolve --payload-writers`，节选）：
+
+```
+`--unrecorded` has three empty pages, and `why_empty` says which one the caller got; `null` means
+the page found work. A script branches on this value, so the page says what each one means:
+  no rounds      the ledger holds no round yet, so there is no file to place and nothing to re-run
+  all placed     every round that still decides something says which file it measured
+  none deciding  rounds name no file, but none of them still decides anything
+```
+
+表格里那一行也把取值写进了 payload 形状：
+
+```
+  --unrecorded                               reports                 {"rounds", "unattributed", "matters",
+                                                                     "payable", "out_of_reach", "ceilings",
+                                                                     "why_empty" (no rounds|all placed|none
+                                                                     deciding), "gate"}
+```
+
+而 `--payload-writers --check` 现在把这三条一起核：
+
+```
+checked           the page and the source agree: 24 writer(s), 4 file-level form(s), 0 named gap(s), 3 why_empty value(s)
+```
+
+**核对的权威是源码，不是页面的常量。** 这一版的第一稿是错的：它遍历 `WHY_EMPTY_REASONS` 这个常量，于是
+**从常量里删掉一条，检查也跟着少一条**——页面少说一种取值，检查一个字都不报。改成从源码里捡
+`why = "…"` 赋值语句，再分两头对：源码能报、页面没写含义的，是页面的问题；页面写了、源码没有分支赋值的，
+是页面的承诺无人兑现；同一个取值被赋值两次，是对同一件"什么都没有"的两种说法。
+
+**扫描器第三次咬到自己。** 捡赋值语句的正则第一版匹配"行里含 `why = \"`"，于是扫描器自己那两行也变成了
+两条"页面没写含义的取值"，`--check` 报出：
+
+```
+inconsistent      the source can report why_empty = "' in line]" and the page does not say what it means
+inconsistent      the source can report why_empty = "', 1)[1].split('" and the page does not say what it means
+```
+
+修法是按**语句形状**认，而不是按 token 认：只有 `line.strip().startswith('why = "')` 的行才算赋值。这是边界 412
+的第三次（第 163 轮扫 `_write_payload(` 调用、第 172 轮扫自己的字面量）——同一条规则，三个不同的扫描器。
+
+**两条断言的反面也要能验。** 新测试 `tests/test_why_empty_page.py`（10 个）不只验"一致时通过"，还逐条制造
+四种不一致：源码不再赋值某一取值、同一取值赋值两次、页面丢了某条含义、页面把某条含义渲染掉了——每种都要
+报出它自己那句话。第三种靠替换 `format_payload_writers` 的返回值来模拟"页面没有把这一行印出来"，因为直接
+改常量会让页面和文档一起变，测试就永远绿着。
+
+顺带记一笔：`tests/test_payload_check.py` 里那个"两行假源码"的测试原本断言 `len(problems) == 1`，这一轮
+之后它变成 4——两行假源码自然一条取值都不赋值，那三条新问题是对的。断言改成"其中**包含**调用数不匹配那一条"，
+并在注释里说清另外三条为什么出现。
+
+**边界 414**：检查器要核的清单不能取自被核对象自身——那份清单缩水时，检查会跟着缩水，页面越说越少，
+检查越来越沉默。清单只能取自被核的源码。
+**边界 415**：靠 token 匹配的扫描器一定会扫到它自己；按语句形状匹配，它扫不到。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9946,4 +10006,6 @@ missing for the next level
 158. `--unrecorded` 的空页也要交通道：账本空、全部有文件、有没文件的但都不再决定什么，这三种是一句话三件事，脚本分不出来；`why_empty` 记下来，页面和清单一起说。
      （已完成：空页也写 `--json-out`，`why_empty` 取 `no rounds` / `all placed` / `none deciding`，有活时为 `null`；新增 `_write_unrecorded_payload` 让一页只占 `PAYLOAD_WRITERS` 的一行；扫描器不再把自己的字面量算成一次调用——"24 writers" 曾经是 23 次调用加计数器自己，计数规则抽成 `payload_writer_calls(text)` 供命令与测试共用，见 §3.178 与边界 412/413。）
 
-159. 让 `--unrecorded` 的空页也进清单说明：`why_empty` 的三种取值现在是三句独立的句子，而 `PAYLOAD_WRITERS` 那一行只说 `why_empty`；把三种取值也写进页面（哪一行会说哪一句），并让 `--payload-writers --check` 验证每种取值都在源码里出现一次。
+159. 让 `--unrecorded` 的空页也在清单上说清三种 `why_empty` 取值（每个取值一句说明），并让
+     `--payload-writers --check` 从源码核对每条取值恰好赋值一次（已完成，见 §3.179；清单取自源码，不取自页面自己的常量）。
+160. 让 `--payload-writers --check` 也核对表格里每一行的 payload 键集合：今天它核行数、核文件级形态、核 `why_empty` 取值，但一行的 `{...}` 里列了哪些键仍只是文字——某条命令少写一个键（或写上一个它从不写出的键），页面照样通过，读 payload 的脚本才在运行中发现。
