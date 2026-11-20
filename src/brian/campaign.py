@@ -21,7 +21,7 @@ from .evolve import (BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, hist
                      withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
                       current_state, domain_slug,
-                      load_promotions, never_tested_at_origin, shape_note)
+                      load_promotions, never_tested_at_origin, shape_note, walks_phrase)
 
 __all__ = ["Campaign", "CampaignRow", "budget_text", "campaign", "format_campaign", "span_text"]
 
@@ -1115,12 +1115,15 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             records = [int(item) for item in entry.get("records") or []]
             retried = [int(item) for item in entry.get("retried") or []]
             # Round 108: the file's bill -- the refusals of every promise born with it, not only the standing ones.
+            # Round 109: the walks themselves, so this line and the per-promise history point at the same rows.
+            walked = walks_phrase([int(item) for item in entry.get("refused_walks") or []])
             line = ("links             blocked by the books: %s %d promise(s) (%s), %d refusal(s) across %s, "
-                    "last %s (walk %s of %d; its promises were refused %d time(s) in the recorded walks)"
+                    "last %s (walk %s of %d; its promises were refused in %s, %d time(s))"
                     % (origin, len(records), versions, int(entry.get("attempts") or 0),
                        ("%d retried promise(s)" % len(retried)) if retried else "none retried",
                        str(entry.get("last_at") or "unknown"), str(entry.get("last_walk") or "?"),
-                       int(entry.get("walks") or 0), int(entry.get("refused") or 0)))
+                       int(entry.get("walks") or 0), walked or "no recorded walk",
+                       int(entry.get("refused") or 0)))
             reasons = [str(item) for item in entry.get("reasons") or [] if str(item)]
             if reasons:
                 # Named here rather than on each history row: this is the one place the contradiction is printed

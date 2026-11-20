@@ -5872,6 +5872,47 @@ the recorded walks)
 种情况印成同一句。**
 
 
+### 3.115 两份记录要能对上同一个趟：拒绝史、文件的账、清单
+
+第 108 轮让拒绝史用趟号说话，也给了每个原始文件一份"账"，但三处各说各的：历史里写 `walk 1 to 2`，档案里写
+`refused 2 time(s)`，清单里干脆只有一句"ended on a build defect last time"。三个数字都对，读者却没法把它们
+对上同一趟。
+
+第 109 轮把趟号本身带出来：`refusal_history()` 每行多一个 `refused_walks`（去重排序的趟号列表），
+`blocked_dossier()` 把名下各承诺的趟号合并，`walks_phrase()` 负责把它写成一句人话——`[3]` 是 `walk 3`，`[1, 2]`
+是 `walks 1 and 2`，`[1, 2, 4]` 是 `walks 1, 2 and 4`。三处于是引用同一串数字：
+
+```
+blocked by the books: data/smd/stream-real.json 1 promise(s) (v020), 2 refusal(s) across 1 retried
+promise(s), last 2026-11-20T01:06:16.776565+00:00 (walk 2 of 3; its promises were refused in walks 1 and
+2, 2 time(s)) -- round-old.json is one of the records in a mismatch link: …
+```
+
+清单页也终于能自己回答"值不值得花一轮"：
+
+```
+still blocked    1 promise(s) ended on a build defect last time and nothing has changed since:
+                 v020 (refused in walks 1 and 2, 2 time(s), last at 2026-11-20T01:06:16.776565+00:00)
+                 fix the books, or pass --retry-blocked to measure them again anyway
+```
+
+`--retry-blocked` 让这条承诺重新进入清单时，行末再带一句结论：
+
+```
+  v020  <-  data/smd/stream-real.json  (never measured where this promise was made)
+  [refused by the books in walks 1 and 2, and the refusal still stands]
+```
+
+**一处实现上的取舍**：`still blocked` 与清单行的措辞都要读历史，两处各查一次会给出两份可能不一致的结论，所以
+`--from-queue` 分支只加载一次 `refusal_history()`（`walked_history`），两处共用一个 `_refusal_phrase()`，
+"第几趟"这件事在整页上只有一份来源。
+
+**边界 244：一处事实被两页引用时，两页必须引用同一个出处——趟号列表而不是各自的计数，否则三个数字都正确、
+读者仍然对不上。**
+
+**边界 245：清单页要能独立回答"值不值得修"；把一个判断拆到两个页面上，读者就得先知道要去看第二个页面。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6302,6 +6343,11 @@ missing for the next level
     `refused`（这个文件名下的承诺合起来被拒了几次）与 `walks`（窗口多大）。`--history` 打两行（版本自己的拒绝
     史 + 最后一趟的结论），`--campaign` 的档案行末尾写
     `(walk 2 of 2; its promises were refused 2 time(s) in the recorded walks)`。1587 → 1597 tests。
-95. 让拒绝史与档案互相指认：`--campaign` 的档案行直接说出"这一趟拒了它，之前还有哪几趟拒过"，并让
-    `--verify --from-queue 0` 的清单为每条被挡的承诺标出它的拒绝史（几次、哪几趟、是否还成立），
-    这样"要不要花一轮去修账本"能在同一页上判断。
+95. 已完成：拒绝史与档案互相指认（第 109 轮）。`refusal_history()` 的行多一个 `refused_walks`（被拒过的趟号
+    列表，不只是首末两趟），`blocked_dossier()` 的每个原始文件条目把它名下各承诺的趟号合起来，`walks_phrase()`
+    把 `[1, 3]` 写成"walks 1 and 3"；`--campaign` 的档案行改成
+    `(walk 2 of 3; its promises were refused in walks 1 and 2, 2 time(s))`，`--from-queue 0` 的两处提示（`still
+    blocked` 与清单行）都带上"几次、哪几趟、是否还成立"。1597 → 1606 tests。
+96. 让"要不要花一轮修账本"变成一个可执行的判断：`--campaign` 为每个被挡的原始文件算一份代价（挡了几趟、
+    名下几条承诺因此排队、最近一趟是哪趟），并在 `--verify --from-queue 0` 的末尾给出"先修哪一个文件"的排序，
+    同时把这份排序写进 `--campaign --json-out`，让脚本不必解析句子。

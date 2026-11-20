@@ -1915,7 +1915,26 @@ def refusal_history(root: Path) -> Dict[int, Dict[str, Any]]:
         if ordinals:
             row["first_walk"] = ordinals[0]
             row["last_walk"] = ordinals[-1]
+            # Round 109: the ordinals themselves, not only the outermost pair. "Refused in walks 1 and 3" is what
+            # lets the file's bill and the plan cite the same walks the history names (boundary 244).
+            row["refused_walks"] = sorted(set(ordinals))
     return history
+
+
+def walks_phrase(ordinals: Sequence[int]) -> str:
+    """A list of walk ordinals written the way a sentence needs it (round 109).
+
+    `[1, 2]` is not a phrase a reader can drop into a sentence, and `walk 1, 2, 3` reads as one walk with a comma in
+    its number. Three shapes cover every case and the plural/singular split is the only decision.
+    """
+    numbers = [int(item) for item in ordinals if int(item or 0) > 0]
+    if not numbers:
+        return ""
+    if len(numbers) == 1:
+        return "walk %d" % numbers[0]
+    if len(numbers) == 2:
+        return "walks %d and %d" % (numbers[0], numbers[1])
+    return "walks %s and %d" % (", ".join(str(item) for item in numbers[:-1]), numbers[-1])
 
 
 def latest_refusals(root: Path) -> Dict[str, Any]:
@@ -2042,6 +2061,11 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
         # The window the ordinals are counted in: "walk 3" means nothing without "of 4".
         entry["walks"] = max((int(history.get(version, {}).get("walks") or 0)
                               for version in entry["records"]), default=0)
+        # Round 109: which walks refused any promise born with this file, so the bill and the per-promise history
+        # cite the same walks instead of two counts that cannot be joined (boundary 244).
+        entry["refused_walks"] = sorted({int(ordinal)
+                                         for version in entry["records"]
+                                         for ordinal in history.get(version, {}).get("refused_walks") or []})
     return dict(sorted(dossier.items()))
 
 

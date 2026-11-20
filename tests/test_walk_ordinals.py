@@ -84,4 +84,4 @@ def test_the_campaign_prints_the_walk_range_and_the_files_bill(tmp_path):
     lines = format_campaign(campaign(tmp_path, refusal_history=refusal_history(tmp_path),
                                      blocked_dossier=blocked_dossier(tmp_path)))
     assert "walk 1 to 3, first " in lines
-    assert "(walk 3 of 3; its promises were refused 2 time(s) in the recorded walks)" in lines
+    assert "(walk 3 of 3; its promises were refused in walks 1 and 3, 2 time(s))" in lines

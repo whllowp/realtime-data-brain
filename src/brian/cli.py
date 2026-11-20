@@ -102,6 +102,7 @@ from .promote import (
     blocked_versions,
     refusal_history,
     latest_refusals,
+    walks_phrase,
     last_queue_run,
     in_force_overrides,
     legacy_state_note,
@@ -284,6 +285,21 @@ def _evolve_streams(args: argparse.Namespace, settings: Settings
     streams = [Stream(name=args.service, windows=list(windows),
                       meta={"service": args.service, "seed": args.seed})]
     return settings, streams, "demo", {}
+
+
+def _refusal_phrase(history: Mapping[Any, Mapping[str, Any]], version: int,
+                    blocked: Mapping[Any, Mapping[str, Any]]) -> str:
+    """Why and when this promise was refused, as one parenthesis (round 109).
+
+    The notice under the queue used to print only the stamp of the last refusal, which answers "when" and not "how
+    often, and in which walks" -- the two facts that decide whether repairing the books is worth a round.
+    """
+    seen = history.get(version) or {}
+    walked = walks_phrase([int(item) for item in seen.get("refused_walks") or []])
+    at = str((blocked.get(version) or {}).get("at") or "unknown")
+    if not walked:
+        return "last refused at %s" % at
+    return "refused in %s, %d time(s), last at %s" % (walked, int(seen.get("count") or 0), at)
 
 
 def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent: int = 0,
@@ -2777,6 +2793,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # now, because nothing about the books has moved. It is listed and counted, not measured again -- unless
             # the caller has just repaired the ledger, which `--retry-blocked` says.
             blocked = {} if getattr(args, "retry_blocked", False) else blocked_versions(root)
+            # Round 109: one history for both notices -- the "still blocked" line and the plan's marks -- so the two
+            # cannot disagree about which walk refused what.
+            walked_history = refusal_history(root)
             held_back = [row for row in runnable if int(row.get("version") or 0) in blocked]
             runnable = [row for row in runnable if int(row.get("version") or 0) not in blocked]
             if held_back:
@@ -2784,8 +2803,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        "since: %s" % (len(held_back),
                                       ", ".join("v%03d (%s)"
                                                 % (int(row.get("version") or 0),
-                                                   str((blocked.get(int(row.get("version") or 0)) or {})
-                                                       .get("at") or "unknown"))
+                                                   _refusal_phrase(walked_history, int(row.get("version") or 0),
+                                                                   blocked))
                                                 for row in held_back)))
                 _print("                 fix the books, or pass --retry-blocked to measure them again anyway")
             if not runnable:
@@ -2813,9 +2832,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 chosen = runnable
                 _print("from queue       %d of %d runnable promise(s) hold no verdict on the file they were born "
                        "with; --from-queue 0 only lists them" % (len(chosen), len(runnable)))
+                # Round 109: the plan carries each promise's refusal history, so "is it worth a round to repair the
+                # books" is a question this page can answer -- it used to take the campaign page as well.
                 for row in chosen:
-                    _print("  v%03d  <-  %s  (never measured where this promise was made)"
-                           % (int(row.get("version") or 0), str(row.get("origin") or "")))
+                    version = int(row.get("version") or 0)
+                    seen = walked_history.get(version) or {}
+                    mark = ""
+                    if int(seen.get("count") or 0):
+                        mark = "  [refused by the books in %s%s]" % (
+                            walks_phrase([int(item) for item in seen.get("refused_walks") or []]) or "an unnamed walk",
+                            ", and the refusal still stands" if seen.get("standing")
+                            else ", since repaired")
+                    _print("  v%03d  <-  %s  (never measured where this promise was made)%s"
+                           % (version, str(row.get("origin") or ""), mark))
                 if skipped:
                     _print("                 %d left out: the file they were born with is not in this checkout"
                            % skipped)
