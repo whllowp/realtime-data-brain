@@ -174,6 +174,7 @@ class Campaign:
     in_force_history: Dict[str, Any] = field(default_factory=dict)
     queue_run: Optional[Dict[str, Any]] = None
     queue_history: Dict[str, Any] = field(default_factory=dict)
+    blocked_dossier: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
     retired: int = 0
     # Refusals the loop still holds: the count `previously_rejected` would return, and how many of them
@@ -273,6 +274,7 @@ class Campaign:
             "in_force_cleared_history": dict(self.in_force_history),
             "queue_run": dict(self.queue_run) if isinstance(self.queue_run, Mapping) else None,
             "queue_history": dict(self.queue_history),
+            "blocked_dossier": {str(key): dict(value) for key, value in self.blocked_dossier.items()},
             "in_force_untested": self.in_force_untested,
             "domains": [row.to_dict() for row in self.rows],
         }
@@ -317,7 +319,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
              in_force_stale: Optional[Sequence[Mapping[str, Any]]] = None,
              in_force_history: Optional[Mapping[str, Any]] = None,
              queue_run: Optional[Mapping[str, Any]] = None,
-             queue_history: Optional[Mapping[str, Any]] = None) -> Campaign:
+             queue_history: Optional[Mapping[str, Any]] = None,
+             blocked_dossier: Optional[Mapping[str, Mapping[str, Any]]] = None) -> Campaign:
     """Summarise every recorded round, grouped by the stream each one measured.
 
     A round that does not say which stream it measured cannot be attributed to a domain, and is counted
@@ -522,6 +525,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.in_force_history = dict(in_force_history or {})
     result.queue_run = dict(queue_run) if isinstance(queue_run, Mapping) else None
     result.queue_history = dict(queue_history or {})
+    result.blocked_dossier = ({str(key): dict(value) for key, value in blocked_dossier.items()}
+                           if isinstance(blocked_dossier, Mapping) else {})
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
@@ -1062,6 +1067,24 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             if repeated:
                 lines.append("links             origins skipped on more than one walk: %s"
                              % "; ".join("%s %d" % (name, count) for name, count in sorted(repeated.items())))
+
+    blocked_by_origin = result.blocked_dossier
+    if isinstance(blocked_by_origin, Mapping) and blocked_by_origin:
+        # Round 105: round 104 made the queue skip a promise the books keep refusing; this line says which file is
+        # behind the refusals, because that is the thing a reader has to open to make the queue move again.
+        for origin, entry in sorted(blocked_by_origin.items()):
+            if not isinstance(entry, Mapping):
+                continue
+            versions = ", ".join("v%03d" % int(item) for item in entry.get("records") or [])
+            line = ("links             blocked by the books: %s %d promise(s) (%s), refused %d time(s), last "
+                    "%s" % (origin, len(entry.get("records") or []), versions,
+                            int(entry.get("attempts") or 0), str(entry.get("last_at") or "unknown")))
+            reasons = [str(item) for item in entry.get("reasons") or [] if str(item)]
+            if reasons:
+                # Named here rather than on each history row: this is the one place the contradiction is printed
+                # once for the file it belongs to (round 105's split between the row and the page).
+                line += " -- %s" % reasons[0]
+            lines.append(line)
 
     run = result.queue_run
     if isinstance(run, Mapping) and run.get("at"):

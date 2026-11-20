@@ -121,6 +121,7 @@ from .promote import (
     never_tested_at_origin,
     origin_queue,
     queue_history,
+    blocked_dossier,
     state_budgets,
     state_drains,
     version_label,
@@ -1711,6 +1712,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         repaired_links = backfilled_links(rounds)
         link_legacy = [item for item in link_rows if item.get("kind") == "legacy"]
         link_defects = [item for item in link_rows if item.get("kind") in ("mismatch", "unretired", "dangling")]
+        # Round 105: the ledger's view marks a broken link on the rows it names; the queue's view is different --
+        # someone walked the queue, tried this promise, and the walk ended on a build defect. A reader asking "why is
+        # this row never measured" needs the second sentence, and only `blocked_versions` knows it.
+        blocked_rows = blocked_versions(root)
         if link_defects:
             _print("links             %d replacement link(s) disagree with their other end: %s"
                    % (len(link_defects), ", ".join(sorted({str(item["round"]) for item in link_defects}))))
@@ -1818,6 +1823,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                            for t in kept) if value is not None]
             recall_after = "%.3f" % max(recalls) if recalls else "-"
             applied = record.get("applied")
+            # A record lists what it applied as labels (`v020`), not as numbers, so the digits are read out of the
+            # label rather than casting it: `int("v020")` is a crash on a page about records (round 71's shape).
+            produced_versions = set()
+            if isinstance(applied, list):
+                for item in applied:
+                    digits = "".join(character for character in str(item) if character.isdigit())
+                    if digits:
+                        produced_versions.add(int(digits))
             mark = "" if applied is None or applied else "  [recorded, not applied]"
             retired = record.get("retired")
             if retired:
@@ -1853,8 +1866,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # retired row, the successor or a second round that nominated the same successor all see it.
                 others = sorted({str(item.get("round"))} | set(participants))
                 others = [name for name in others if name and name != own_name]
-                if others:
-                    mark += "  [broken link: %s with %s]" % (item.get("kind"), ", ".join(others))
+                sentence = "  [broken link: %s with %s]" % (item.get("kind"), ", ".join(others))
+                # Round 105: one row can be named by two findings (each nominator offends on its own), and the same
+                # sentence twice reads as two separate defects. The row says it once; the header says how many.
+                if others and sentence not in mark:
+                    mark += sentence
+            for version, blocked in blocked_rows.items():
+                if version not in produced_versions:
+                    continue
+                # The long sentence (which record's book contradicts this promise) belongs on the campaign page,
+                # where it is printed once per origin file. On a row it would repeat on every record that produced
+                # the version and bury the column it sits in -- the row's job is to say the queue tried and was
+                # refused, and when.
+                mark += "  [refused by the queue on %s]" % (str(blocked.get("at") or "an unrecorded walk"))
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
@@ -2264,7 +2288,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                      refusal_expiry_days=horizon, limits=limits_view,
                                      in_force=in_force_rows, in_force_cleared=in_force_cleared,
                                      in_force_stale=in_force_stale_rows, in_force_history=in_force_record,
-                                     queue_run=last_queue_run(root), queue_history=queue_history(root))
+                                     queue_run=last_queue_run(root), queue_history=queue_history(root),
+                                     blocked_dossier=blocked_dossier(root))
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2

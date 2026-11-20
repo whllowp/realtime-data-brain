@@ -1817,11 +1817,30 @@ def blocked_versions(root: Path) -> Dict[int, Dict[str, Any]]:
                 continue
             code = int(item.get("code") or 0)
             if code == 2:
-                blocked[version] = {"version": version, "at": str(run.get("at") or ""), "code": code}
+                # Round 105: a refusal is only useful if it says what refused it. `provenance_block` knows which
+                # record's book contradicts this promise; without it the page says "the books disagree" and leaves
+                # the reader with no record to open.
+                blocked[version] = {"version": version, "at": str(run.get("at") or ""), "code": code,
+                                    "why": _blocked_reason(root, version)}
             else:
                 # A later attempt that did not hit the wall settles the question: the record is not blocked.
                 blocked[version] = {"version": version, "at": "", "code": code}
     return {version: item for version, item in blocked.items() if item["code"] == 2}
+
+
+def _blocked_reason(root: Path, version: int) -> str:
+    """Why the ledger refuses this version, in words a reader can act on (round 105).
+
+    `code == 2` says a build defect stopped the walk; it does not say which record's book is the contradictory one.
+    That sentence already exists in `provenance_block`, and a page printing only the code sends the reader looking
+    for a fault that names no file.
+    """
+    try:
+        block = provenance_block(root, version)
+    except (OSError, ValueError):
+        return ""
+    return str(block[1]) if block else ""
+
 
 
 def queue_history(root: Path) -> Dict[str, Any]:
@@ -1864,6 +1883,43 @@ def origin_queue(root: Path) -> List[Dict[str, Any]]:
     evidence somewhere else, and the queue is a backlog, not a ranking.
     """
     return list(never_tested_at_origin(repaired_paths(root))["versions"])
+
+
+def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
+    """Which origin file stands behind the promises the ledger keeps refusing, and how often (round 105).
+
+    Round 104 made a blocked promise cheap to skip; the reader's next question is where the fault lives. Blocked
+    versions group by the file the promise was born with, not by its current path: the refusal is about the record,
+    and the origin is what a reader has to open to repair it.
+    """
+    blocked = blocked_versions(root)
+    if not blocked:
+        return {}
+    origins = {int(row.get("version") or 0): str(row.get("first_from") or "")
+               for row in repaired_paths(root)}
+    attempts: Dict[int, int] = {}
+    for run in queue_runs(root)["runs"]:
+        for item in run.get("attempted") or []:
+            if isinstance(item, Mapping) and int(item.get("code") or 0) == 2:
+                version = int(item.get("version") or 0)
+                attempts[version] = attempts.get(version, 0) + 1
+    dossier: Dict[str, Dict[str, Any]] = {}
+    for version, row in blocked.items():
+        origin = origins.get(version, "") or "(unnamed)"
+        entry = dossier.setdefault(origin, {"origin": origin, "records": [], "attempts": 0, "last_at": "",
+                                            "reasons": []})
+        entry["records"].append(version)
+        # A refusal recorded before round 104 has no attempt list, but it was refused at least once.
+        entry["attempts"] += attempts.get(version, 1)
+        entry["last_at"] = max(str(entry.get("last_at") or ""), str(row.get("at") or ""))
+        reason = str(row.get("why") or "")
+        if reason and reason not in entry["reasons"]:
+            entry["reasons"].append(reason)
+    for entry in dossier.values():
+        entry["records"] = sorted(entry["records"])
+        entry["reasons"] = sorted(entry["reasons"])
+    return dict(sorted(dossier.items()))
+
 
 
 def repaired_paths(root: Path) -> List[Dict[str, Any]]:

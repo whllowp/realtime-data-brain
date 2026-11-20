@@ -5683,6 +5683,53 @@ origins skipped on more than one walk: data/smd/stream-real.json 2
 就变成一张永久的封条。
 
 
+### 3.111 拒绝也要点名：被挡住的承诺，说出是哪本书挡住它的
+
+第 104 轮让被账本挡住的承诺不必重付一次，但它留下的记录只有 `{"version": 20, "code": 2}`——
+**拒绝了，却没说谁拒绝的**。读者看到"账本不同意"，手里没有任何一条记录可以打开。
+
+于是这一轮给拒绝补两样东西。
+
+**一、理由。** `blocked_versions` 的每一行多一个 `why`，直接取自 `provenance_block` 早就知道的那句话：
+
+```
+blocked by the books: data/smd/stream-real.json 1 promise(s) (v020), refused 1 time(s), last 2026-11-20T00:26:43 -- round-old.json is one of the records in a mismatch link: round-old.json names round-new.json as its successor, but round-new.json says it replaced round-other.json
+```
+
+一行里有文件、有被挡的版本、有被挡次数、有那句话里点到的两条记录。
+
+**二、按原件分桶。** `blocked_dossier` 把被挡的版本按**出生时的文件**（`first_from`）分组，而不是按当前
+路径：挡住它的是记录本身，而原件才是读者要打开去修的那一份。同一份文件下的承诺数、被挡总次数、最后一次
+时间、以及那些理由，一起给出。
+
+**长句子印一次，短标记印在行上。** 第一版把整句矛盾塞进 `--history` 的每一行，结果那三行全部超过两百列——
+三个应用过 `v020` 的轮次各自重复同一个长句，把本来要看的列挤掉了。现在的分工是：
+
+- `--history` 的行只写 `[refused by the queue on 2026-11-20T00:26:43]`：**这个承诺被队列试过、被拒了、什么时候**；
+- `--campaign` 在它所属的那份文件上写一次长句：**谁的书和谁矛盾**。
+
+**顺便修掉一处重复。** 同一行可能被两条 finding 同时点名（每个"提名者"各自算一次冒犯），于是
+`[broken link: mismatch with round-new.json, round-other.json]` 在同一行印了两遍。两条句子一模一样时只印一条：
+行说"这里有一次矛盾"，表头说"有几次"。
+
+**边界 233：拒绝记录若只有代码没有名字，读者拿到的是"有问题"三个字。** `code == 2` 说明是 build defect，
+不说明是哪条记录；名册（`attempted`）解决了"付不付第二次"，理由（`why`）才解决"去哪里修"。
+
+**边界 234：一条记录可以因多个来源被点名，但同一句话在同一行只该出现一次。** 重复不是更强调，是更含糊——
+读者会以为是两处矛盾。
+
+**边界 235：长句印在它所属的对象上，短标记印在引用它的行上。** 同一句话在一页里出现四次，代价不是四次
+字符，是那一页的列宽。
+
+实跑（`var/demo103`：`v020` 的生产记录参与一条 `mismatch` 链接）：
+
+```
+stopped          v020 exited 2, and no other promise was waiting behind it
+links             blocked by the books: data/smd/stream-real.json 1 promise(s) (v020), refused 1 time(s), last …
+ 1  …  [retired, re-measured as round-new.json]  [data/smd/stream-one.json]  [broken link: mismatch with round-new.json, round-other.json]  [refused by the queue on 2026-11-20T00:26:43.501609+00:00]
+```
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6094,5 +6141,13 @@ missing for the next level
     让 `--from-queue` 不再重复付一笔账：`blocked_versions` 记住上一趟栽在 build defect 上的记录，除非
     `--retry-blocked`，它们只被列出、不被再量；一趟什么都没量也算一趟，照样记进 `queue_runs.json`。
     （第 104 轮完成。）
-91. 让每个原件文件都有一行档案：被账本挡过几次、最后一次是什么时候、那次是哪一条记录的书在互相矛盾，
-    并让被挡住的记录在 `--history` 上点名那条矛盾的记录，而不是只说"账本不同意"。
+91. 给每个原件文件一行档案：被账本挡过几次、最后一次是什么时候、那次是哪一条记录的书在互相矛盾，
+    并让被挡住的记录在 `--history` 上点名那条矛盾的记录。
+    `blocked_versions` 的每一行加上 `why`（`provenance_block` 的那句话），`blocked_dossier` 按 `first_from`
+    分桶给出 `records` / `attempts` / `last_at` / `reasons`，`--campaign` 打一行
+    `blocked by the books: <file> N promise(s) (v020), refused N time(s), last <at> -- <那句话>`，
+    `--history` 的行只写 `[refused by the queue on <at>]`：长的矛盾句只印在它所属的那份文件上，不跟着每一行重复。
+    （第 105 轮完成。）
+92. 让"原件被反复挡住"和"记录被反复挡住"分开数：同一份文件上，可能是三条不同的承诺各自被挡一次，
+    也可以是同一条承诺被挡三次；`attempts` 现在把两者加在一起，读者分不出这是"文件有问题"还是"记录有问题"。
+    再让 `--retry-blocked` 只重试那些账本真的变过的记录（比对挡下时的 `provenance_block` 详情与今天的）。
