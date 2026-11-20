@@ -1243,15 +1243,26 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             walks = item.get("walks_since")
             # Round 121: "stale since when" is the other half of "how many are stale". A file re-taken this morning
             # and walked three times since is a different problem from one nobody has opened in a month (item 107).
-            when = ("last re-taken %s" % str(item.get("last_retaken") or "")) if item.get("last_retaken") \
-                else "never re-taken"
+            # "never re-taken" is not printed here: the split below already says how many decisions nobody has
+            # read the books for, and a fact twice on one line reads as noise (boundary 241).
+            when = ("last re-taken %s" % str(item.get("last_retaken") or "")) if item.get("last_retaken") else ""
             since = "unknown" if walks is None else ("%d walk(s) since" % int(walks))
-            lines.append("links             re-take next: %s -- %d stale of %d recorded decision(s)%s, %s, %s -- %s"
+            # Round 122: the debt is two debts. `never` is a promise nobody has read the books for; `again` is one
+            # where the books moved after the last reading, which re-stamping would cover while looking like upkeep.
+            kinds = "%d never re-taken, %d re-taken before and moved again" % (int(item.get("never") or 0),
+                                                                               int(item.get("again") or 0))
+            if int(item.get("stale") or 0) > 1 and str(item.get("batch") or ""):
+                # One command for the whole file: the reason belongs to the action, and eleven pasted pairs is how
+                # one gets skipped (boundaries 277/282).
+                command = str(item.get("batch"))
+            else:
+                command = commands[0] if commands else "brian evolve --settle-reaffirm <record>=<successor>"
+            parts = [part for part in (when, since, kinds) if part]
+            lines.append("links             re-take next: %s -- %d stale of %d recorded decision(s)%s, %s -- %s"
                          % (str(item.get("origin") or "(unnamed stream)"), int(item.get("stale") or 0),
                             int(item.get("decisions") or 0),
                             " (%d re-taken)" % int(item.get("retaken") or 0) if item.get("retaken") else "",
-                            when, since,
-                            commands[0] if commands else "brian evolve --settle-reaffirm <record>=<successor>"))
+                            ", ".join(parts), command))
     # Round 111: the ranking said which file to open first; this says whether last time's opening helped.
     last = (result.repair_history or {}).get("last") or {}
     if isinstance(last, Mapping) and last.get("at"):

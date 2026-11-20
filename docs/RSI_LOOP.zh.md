@@ -6568,6 +6568,61 @@ links             re-take next: data/smd/stream-two.json -- 1 stale of 2 recorde
 **边界 281：页面上并列的两个上限，要在同一行里各自说出自己的问题和答案。** `--max-moved` 与 `--max-moved-per-file` 相邻而治不同的欠账；只印其中一个的判定，读者会以为另一个也过了。
 
 
+### 3.128 同一份欠账有两种活：从没读过 vs 读过又变了
+
+第 121 轮给计划加了时间线，也给了「按文件收费」的上限，于是页面上出现了这样一行：
+
+```
+links             re-take next: data/smd/stream-one.json -- 3 stale of 3 recorded decision(s) (1 re-taken), last re-taken 2026-11-16T03:32:40.173907+00:00, 1 walk(s) since, 2 never re-taken, 1 re-taken before and moved again -- brian evolve --settle-reaffirm-file data/smd/stream-one.json --settle-why TEXT --settle-by NAME
+```
+
+`3 stale of 3` 是一个数，但它是两件事的和：
+
+- **从没读过**（`never re-taken`）：裁定时书是这样，之后书动了，而这条决定一次都没被重新确认过；
+- **读过又变了**（`re-taken before and moved again`）：确认过一次，之后又有新的主张落在同一个后继上。
+
+这两件事的工作量完全不同。第一种是第一次读——需要把整份记录读一遍；第二种是复查——只需要对比上次确认之后的变化。混在一个数字里，读者无法估计要花多少时间，也无法判断「刚刚重开过，为什么又欠着」。
+
+所以桶里分了两栏（`bucket["never"]` / `bucket["again"]`），行里还保留了 `pairs`（`[{record, successor}]`，按名字排序），因为「一条命令付一整个文件」需要一组对子，而不是一个计数。
+
+### 一条命令付一整个文件
+
+第 120 轮让 `--settle-reaffirm` 收多个对子，但清单还是要人手抄。第 122 轮把它变成一条命令：
+
+```
+$ brian evolve --settle-reaffirm-file data/smd/stream-one.json --settle-why "read today's books" --settle-by alice
+re-taking      3 decision(s) on data/smd/stream-one.json in one command (2 never re-taken, 1 re-taken before and moved again)
+reaffirmed     round-fourth.json -> round-new.json
+reaffirmed     round-old.json -> round-new.json
+reaffirmed     round-third.json -> round-new.json
+re-taken       3 of 3 decision(s), 0 kept its date (already re-taken), 0 refused
+repair plan      nothing left the table: cost 0 -> 0, 0 file(s) still owing
+```
+
+关键实现决定：这个分支**不自己实现一遍**，它把 `pairs` 塞进 `args.settle_reaffirm` 再递归调用第 120 轮的分支。于是「一条理由用于所有对子」「每个对子一块输出」「被拒绝的对子不打断其余」「`--json-out` 是列表」这些规则各只有一份实现。第二份实现就是第二套规则。
+
+对子来自**页面上印的那个计划**（`reaffirm_plan`），不是重新数一遍：`match = [row for row in plan_rows if same_stream_path(...)]`。否则页面和命令会各自用不同的过滤条件，抄下来的清单和跑出来的清单就会漂移。
+
+付完一个文件，页面的下一行就换到另一个文件——这正是「按文件收费」的意义：
+
+```
+$ brian evolve --audit --strict --max-moved-per-file 0
+2 decision(s) on one stream file rest on books that have moved, above the 0 asked for for a single file:
+...
+$ brian evolve --settle-reaffirm-file data/smd/stream-two.json --settle-why "read today's books" --settle-by alice
+re-taking      2 decision(s) on data/smd/stream-two.json in one command (2 never re-taken, 0 re-taken before and moved again)
+re-taken       2 of 2 decision(s), 0 kept its date (already re-taken), 0 refused
+$ brian evolve --audit --strict --max-moved-per-file 0
+$ echo $?
+0
+```
+
+**边界 282：一个文件的 stale 数藏着两种不同的活。** 第一次读和「读完之后又变了」的复查，成本不同、产物不同、下一页该说什么也不同；把它们压在同一个数字里，重新确认就看起来像例行保养。
+
+**边界 283：批量的对子必须来自页面印的那个计划。** 若命令自己重新筛一遍，抄下来的清单和跑出来的清单就会漂移，而漂移的方向总是「多跑了没人看的」或者「漏了刚刚变脏的」。
+
+**边界 284：复用单条分支是正确做法，复制一份实现不是。** 拒绝规则、理由规则、输出形状、退出码都只该有一份；第二份实现不会报错，它只会慢慢和第一份不一致。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7044,4 +7099,6 @@ missing for the next level
 
 107. 已完成：重开的决定在 `--campaign` 的 JSON 里带整条时间线（`last_retaken` / `walks_since`，未知印成 `unknown`），并新增 `--max-moved-per-file N`，让「这个文件的账还没人读过」按文件计价；边界 279/280/281。
 
-108. 下一步：让 `--campaign` 把「重开了但仍然过期」和「从来没重开过」分成两列，并给前者一条按文件重开整批的命令（一次给出该文件全部过期裁定，而不是逐条粘贴）。
+108. ✓（第 121 轮）计划要带时间线，欠账要能按文件收费：`reaffirm_plan` 现在带 `last_retaken` 与 `walks_since`（没人算过的数印 `unknown`，不是 `0`），`--max-moved-per-file N` 按「一个文件上有几条决定」收费，和按条数的 `--max-moved` 并排各自给出自己的判决。
+
+109. （下一轮）批量重开需要一份「上次读到现在」的差量：`--settle-reaffirm-file` 目前只能整份重开，应该能只重开 `last_retaken` 之后变脏的那些，并在页面上区分「本次重开了几条、其中几条其实没变」，同时把每个文件的 `never` / `again` 两栏写进 `--campaign --json-out` 的行里。

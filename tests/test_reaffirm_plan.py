@@ -86,11 +86,13 @@ def test_the_campaign_page_says_the_debt_and_the_first_command(tmp_path):
     page = " ".join(format_campaign(result).split())
     # Round 118 computed this and printed it only in the JSON; the page is what a reader opens (boundary 264).
     assert "decision(s) rest on books that have moved since they were taken: round-old.json -> round-new.json" in page
-    # Round 121: the line now says when the file was last re-taken and how many walks followed. This ledger has no
-    # re-takes and no walks, so it says "never re-taken" and "0 walk(s) since" -- zero recorded walks is a fact,
-    # while `unknown` is reserved for a plan built without the walk store (boundary 280).
-    assert ("re-take next: data/smd/stream-one.json -- 1 stale of 2 recorded decision(s), never re-taken, "
-            "0 walk(s) since -- "
+    # Round 121/122: the line says how many walks followed, and how the debt splits. This ledger has no re-takes
+    # and no walks, so it says "0 walk(s) since" -- zero recorded walks is a fact, while `unknown` is reserved for
+    # a plan built without the walk store (boundary 280).
+    # Round 122: the split names the two debts, and "never re-taken" appears once -- in the split, where it says
+    # *how many* decisions nobody has read the books for, not as a timestamp phrase repeated beside it.
+    assert ("re-take next: data/smd/stream-one.json -- 1 stale of 2 recorded decision(s), 0 walk(s) since, "
+            "1 never re-taken, 0 re-taken before and moved again -- "
             "brian evolve --settle-reaffirm round-old.json=round-new.json") in page
 
 

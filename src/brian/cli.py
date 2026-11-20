@@ -2919,6 +2919,41 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 handle.write(json.dumps({"noted": noted}, indent=2, sort_keys=False) + "\n")
         return 0
 
+    if getattr(args, "settle_reaffirm_file", None):
+        # Round 122: a file with several stale decisions needs one command, not one per pair -- pasting eleven
+        # pairs is how the reason drifts and how one gets skipped (boundary 277, one level up). The batch resolves
+        # its pairs from the plan, so the list `--campaign` prints is the list this command runs (round 101).
+        target = str(args.settle_reaffirm_file or "").strip()
+        if not target:
+            _print("--settle-reaffirm-file takes the stream file the decisions are about, for example "
+                   "`--settle-reaffirm-file data/smd/stream-two.json`")
+            return 2
+        try:
+            plan_rows = reaffirm_plan(history(root, include_retired=True), load_settlements(root),
+                                      queue_runs(root)["runs"])
+        except (OSError, ValueError) as error:
+            _print("cannot read the re-take plan: %s" % error)
+            return 2
+        match = [row for row in plan_rows if same_stream_path(str(row.get("origin") or ""), target)]
+        if not match:
+            _print("no stale decision is recorded against %s: `brian evolve --campaign` lists the files that "
+                   "hold one" % target)
+            return 2
+        row = match[0]
+        pairs = ["%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
+                 for item in row.get("pairs") or []]
+        if not pairs:
+            _print("%s has no stale decision to re-take: its decisions agree with the books as they stand"
+                   % (row.get("origin") or target))
+            return 0
+        _print("re-taking      %d decision(s) on %s in one command (%d never re-taken, %d re-taken before and "
+               "moved again)" % (len(pairs), row.get("origin") or target, int(row.get("never") or 0),
+                                 int(row.get("again") or 0)))
+        inner = argparse.Namespace(**vars(args))
+        inner.settle_reaffirm_file = None
+        inner.settle_reaffirm = pairs
+        return cmd_evolve(inner, settings)
+
     if getattr(args, "settle_reaffirm", None):
         # Round 119: round 118 can say the books moved under a decision but not re-take it, so the decision stayed
         # stale for ever and the gate could never charge it. This branch re-reads today's books and records what
@@ -4975,6 +5010,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-note", metavar="RECORD=SUCCESSOR", default=None,
                         help="append the explanation a recorded settlement lacked: the decision keeps its date "
                              "and successor; needs --settle-why")
+    evolve.add_argument("--settle-reaffirm-file", default=None, metavar="STREAM",
+                        help="re-take every stale decision on one stream file in a single command, with the same "
+                             "--settle-why and --settle-by; the pairs come from the plan `--campaign` prints")
     evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="re-take decisions against today's books: keeps each first date, records the claims "
                              "it covered; takes one or more RECORD=SUCCESSOR pairs; needs --settle-why")

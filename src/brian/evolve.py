@@ -2844,7 +2844,8 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
         successor = str(item.get("successor") or "")
         origin = str((by_name.get(record) or {}).get("stream_path") or "")
         bucket = files.setdefault(origin, {"origin": origin, "decisions": 0, "stale": 0, "retaken": 0,
-                                           "records": [], "commands": []})
+                                           "never": 0, "again": 0, "records": [], "commands": [],
+                                           "pairs": []})
         bucket["decisions"] += 1
         bucket.setdefault("_retaken", []).extend(
             str(entry.get("at") or "") for entry in item.get("reaffirmations") or []
@@ -2855,7 +2856,15 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
         if (record, successor) in moved:
             bucket["stale"] += 1
             bucket["records"].append(record)
+            bucket["pairs"].append({"record": record, "successor": successor})
             bucket["commands"].append("brian evolve --settle-reaffirm %s=%s" % (record, successor))
+            # Round 122: two kinds of stale owe different work. `never` is a promise nobody has read the books
+            # for; `again` is one where the books moved *after* the last reading, so re-stamping it would cover a
+            # claim while looking like upkeep (boundary 282).
+            if item.get("reaffirmations"):
+                bucket["again"] += 1
+            else:
+                bucket["never"] += 1
     rows = [bucket for bucket in files.values() if bucket["stale"]]
     for row in rows:
         moments = row.pop("_retaken", None) or []
@@ -2864,6 +2873,10 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
         # happened since anyone last looked" instead of "since the beginning of time".
         row["last_retaken"] = max(moments) if moments else ""
         row["walks_since"] = _walks_since(runs, row["last_retaken"] or taken)
+        row["pairs"] = sorted(row["pairs"], key=lambda entry: (entry["record"], entry["successor"]))
+        # One command for the whole file, spelled the way a reader can paste it: eleven pasted pairs is how the
+        # reason drifts and how one gets skipped (boundary 277's lesson, one level up).
+        row["batch"] = "brian evolve --settle-reaffirm-file %s --settle-why TEXT --settle-by NAME" % row["origin"]
     rows.sort(key=lambda row: (-row["stale"], row["origin"]))
     return rows
 
