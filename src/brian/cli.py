@@ -863,6 +863,9 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     different statements and a reader must be able to tell them apart. It exits 1 even when no verdict
     moved: exit 0 may only mean the check ran on every record and passed (boundary 74).
     """
+    # Round 169 (item 155): the flag decides the return code, not whether the facts are read. `say` keeps a
+    # report silent while the same table is computed, so a reader can ask what a check would find.
+    say = _print if strict else (lambda *a, **k: None)
     charges: List[Dict[str, Any]] = []
 
     def _charge(rule: str, count: Any, code: int) -> None:
@@ -871,14 +874,17 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     def _done() -> int:
         # Round 168 (item 154): the exit code is --exactly-- the list of charges, so a script that reads the
         # list can compute the code the command will return (boundary 404).
+        # Round 169 (item 155): a report keeps the same list under `would_charge` and charges nothing -- the
+        # two fields must not be two readings of different flags (boundary 406).
         if into is not None:
-            into["charges"] = list(charges)
+            into["would_charge"] = list(charges)
+            into["charges"] = [] if not strict else list(charges)
+        if not strict:
+            return 0
         if any(item["code"] == 2 for item in charges):
             return 2
         return 1 if charges else 0
 
-    if not strict:
-        return _done()
     # Round 168 (item 154): the two counts that are already decided by the caller are recorded first, because a
     # build defect returns early and would otherwise list itself as the only charge -- a reader would read "one
     # defect" where the ledger also has a moved verdict (boundary 405).
@@ -890,131 +896,131 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         # Round 81: the two ends of a replacement relation are written by two different commands, and
         # neither checks the other. A ledger whose books contradict each other cannot be repaired by
         # re-deciding under today's rules, so this is a build defect (exit 2), like `inconsistent`.
-        _print("")
-        _print("%d replacement link(s) disagree: the retired record and the successor name different "
+        say("")
+        say("%d replacement link(s) disagree: the retired record and the successor name different "
                "rounds," % broken_links)
-        _print("or one end points at a round the ledger does not hold. The two ends cannot both be true, and")
-        _print("no re-deciding settles it, so --strict exits 2. `--audit` names each one.")
+        say("or one end points at a round the ledger does not hold. The two ends cannot both be true, and")
+        say("no re-deciding settles it, so --strict exits 2. `--audit` names each one.")
     if inconsistent:
-        _print("")
-        _print("%d comparison(s) cannot be reconstructed in records that carry the geometry and still lack "
+        say("")
+        say("%d comparison(s) cannot be reconstructed in records that carry the geometry and still lack "
                "the reference:" % inconsistent)
-        _print("that is a defect in this build, so --strict exits 2.")
+        say("that is a defect in this build, so --strict exits 2.")
         _charge("unreconstructable comparison", inconsistent, 2)
         return _done()
     if in_force:
         # Round 85: the same contradiction, one step further along -- a version running on top of it. The exit
         # code is the one `broken_links` already returns; a second `return 2` for the same finding would not
         # change the answer, it would only look like an independent check.
-        _print("")
-        _print("%d version(s) in force sit on a replacement link whose two ends contradict each other, so a"
+        say("")
+        say("%d version(s) in force sit on a replacement link whose two ends contradict each other, so a"
                % in_force)
-        _print("deployed configuration inherits the contradiction. `--audit` names the version and the link.")
+        say("deployed configuration inherits the contradiction. `--audit` names the version and the link.")
     if in_force_stale:
         # Round 86: a copied end is a debt with exactly one remedy -- measuring the deployed version again -- so
         # an aged one is charged, and the charge names that command. Before the grace period it stays a report:
         # the note is new, and a check that fails on the first sighting teaches nothing about what changed.
-        _print("")
-        _print("%d version(s) in force have sat on a copied record for longer than the %.0f-day grace period"
+        say("")
+        say("%d version(s) in force have sat on a copied record for longer than the %.0f-day grace period"
                % (in_force_stale, IN_FORCE_GRACE_DAYS))
-        _print("with no re-measurement that could test the claim, so --strict exits 1:")
-        _print("`brian evolve --verify --verify-version <n> --stream-file <the file that version measured> --accept-copied`")
-        _print("clears it, because the copy is about the record, not about the number.")
+        say("with no re-measurement that could test the claim, so --strict exits 1:")
+        say("`brian evolve --verify --verify-version <n> --stream-file <the file that version measured> --accept-copied`")
+        say("clears it, because the copy is about the record, not about the number.")
         if in_force_untested:
             # Round 89: the command above was already run on at least one of these, and it measured nothing
             # comparable. Naming it again without saying so is the charge that can never be cleared.
-            _print("%d of them were measured and the check could not test the claim: measuring again on the"
+            say("%d of them were measured and the check could not test the claim: measuring again on the"
                    % in_force_untested)
-            _print("same stream will compare nothing again. Use the file that version recorded, or retire the")
-            _print("version whose claim cannot be checked (boundary 188).")
+            say("same stream will compare nothing again. Use the file that version recorded, or retire the")
+            say("version whose claim cannot be checked (boundary 188).")
     if unexplained_stale:
         # Round 117: a decision with no reason and no note is answered by one command, and nothing else in the
         # loop will ever fill it in -- so an old one is debt, charged only when the caller sets the age cap
         # (a default would be red on every ledger whose settlements predate --settle-why).
-        _print("")
-        _print("%d decision(s) have had no explanation for longer than the %.0f day(s) asked for:"
+        say("")
+        say("%d decision(s) have had no explanation for longer than the %.0f day(s) asked for:"
                % (unexplained_stale, float(unexplained_days or 0.0)))
-        _print("  a decision with no reason and no note is debt nobody can review, and `--settle-note "
+        say("  a decision with no reason and no note is debt nobody can review, and `--settle-note "
                "RECORD=SUCCESSOR`")
-        _print("  with `--settle-why TEXT --settle-by NAME` is the command that pays it: --strict exits 1 "
+        say("  with `--settle-why TEXT --settle-by NAME` is the command that pays it: --strict exits 1 "
                "(boundary 266).")
     if restaled:
         # Round 118 reported "the books moved"; round 119 is the command that clears it, so what is left is
         # chargeable -- and only the clearable kind: a decision whose pair is gone has nothing to re-affirm
         # (boundaries 271/275).
-        _print("")
-        _print("%d decision(s) rest on books that have moved since they were taken, above the %d asked for:"
+        say("")
+        say("%d decision(s) rest on books that have moved since they were taken, above the %d asked for:"
                % (restaled, int(max_restaled or 0)))
-        _print("  a claim arrived on the same successor after the decision, so it covers a pair the ledger no")
-        _print("  longer describes: `--settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME`")
-        _print("  re-takes it against today's books: --strict exits 1 (boundary 273).")
+        say("  a claim arrived on the same successor after the decision, so it covers a pair the ledger no")
+        say("  longer describes: `--settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME`")
+        say("  re-takes it against today's books: --strict exits 1 (boundary 273).")
     if per_file_restaled:
-        _print("%d decision(s) on one stream file rest on books that have moved, above the %d asked for for a "
+        say("%d decision(s) on one stream file rest on books that have moved, above the %d asked for for a "
                "single file:" % (per_file_restaled, int(max_restaled_per_file or 0)))
-        _print("  the cap is per file because the work is per file: eleven stale decisions on eleven files is eleven")
-        _print("  afternoons, and eleven on one file is one. Re-take that file's decisions with")
-        _print("  `brian evolve --settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT`, which `brian evolve")
-        _print("  --campaign` lists one command per pair (boundary 279).")
+        say("  the cap is per file because the work is per file: eleven stale decisions on eleven files is eleven")
+        say("  afternoons, and eleven on one file is one. Re-take that file's decisions with")
+        say("  `brian evolve --settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT`, which `brian evolve")
+        say("  --campaign` lists one command per pair (boundary 279).")
     if per_file_unanswered:
-        _print("%d withdrawal(s) sit on one stream file, above the %d asked for for a single file:"
+        say("%d withdrawal(s) sit on one stream file, above the %d asked for for a single file:"
                % (per_file_unanswered, max_unanswered_per_file if max_unanswered_per_file is not None else 0))
-        _print("  the file is %s, and each of those pairs is one nobody has ruled on since it was taken back."
+        say("  the file is %s, and each of those pairs is one nobody has ruled on since it was taken back."
                % (unanswered_file or "(unattributed)"))
-        _print("  A cap in decisions says the debt is large; a reader pays in afternoons, and eleven withdrawals on")
-        _print("  eleven files is eleven of them while eleven on one file is one (boundary 279, applied here).")
-        _print("  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT` decides one again, and the withdrawal stays")
-        _print("  on the record: --strict exits 1 until this file's count is back inside the cap (boundary 299).")
+        say("  A cap in decisions says the debt is large; a reader pays in afternoons, and eleven withdrawals on")
+        say("  eleven files is eleven of them while eleven on one file is one (boundary 279, applied here).")
+        say("  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT` decides one again, and the withdrawal stays")
+        say("  on the record: --strict exits 1 until this file's count is back inside the cap (boundary 299).")
     if unanswered:
         # Round 127: unlike the unexplained decisions, this one has a command that clears it, so it is charged
         # (boundary 266's condition) -- and the pair is a standing contradiction while it waits (boundary 294).
-        _print("%d decision(s) have been withdrawn for longer than the %d day(s) asked for:" % (unanswered,
+        say("%d decision(s) have been withdrawn for longer than the %d day(s) asked for:" % (unanswered,
                                                                                              int(unanswered_days or 0)))
-        _print("  each of those pairs is a contradiction nobody has ruled on: the withdrawal says the decision no")
-        _print("  longer stands, and nothing has taken its place, so `--audit` charges it and")
-        _print("  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` is the command that pays it:")
-        _print("  the pair is decided again, and the withdrawal stays on the record (boundary 297).")
+        say("  each of those pairs is a contradiction nobody has ruled on: the withdrawal says the decision no")
+        say("  longer stands, and nothing has taken its place, so `--audit` charges it and")
+        say("  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` is the command that pays it:")
+        say("  the pair is decided again, and the withdrawal stays on the record (boundary 297).")
     if broken_links:
         # Round 168 (item 154): the early exit names its charge like every later one, so a report can say which
         # rule turned the code to 2 (boundary 404).
         _charge("replacement link", broken_links, 2)
         return _done()
     if unreconstructable:
-        _print("")
-        _print("%d comparison(s) predate the geometry field and cannot be replayed; re-running those rounds "
+        say("")
+        say("%d comparison(s) predate the geometry field and cannot be replayed; re-running those rounds "
                "writes records that can be." % unreconstructable)
-        _print("They do not fail the check (their rules still move the exit code), but --strict has not "
+        say("They do not fail the check (their rules still move the exit code), but --strict has not "
                "verified them.")
     if due:
-        _print("")
-        _print("%d refusal(s) are older than the %.0f-day horizon and were not measured again%s:"
+        say("")
+        say("%d refusal(s) are older than the %.0f-day horizon and were not measured again%s:"
                % (due, horizon,
                   "" if oldest_days is None else " (oldest evidence %.0f day(s) old)" % oldest_days))
-        _print("a refusal nobody re-tests is an assertion the loop cannot lose, so --strict exits 1.")
-        _print("pass --verify-withheld to re-measure them.")
+        say("a refusal nobody re-tests is an assertion the loop cannot lose, so --strict exits 1.")
+        say("pass --verify-withheld to re-measure them.")
     if legacy_unrecorded:
         # Round 50, same seam as round 33: a round written before the field existed is history nobody can
         # back-fill (writing a path in would invent a measurement), so it is a warning even when a cap is
         # set -- otherwise the gate is red until 40 rounds have been re-run, which is how a gate stops being
         # read. One line, because this debt only falls as new rounds are written.
-        _print("")
-        _print("%d round(s) predate the stream-file field, so which sampling their totals belong to is not "
+        say("")
+        say("%d round(s) predate the stream-file field, so which sampling their totals belong to is not "
                "recorded." % legacy_unrecorded)
-        _print("Re-running a round writes a record that says; --unrecorded lists the ones that still decide "
+        say("Re-running a round writes a record that says; --unrecorded lists the ones that still decide "
                "something.")
     if unrecorded:
         # Round 50 learned this from a failing test: a round this build writes without a file is not
         # automatically a defect. `brian evolve` with no --stream-file measures the generated demo stream,
         # which has no file to name -- so charging this would leave the demo domain permanently red, the
         # failure round 33 fixed. Named as a warning; the share cap is what a deployment can ask for.
-        _print("")
-        _print("%d round(s) were written by this build and say no stream file: a round measured on the "
+        say("")
+        say("%d round(s) were written by this build and say no stream file: a round measured on the "
                "generated stream has none to name." % unrecorded)
-        _print("Pass --stream-file to make a round's totals attributable to a sampling.")
+        say("Pass --stream-file to make a round's totals attributable to a sampling.")
     if max_unrecorded is not None and unrecorded_share > max_unrecorded:
-        _print("")
-        _print("%.0f%% of the recorded rounds cannot be placed on a sampling, above the %.0f%% asked for:"
+        say("")
+        say("%.0f%% of the recorded rounds cannot be placed on a sampling, above the %.0f%% asked for:"
                % (100.0 * unrecorded_share, 100.0 * max_unrecorded))
-        _print("re-run the rounds whose totals still decide something, on the file each one measured.")
+        say("re-run the rounds whose totals still decide something, on the file each one measured.")
     if trend_rise > trend_tolerance:
         # Round 56: a debt that grows while the loop is not paying it is the failure the whole queue exists
         # for, and until now the page only printed it. It is a warning rather than a failure by default
@@ -1023,18 +1029,18 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         # check can never clear is the check nobody runs (round 33). The opt-in cap makes it chargeable.
         window = span_text(trend_days)
         rose = max_rise is not None and trend_rise > max_rise
-        _print("")
-        _print("%.1f point(s) of the unrecorded share came back in the last %s: %d round(s) were re-measured "
+        say("")
+        say("%.1f point(s) of the unrecorded share came back in the last %s: %d round(s) were re-measured "
                "and %d record(s) arrived." % (trend_rise, window, trend_paid, trend_arrived))
         if rose:
-            _print("the share rose by more than the %.1f point(s) asked for, so --strict exits 1."
+            say("the share rose by more than the %.1f point(s) asked for, so --strict exits 1."
                    % max_rise)
-            _print("re-run the queue, or write the rounds with --stream-file so they name a sampling.")
+            say("re-run the queue, or write the rounds with --stream-file so they name a sampling.")
         elif max_rise is not None:
-            _print("the share rose by less than the %.1f point(s) asked for, so --strict does not charge it."
+            say("the share rose by less than the %.1f point(s) asked for, so --strict does not charge it."
                    % max_rise)
         else:
-            _print("a share that grows while nothing is paid is a debt nobody is working on; pass "
+            say("a share that grows while nothing is paid is a debt nobody is working on; pass "
                    "--max-share-rise to make it fail the check.")
     # Round 58: the per-domain share is the number a reader of one row actually faces, and until now only the
     # ledger-wide share could be required. The paragraph prints the worst domain either way; the exit code
@@ -1044,17 +1050,17 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         debt_capped = (payable is not None
                        and float(payable.get("share") or 0.0) > max_debt
                        and str(payable.get("domain") or "") == str(worst.get("domain") or ""))
-        _print("")
-        _print("%s has %.0f%% of its rounds unrecorded (%d of %d), above the %.0f%% asked for:"
+        say("")
+        say("%s has %.0f%% of its rounds unrecorded (%d of %d), above the %.0f%% asked for:"
                % (worst.get("domain"), 100.0 * float(worst.get("share") or 0.0),
                   int(worst.get("without") or 0), int(worst.get("rounds") or 0), 100.0 * max_debt))
         if debt_capped:
-            _print("a row whose rounds are mostly unattributable cannot be read as a measurement, so "
+            say("a row whose rounds are mostly unattributable cannot be read as a measurement, so "
                    "--strict exits 1.")
-            _print("%d of those round(s) can be paid by re-running them on the file they measured."
+            say("%d of those round(s) can be paid by re-running them on the file they measured."
                    % int(payable.get("ready") or 0))
         else:
-            _print("no recorded round on it can be re-run (its candidates or its file are not in the record), "
+            say("no recorded round on it can be re-run (its candidates or its file are not in the record), "
                    "so --strict does not charge it: a gate that can never be cleared is a gate nobody runs.")
     # Round 62: a queue command the reader is told to run is a wait, and a wait can be too long. This charge is
     # narrower than the others in one way and wider in another: it fails only when the *recommended* budget
@@ -1073,17 +1079,17 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
             over.append((str(domain), float(minutes), float(ceiling)))
     minutes_capped = bool(over)
     if over:
-        _print("")
+        say("")
         for domain, minutes, ceiling in over:
-            _print("the next queue run would spend about %.1f minute(s) on %s, above the %.1f asked for:"
+            say("the next queue run would spend about %.1f minute(s) on %s, above the %.1f asked for:"
                    % (minutes, domain, ceiling))
-        _print("lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.")
+        say("lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.")
     elif (max_minutes is not None and budget_minutes is not None and budget_minutes > max_minutes):
         minutes_capped = True
-        _print("")
-        _print("the next queue run would spend about %.1f minute(s), above the %.1f asked for:"
+        say("")
+        say("the next queue run would spend about %.1f minute(s), above the %.1f asked for:"
                % (budget_minutes, max_minutes))
-        _print("lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.")
+        say("lower the budget with --rerun-limit, or re-run the queue when a shorter window is available.")
     # Round 65: the whole queue has a price of its own. "Four minutes a run" and "twenty minutes to empty it"
     # are different promises, and a reader who can only cap the first will discover the second mid-queue.
     drain_ceilings = {domain_slug(str(name)): float(value)
@@ -1095,17 +1101,17 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
             drain_over.append((str(domain), float(minutes), float(ceiling)))
     if drain_over:
         minutes_capped = True
-        _print("")
+        say("")
         for domain, minutes, ceiling in drain_over:
-            _print("emptying the queue would spend about %.1f minute(s) on %s, above the %.1f asked for:"
+            say("emptying the queue would spend about %.1f minute(s) on %s, above the %.1f asked for:"
                    % (minutes, domain, ceiling))
-        _print("raise the ceiling, or drain the queue over several runs with --rerun-limit.")
+        say("raise the ceiling, or drain the queue over several runs with --rerun-limit.")
     elif max_drain is not None and drain_minutes is not None and drain_minutes > max_drain:
         minutes_capped = True
-        _print("")
-        _print("emptying the queue would spend about %.1f minute(s), above the %.1f asked for:"
+        say("")
+        say("emptying the queue would spend about %.1f minute(s), above the %.1f asked for:"
                % (drain_minutes, max_drain))
-        _print("raise the ceiling, or drain the queue over several runs with --rerun-limit.")
+        say("raise the ceiling, or drain the queue over several runs with --rerun-limit.")
     # A check must not fail for something it does not print: the rise is only chargeable when it is large
     # enough to be printed at all, or the reader would get exit 1 with no paragraph explaining it.
     rose = max_rise is not None and trend_rise > max_rise and trend_rise > trend_tolerance
@@ -1115,36 +1121,36 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     # (boundary 123). The flag names a *count*, because the reader is deciding whether to re-decide rounds.
     drift_capped = (max_limit_drift is not None and limit_drift > float(max_limit_drift))
     if drift_capped:
-        _print("")
-        _print("%d recorded round(s) were judged under ceilings that differ from today's, above the %d "
+        say("")
+        say("%d recorded round(s) were judged under ceilings that differ from today's, above the %d "
                "asked for:" % (limit_drift, int(max_limit_drift)))
-        _print("their verdicts were reached under other limits, so --strict exits 1 until they are re-decided")
-        _print("with the ceilings in force now, or the cap is raised.")
+        say("their verdicts were reached under other limits, so --strict exits 1 until they are re-decided")
+        say("with the ceilings in force now, or the cap is raised.")
     # Round 72: the ceiling debt may be capped, but only when the queue can pay it. A share that no command can
     # lower is the always-red gate (boundary 126), so the cap is asked for explicitly and the exit code moves
     # only when `ceiling_payable` covers every missing round -- the same shape as the per-domain debt and the
     # minutes cap. When it cannot be paid the paragraph still prints: silence would read as "nothing owed".
     ceiling_share = (float(ceiling_missing) / float(ceiling_rounds)) if ceiling_rounds else 0.0
     if max_ceiling_debt is not None and ceiling_missing and ceiling_share > float(max_ceiling_debt):
-        _print("")
-        _print("%d of %d round(s) do not record the ceilings they were judged under (%.0f%%), above the %.0f%% "
+        say("")
+        say("%d of %d round(s) do not record the ceilings they were judged under (%.0f%%), above the %.0f%% "
                "asked for:" % (ceiling_missing, ceiling_rounds, 100.0 * ceiling_share,
                                100.0 * float(max_ceiling_debt)))
         if ceiling_payable >= ceiling_missing:
-            _print("re-running the queue would leave none, so --strict exits 1 until it is paid.")
-            _print("run `brian evolve --rerun-unrecorded` to measure them again with their ceilings.")
+            say("re-running the queue would leave none, so --strict exits 1 until it is paid.")
+            say("run `brian evolve --rerun-unrecorded` to measure them again with their ceilings.")
         else:
-            _print("only %d of them can be re-run, so --strict does not charge it: a gate that can never be "
+            say("only %d of them can be re-run, so --strict does not charge it: a gate that can never be "
                    "cleared is a gate nobody runs." % max(0, int(ceiling_payable)))
-            _print("nothing was charged; the debt is on the page above.")
+            say("nothing was charged; the debt is on the page above.")
     # Round 166 (item 152): `--payload-writers --check` is a command somebody has to remember to run. A gate that
     # does not call it lets a table that no longer describes the source land on a fully green `--strict`. This is a
     # build defect, not a debt (round 33's rule): nothing in the ledger can pay it, so it is simply exit 2.
     page_capped = bool(page_problems)
     if strict and page_capped:
-        _print("payload page      %d problem(s): the --payload-writers table does not describe this source"
+        say("payload page      %d problem(s): the --payload-writers table does not describe this source"
                % int(page_problems))
-        _print("                  run `brian evolve --payload-writers --check` for the list (boundary 397)")
+        say("                  run `brian evolve --payload-writers --check` for the list (boundary 397)")
     ceiling_capped = (max_ceiling_debt is not None and ceiling_missing
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
     # Round 168 (item 154): every charge the gate reads, in the order the docstring ranks them. `inconsistent`
