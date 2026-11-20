@@ -2371,9 +2371,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload = {"recorded": recorded_entries, "cleared": cleared_entries,
                        "in_force": {"run": state_budgets(root), "drain": state_drains(root)},
                        "files": list(dict.fromkeys(state_files))}
-            Path(args.json_out).write_text(_json(payload), encoding="utf-8")
-            _print("")
-            _print("wrote %s" % args.json_out)
+            # Round 163 (item 149): the payload writers were counted, and eight of them still wrote the file
+            # themselves -- the round-141 rule had only reached the settlement commands (boundary 389).
+            if not _write_payload(args.json_out, payload):
+                return 2
         return 0
 
     if args.history:
@@ -3379,9 +3380,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("The likely-file column is matched by geometry, not written anywhere: a file whose")
         _print("summary disagrees with the round's is never proposed, and a round that matches none is shown")
         _print("as such rather than given the nearest name (boundary 102).")
-        if args.json_out:
-            Path(args.json_out).write_text(
-                _json({"rounds": len(rounds), "unattributed": unknown,
+        if args.json_out and not _write_payload(
+                args.json_out, payload={"rounds": len(rounds), "unattributed": unknown,
                        "matters": [{"domain": d, "round": n, "why": w, "files": f}
                                    for d, n, w, f in matters],
                        # Round 151: the same split the page prints, so a consumer does not re-derive the rule.
@@ -3399,10 +3399,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                     "named": ceiling_named,
                                     "unpayable": ceiling_unpayable,
                                     "after": max(0, ceiling_missing - ceiling_payable),
-                                    "by_domain": ceiling_rows}}),
-                encoding="utf-8")
-            _print("")
-            _print("wrote %s" % args.json_out)
+                                    "by_domain": ceiling_rows}}, recorded=False):
+                return 2
         return 0
 
     if args.campaign:
@@ -3539,10 +3537,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         _print(format_sensitivity(result))
-        if args.json_out:
-            Path(args.json_out).write_text(_json(result.to_dict()), encoding="utf-8")
-            _print("")
-            _print("wrote %s" % args.json_out)
+        if args.json_out and not _write_payload(args.json_out, result.to_dict(), recorded=False):
+            return 2
         return 0
 
     if args.withheld:
@@ -3556,9 +3552,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if args.json_out:
             payload = {"bar": rules.replication_bar,
                        "withheld": [record.to_dict() for record in records]}
-            Path(args.json_out).write_text(_json(payload), encoding="utf-8")
-            _print("")
-            _print("wrote %s" % args.json_out)
+            if not _write_payload(args.json_out, payload, recorded=False):
+                return 2
         return 0
 
     if args.audit:
@@ -3637,9 +3632,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        # prints four states and a script that sees only `links` would read them as one.
                        "settlements": settlement_summary(load_settlements(root)),
                        "entries": result.entries}
-            Path(args.json_out).write_text(_json(payload), encoding="utf-8")
-            _print("")
-            _print("wrote %s" % args.json_out)
+            if not _write_payload(args.json_out, payload, recorded=False):
+                return 2
         return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
                             due=due, oldest_days=oldest, horizon=horizon,
                             unrecorded=missing, legacy_unrecorded=legacy, unrecorded_share=share,
@@ -5382,14 +5376,10 @@ def cmd_demo(args: argparse.Namespace, settings: Settings) -> int:
     _print("memory (what is stored for the audit trail):")
     _print(_json(summary["bus"].get("topics", {})))
 
-    if args.json_out:
-        Path(args.json_out).write_text(
-            _json({"summary": summary, "windows_judged": judged,
-                   "rca_report_ids": [r.rca_id for r in reports]}),
-            encoding="utf-8",
-        )
-        _print("")
-        _print("wrote %s" % args.json_out)
+    if args.json_out and not _write_payload(args.json_out, {
+            "summary": summary, "windows_judged": judged,
+            "rca_report_ids": [r.rca_id for r in reports]}):
+        return 2
     return 0
 
 
@@ -5445,9 +5435,8 @@ def cmd_eval(args: argparse.Namespace, settings: Settings) -> int:
     if args.json_out:
         payload = report.to_dict()
         payload["recommendation"] = recommendation
-        Path(args.json_out).write_text(_json(payload), encoding="utf-8")
-        _print("")
-        _print("wrote %s" % args.json_out)
+        if not _write_payload(args.json_out, payload):
+            return 2
     return 0
 
 
@@ -6026,9 +6015,8 @@ def cmd_export(args: argparse.Namespace, settings: Settings) -> int:
     path = write_jsonl(examples, args.out)
     _print("")
     _print("wrote %s (%d examples)" % (path, len(examples)))
-    if args.summary_out:
-        Path(args.summary_out).write_text(_json(summary), encoding="utf-8")
-        _print("wrote %s" % args.summary_out)
+    if args.summary_out and not _write_payload(args.summary_out, summary):
+        return 2
     return 0
 
 

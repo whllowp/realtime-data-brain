@@ -8744,6 +8744,50 @@ exit=2
 对象的真话，比一句笼统的话更坏。
 **边界 391**：写手已经印过的输出，调用方不许再印一次；重复的成功行正是"调用方不知道写手做了什么"的证据。
 
+### 3.169 盘点写手：一句"都走同一个写手"只能靠数出来
+
+第 141 轮把八处 `--json-out` 收进 `_write_payload`，写下一句"这是唯一的写法"。第 162 轮发现两页还在自己写。
+这一轮按第 149 项的要求**盘点**，`grep` 的结果是：`_write_payload` 调用点 **15** 处，而自己写盘的还有 **8** 处——
+
+| 位置 | 命令 | 它是什么 |
+| --- | --- | --- |
+| `src/brian/cli.py:2374` | `--set-domain-limit` / `--set-domain-drain` | 记录型（改状态） |
+| `:3383` | `--unrecorded` | 报告 |
+| `:3543` | `--sensitivity` | 报告 |
+| `:3559` | `--withheld` | 报告 |
+| `:3640` | `--audit` | 报告 |
+| `:5386` | `run` 的汇总 | 记录型（写了事件与报告） |
+| `:5448` | `evaluate` | 记录型 |
+| `:6030` | `--summary-out` | 报告 |
+
+全部改走写手之后：**0** 处 `write_text(_json` / `Path(args.json_out).write_text`，`_write_payload` 调用点 **22** 处。
+两个数字都被钉进测试：禁写清单为空、调用点等于常量 `EXPECTED_PAYLOAD_WRITERS = 22`。加了新命令却没走写手，
+失败信息会直接说"某条命令开始或停止写 payload 了"。
+
+**为什么 22 轮都没发现。** 每一轮修的是"它正在看的那一族"：141 修结算命令，162 修两张页面，两次都只扫了名字
+里带 `settle` 或 page 的调用点。规则的对象不是"命令名"，而是**那个动作**——"谁把 payload 写进文件"。所以盘点要按
+动作扫：`write_text(` 后面接 `_json(`，或任何 `Path(<某个 out>).write_text`。
+
+真跑一轮验证（`var/demo157`）：
+
+```
+--audit --json-out deep\nested\a163.json  -> wrote deep\nested\a163.json          （一次，父目录自动建）
+--audit --json-out .                      -> cannot write the payload to .: [WinError 5] 拒绝访问: '..tmp' -> '.'
+                                             nothing was recorded: this command only reports, so only its export is missing
+                                          exit=2
+```
+
+第 162 轮给写手加的 `recorded` 参数在这里显出了用处：八处里有六处是报告、两处改状态。报告页失败时不能声称
+"记录还在库里"，改状态的那两处则必须这么说——**同一个写手，两种诚实的说法**，由一个布尔量选择，而不是由调用方
+各写一句。
+
+**边界 392**：一条"都走同一个写手"的规则要按**动作**扫描代码库来执行，不能按调用方的名字回忆；每轮修它眼前的
+那一族，正是它 22 轮都不完整的机制。
+**边界 393**：共享的写手要能对两类调用方分别说真话（改过库的 / 只做报告的）；一个布尔量加一句各自的说明，
+比让每个调用方自己写失败信息好，因为后者总会写成"_我这里_看起来发生了什么"。
+**边界 394**：只做报告的命令失败时，非零退出说的是"导出没写成"，不是"没干活"；这两件事必须分别说清，否则下一次
+读日志的人会把一张已经印完的报告当成一次失败的运行。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9361,6 +9405,8 @@ missing for the next level
      等于印出来的那行。
 148. **已完成（见 §3.168）** `--history`/`--campaign` 的 payload 也走 `_write_payload`（`wrote` 只印一次），
      并给写手加了 `recorded` 参数：报告页写不成时说"什么都没记录，只丢了导出"，不再套用结算命令那句。
-149. 盘点所有 payload 写手：现在 `--json-out` 的落盘点散在命令分支里，靠"记得用 `_write_payload`"维持；
-      加一个结构性测试——源码里不许再出现 `Path(args.json_out).write_text`/`write_text(_json(`，且
-      `_write_payload(` 的调用数等于 `--json-out` 出现的分支数。
+149. **已完成（见 §3.169）** 盘点结果：8 处自己写盘的 payload 全部改走 `_write_payload`（`recorded` 区分
+     改库与报告），现在是 0 处裸写、22 处调用点；`tests/test_payload_inventory.py` 把这两个数字钉成常量，
+     并禁止源码里再出现 `write_text(_json` / `Path(args.json_out).write_text`。
+150. 让写手的**清单本身**可打印：`--payload-writers`（或 `--audit` 的一行）列出"哪条命令、写哪种 payload、
+     失败时说的是哪一句"，这样第 392 条"按动作扫描"就不只活在测试里，也活在页面上。
