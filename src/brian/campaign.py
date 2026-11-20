@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .evolve import (
-    frequent_retakes, retake_timeline, moved_settlements, reaffirm_plan, reanchor_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
+    claimed_rounds, frequent_retakes, retake_timeline, moved_settlements, reaffirm_plan, reanchor_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
                      is_withdrawn, load_settlements, rejection_provenance,
                      restored_settlements,
     unanswered_withdrawals, settlement_summary, withdrawal_plan, withdrawn_settlements, withheld_due,
@@ -134,6 +134,61 @@ class CampaignRow:
             "ceilings_differ": self.drift,
             "ceilings_unrecorded": self.drift_unrecorded,
         }
+
+
+@dataclass
+class ClaimCounts:
+    """How many rows rest on a person's claim, and how the parts differ (round 160).
+
+    Round 158 put the mark on each row, round 159 counted it in the history header -- and the campaign page
+    counted its own, in its own words, over its own population. Two readings of one quantity drift: the
+    history page said "row(s)" and split retired rows out, the campaign page said "round(s)" and could not.
+    One function, both pages (boundary 385).
+    """
+
+    rows: int = 0
+    total: int = 0
+    inherited: int = 0
+    repaired_columns: int = 0
+    retired: int = 0
+    population: str = "row(s)"
+
+    @property
+    def empty(self) -> bool:
+        return self.rows == 0
+
+    def sentence(self) -> str:
+        return ("%d of %d %s rest on a file a person claimed and the geometry never confirmed it "
+                "(%d inherited at least once, %d whose claim columns a repair wrote)"
+                % (self.rows, self.total, self.population, self.inherited, self.repaired_columns))
+
+    def retired_sentence(self) -> Optional[str]:
+        """A retired row hands its assertion to its successor, so the two numbers count different things."""
+        if not self.retired:
+            return None
+        return ("%d of them were retired into a successor, which carries the assertion on" % self.retired)
+
+    def to_dict(self) -> Dict[str, int]:
+        return {"rows": self.rows, "total": self.total, "inherited": self.inherited,
+                "repaired_columns": self.repaired_columns, "retired": self.retired,
+                "population": self.population}
+
+
+def claim_counts(rounds: Sequence[Mapping[str, Any]],
+                 population: str = "row(s)") -> ClaimCounts:
+    """Count the rows of `rounds` that rest on a claim.
+
+    The caller names the population it passed, and the sentence carries that name: the history page lists every
+    row while the campaign lists the live ones, so the same sentence over two totals would read as a
+    contradiction rather than as two questions (boundary 386).
+    """
+    rows = claimed_rounds([dict(record) for record in rounds])
+    retired_names = {str(record.get("round") or "") for record in rounds if record.get("retired")}
+    return ClaimCounts(
+        rows=len(rows), total=len(rounds), population=population,
+        inherited=len([row for row in rows if int(row.get("hops") or 0)]),
+        repaired_columns=len([row for row in rows if row.get("backfilled")]),
+        retired=len([row for row in rows if str(row.get("round") or "") in retired_names]))
 
 
 @dataclass
@@ -854,7 +909,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     limits: Optional[str] = None,
                     ceiling_note: Optional[str] = None,
                     rerun_offer: Optional[Mapping[str, Any]] = None,
-                    claims: Optional[Sequence[Mapping[str, Any]]] = None) -> str:
+                    claims: Optional[Sequence[Mapping[str, Any]]] = None,
+                    claim_counts: Optional[ClaimCounts] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -1026,10 +1082,16 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # terminal that made it. A page that later counts the round as one the queue paid is describing a row
         # whose file a person chose; saying so is the difference between evidence and bookkeeping (boundary
         # 371).
-        lines.append("claims            %d round(s) name a file a person claimed, and the geometry never "
-                     "confirmed it: %s"
-                     % (len(claims), ", ".join("%s %s (%s)" % (row["round"], row["stream_path"],
-                                                               row["geometry"]) for row in claims)))
+        # Round 160: the count comes from the same function the history header uses, so the two pages cannot
+        # describe the same ledger with two different sentences (boundary 385).
+        if claim_counts is not None and not claim_counts.empty:
+            lines.append("claims            %s" % claim_counts.sentence())
+            retired = claim_counts.retired_sentence()
+            if retired:
+                lines.append("claims            %s" % retired)
+        lines.append("claims            the rows: %s"
+                     % ", ".join("%s %s (%s)" % (row["round"], row["stream_path"], row["geometry"])
+                                 for row in claims))
         lines.append("claims            a re-measurement on such a round is evidence about that file, not about "
                      "the one the round first measured (boundary 371)")
         # Round 155: how old the assertion is, asked once for the page rather than left to a reader who

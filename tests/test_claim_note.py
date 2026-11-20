@@ -87,7 +87,7 @@ def test_a_round_whose_claim_agrees_is_not_counted():
 def test_the_campaign_page_prints_the_claim_lines(tmp_path):
     page = format_campaign(campaign(tmp_path), claims=claimed_rounds([CLAIMED]))
 
-    assert "claims            1 round(s) name a file a person claimed" in page
+    assert "claims            the rows: round-out-of-reach.json data/smd/stream-one.json (disagrees)" in page
     assert "round-out-of-reach.json data/smd/stream-one.json (disagrees)" in page
     assert "a re-measurement on such a round is evidence about that file" in page
 

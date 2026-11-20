@@ -8636,6 +8636,37 @@ claims            2 of them were retired into a successor, which carries the ass
 **边界 383**：行的计数不等于断言的计数——退休行把断言交给了后继，所以头行必须两个数都说，否则同一条断言被数两遍。
 **边界 384**：一个计数的名字不能宽于它数到的东西；`backfilled` 数的是"哪些栏是补写的"，不是"哪些日期是修出来的"。
 
+### 3.166 一个数字印在两页上，就只能由一处算
+
+第 158 轮把标记放到行上，第 159 轮让历史页的头行数出来——而 `--campaign` 从第 153 轮起就在用自己的措辞数同一件事：
+历史页说 "row(s)" 并把退休行单独数，战报页说 "round(s)" 且数不到退休行。措辞已经开始分叉，再走几轮两个页面就会
+用两种说法描述同一本账。
+
+这一轮把计数搬进 `campaign.claim_counts(rounds, population=...)`，返回 `ClaimCounts`（`rows` / `total` /
+`inherited` / `repaired_columns` / `retired` / `population`），两页都印它的 `sentence()`：
+
+```
+# --campaign（population = 活着的轮）
+claims            1 of 3 live round(s) rest on a file a person claimed and the geometry never confirmed it (1 inherited at least once, 1 whose claim columns a repair wrote)
+claims            the rows: round-20261120T092858Z.json data/smd/stream-one.json (disagrees)
+
+# --history（population = 列出的行）
+claims            3 of 6 row(s) rest on a file a person claimed and the geometry never confirmed it (2 inherited at least once, 3 whose claim columns a repair wrote)
+claims            2 of them were retired into a successor, which carries the assertion on
+```
+
+**同函数，两个口径，各自报名。** 两页数的**不是同一个总体**：历史页列全部行（含退休的），战报页只数列活的轮。
+所以句子必须把总体写进自己那一句里——`live round(s)` 与 `row(s)`。同一个数字在两种口径下不相等不是矛盾，
+但**不报名**就会读成矛盾（第 80 轮的"两列数的是不同东西就要标注"往上挪一层：两页数的是不同总体）。
+
+**分叉是这么发生的。** 第 153 轮给战报页加了一句，因为它那里有 `claims` 列表；第 159 轮给历史页加了一句，因为
+它那里有 `rounds`。两次都对，合起来就成了两种措辞。搬进一个函数之后，`sentence()` 同时保住两边要的那半句
+（"and the geometry never confirmed it" 来自战报，"inherited at least once / whose claim columns a repair wrote"
+来自历史页），并且**测试比对的是两页输出的那句话本身**：把 `live round(s)` 换回 `row(s)` 之后必须逐字节相等。
+
+**边界 385**：同一个量印在两页上时，只能由一处算；两处各写一次总会向"最近一轮需要的那半句"漂移。
+**边界 386**：两页用同一句话数不同总体时，每页都要在句子里报出它的总体名；否则读者看到的是矛盾，而不是两个问题。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9245,5 +9276,8 @@ missing for the next level
      年龄是不是补出来的（`claim_mark`）；`agrees` 不标。三行 demo 分别是 0 次继承、1 次、2 次且年龄被补过。
 145. **已完成（见 §3.165）** `--history` 头行数出"N of M 行站在一条人的断言上（K 至少继承过一次、
      J 条条目的 claim 栏是修补写的）"，并把退休进后继的那些单独数一行；没有断言时整行不出现。
-146. 让 `--campaign` 与 `--history` 用同一个函数产出这两句计数（现在两处各算一次，措辞已经开始分叉：
-     前者按"轮"计，后者按"行"计且分开数退休行）。
+146. **已完成（见 §3.166）** 计数搬进 `campaign.claim_counts(rounds, population=...)`，返回
+     `ClaimCounts`；`--campaign` 与 `--history` 都印 `sentence()`，各自用 `population` 报名（`live round(s)` /
+     `row(s)`）。测试钉住"两页那句话只差总体名"。
+147. 让 `ClaimCounts` 也进 `--campaign --json-out`（现在 payload 里的 `claims` 只有行列表，没有计数与总体名，
+     机器读者要自己数）。

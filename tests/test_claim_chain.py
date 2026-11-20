@@ -70,5 +70,5 @@ def test_the_page_says_how_old_the_assertion_is(tmp_path):
 def test_a_claim_recorded_on_the_round_itself_is_not_called_inherited(tmp_path):
     page = format_campaign(campaign(tmp_path), claims=claimed_rounds([CLAIMED]))
 
-    assert "claims            1 round(s) name a file a person claimed" in page
+    assert "claims            the rows: round-out-of-reach.json data/smd/stream-one.json (disagrees)" in page
     assert "was inherited" not in page

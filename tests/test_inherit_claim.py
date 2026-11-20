@@ -88,7 +88,10 @@ def test_the_campaign_page_counts_the_inherited_claim(tmp_path):
         {"round": "round-20261120T085517Z.json", "stream_path": "data/smd/stream-one.json",
          "stream_path_history": inherit_claim(CLAIMED, "data/smd/stream-one.json")}]))
 
-    assert "claims            1 round(s) name a file a person claimed" in page
+    # Round 160: the page prints the count from `claim_counts` (when its caller supplies one) and the rows
+    # themselves on a second line, so the row that actually inherited is what this line names.
+    assert ("claims            the rows: round-20261120T085517Z.json data/smd/stream-one.json (disagrees)"
+            in page)
     assert "round-20261120T085517Z.json data/smd/stream-one.json (disagrees)" in page
 
 

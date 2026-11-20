@@ -104,7 +104,7 @@ from .evolve import (
     reanchor_settlement,
     withdraw_settlement,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
-from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
+from .campaign import budget_text, campaign as campaign_result, claim_counts, format_campaign, span_text
 from .laya.gate import explain_thresholds
 from .laya.qcatalog import CATALOG_VERSION, catalog_hash, describe as describe_catalog, validate_questions
 from .llm.rca import RcaEngine
@@ -2528,19 +2528,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # count them has been given a detail and not a fact. The header counts, and it counts the retired rows
         # apart: a retired round's assertion lives on in its successor, so the total is a count of rows that rest
         # on a claim, not a count of people's assertions (boundary 383).
-        history_claims = claimed_rounds(rounds)
-        if history_claims:
-            inherited = len([row for row in history_claims if int(row.get("hops") or 0)])
-            repaired = len([row for row in history_claims if row.get("backfilled")])
-            _print("claims            %d of %d row(s) rest on a file a person claimed (%d inherited at least once, "
-                   "%d whose claim columns a repair wrote)"
-                   % (len(history_claims), len(rounds), inherited, repaired))
-            retired_names = {str(record.get("round") or "") for record in rounds if record.get("retired")}
-            retired_claims = len([row for row in history_claims
-                                  if str(row.get("round") or "") in retired_names])
+        # Round 160: the counting lives in `campaign.claim_counts`, so this page and `--campaign` read the same
+        # function. The population differs -- this page lists every row, the campaign only the live rounds -- so
+        # the sentence names the population it counted (boundary 386).
+        history_counts = claim_counts(rounds)
+        if not history_counts.empty:
+            _print("claims            %s" % history_counts.sentence())
+            retired_claims = history_counts.retired_sentence()
             if retired_claims:
-                _print("claims            %d of them were retired into a successor, which carries the assertion on"
-                       % retired_claims)
+                _print("claims            %s" % retired_claims)
         history_rows: List[Dict[str, Any]] = []
         # Round 71: the count above is the ledger's. A reader asking "where does that debt sit" needs it per
         # stream, and a reader deciding whether to run the queue needs to know which of those rounds it could
@@ -3442,7 +3438,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
                                budget=budget, limits=_limits_text(limits_view),
                                ceiling_note=ceiling_note, rerun_offer=rerun_offer,
-                               claims=claim_rows))
+                               claims=claim_rows,
+                               claim_counts=claim_counts(live_records, population="live round(s)")))
         if getattr(args, "what_if_records", None):
             # Round 132: a reader looking at "this file owes two" should not have to conjure the batch commands to
             # ask what paying them would leave. The block is a recomputation, never a write.
