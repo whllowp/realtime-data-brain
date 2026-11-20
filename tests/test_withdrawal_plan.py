@@ -59,8 +59,11 @@ def test_the_plan_groups_two_decisions_on_one_file(tmp_path):
     rows = withdrawal_plan(_rounds(tmp_path), load_settlements(tmp_path))
     assert len(rows) == 1
     assert rows[0]["origin"] == ONE and rows[0]["decisions"] == 2
-    assert rows[0]["batch"] == ("brian evolve --settle-restore round-old.json=round-new.json "
+    # Round 129: a plan grouped by file prints the command that pays the file; the single pair is kept beside it.
+    assert rows[0]["batch"] == ("brian evolve --settle-restore-file data/smd/stream-one.json "
                                 "--settle-why TEXT --settle-by NAME")
+    assert rows[0]["pair"] == ("brian evolve --settle-restore round-old.json=round-new.json "
+                               "--settle-why TEXT --settle-by NAME")
     assert rows[0]["more"] == 1
 
 

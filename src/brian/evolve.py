@@ -3221,10 +3221,13 @@ def withdrawal_plan(rounds: Sequence[Mapping[str, Any]], settlements: Sequence[M
     rows: List[Dict[str, Any]] = []
     for bucket in files.values():
         bucket["decisions"] = len(bucket["records"])
-        bucket["batch"] = ("brian evolve --settle-restore %s=%s --settle-why TEXT --settle-by NAME"
-                           % (bucket["records"][0]["record"], bucket["records"][0]["successor"]))
-        # The one-command form is `--settle-reaffirm-file`'s sibling still to come: until it exists the plan names
-        # the first pair's command and says how many more there are, rather than inventing a flag.
+        bucket["pair"] = ("brian evolve --settle-restore %s=%s --settle-why TEXT --settle-by NAME"
+                          % (bucket["records"][0]["record"], bucket["records"][0]["successor"]))
+        # Round 129: the plan is grouped by file, so the command it prints must pay a file. Until this round it named
+        # the first pair and left the rest to be typed one by one, which is a grouping that costs the reader the same
+        # eleven reasons it was supposed to save (boundary 301).
+        bucket["batch"] = (("brian evolve --settle-restore-file %s --settle-why TEXT --settle-by NAME"
+                            % bucket["origin"]) if bucket["origin"] else bucket["pair"])
         bucket["more"] = bucket["decisions"] - 1
         rows.append(bucket)
     rows.sort(key=lambda row: (-row["decisions"], row["origin"]))

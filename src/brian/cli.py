@@ -3129,46 +3129,93 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 handle.write("\n")
         return 0
 
+    if getattr(args, "settle_restore_file", None):
+        # Round 129: the sibling of `--settle-reaffirm-file`. Round 128 groups the withdrawal debt by stream file and
+        # printed a command that paid one pair, so the file grouping bought the reader nothing (boundary 301). The
+        # pairs are resolved from the same plan the page prints (boundary 283), and the walk itself is the single-pair
+        # branch below: one reason, per-pair blocks, a refused pair that does not stop the rest, one JSON list.
+        target = str(args.settle_restore_file or "").strip()
+        if not target:
+            _print("--settle-restore-file takes the stream file the withdrawn decisions are about, for example "
+                   "`--settle-restore-file data/smd/stream-real.json`")
+            return 2
+        try:
+            plan_rows = withdrawal_plan(history(root, include_retired=True), load_settlements(root))
+        except (OSError, ValueError) as error:
+            _print("cannot read the withdrawal plan: %s" % error)
+            return 2
+        match = [row for row in plan_rows if same_stream_path(str(row.get("origin") or ""), target)]
+        pairs = ["%s=%s" % (str(entry.get("record") or ""), str(entry.get("successor") or ""))
+                 for entry in (match[0].get("records") or [])] if match else []
+        if not pairs:
+            _print("no unanswered withdrawal is recorded against %s: `brian evolve --campaign` lists the files "
+                   "that hold one" % target)
+            return 2
+        _print("re-taking      %d decision(s) on %s in one command"
+               % (len(pairs), match[0].get("origin") or target))
+        inner = argparse.Namespace(**vars(args))
+        inner.settle_restore_file = None
+        inner.settle_restore = pairs
+        inner.json_out = None
+        return cmd_evolve(inner, settings)
+
     if getattr(args, "settle_restore", None):
         # Round 126: round 125 made "this decision is wrong" recordable and left the operator one command short.
         # `--settle-link` refuses a withdrawn pair and `--settle-reaffirm` refuses it too, so the contradiction a
         # person had correctly withdrawn could only be settled by editing the store by hand. This records the new
         # decision: the withdrawal stays, the re-decision says what is different, and the pair is decided again.
-        raw = str(args.settle_restore or "").strip()
-        if not raw or "=" not in raw:
+        # Round 129: several pairs in one command, so the file form above has a body to reuse (boundary 284).
+        raw = args.settle_restore
+        pairs = [str(item) for item in (raw if isinstance(raw, (list, tuple)) else [raw]) if str(item).strip()]
+        if not pairs:
             _print("--settle-restore takes RECORD=SUCCESSOR, for example "
                    "`--settle-restore round-old.json=round-new.json`")
             return 2
-        record, successor = raw.split("=", 1)
-        record, successor = record.strip(), successor.strip()
-        plan_before = repair_plan(root)
-        try:
-            decision = restore_settlement(root, record, successor, why=str(args.settle_why or ""),
-                                          by=str(getattr(args, "settle_by", "") or ""))
-        except (OSError, ValueError) as error:
-            _print("cannot take that decision up again: %s" % error)
+        bad = [pair for pair in pairs if "=" not in pair]
+        if bad:
+            _print("--settle-restore takes RECORD=SUCCESSOR, and %s has no = in it" % bad[0])
             return 2
-        if not decision["changed"]:
-            _print("taken up again  %s -> %s was already taken up again on %s; nothing to change"
-                   % (record, successor, decision["at"]))
-            return 0
-        _print("taken up again  %s -> %s" % (record, successor))
-        _print("                the decision stands again from %s, and the withdrawal stays on record"
-               % decision["at"])
-        _print("                because: %s" % str(args.settle_why or "").strip())
-        _print("                restored by: %s"
-               % (str(getattr(args, "settle_by", "") or "").strip()
-                  or "(not recorded -- pass --settle-by NAME)"))
-        # Round 126: a decision is exactly the thing allowed to silence a contradiction, so the page must say that
-        # this one does -- and name the command that would undo it again if the decision turns out wrong (294).
-        _print("                the contradiction it settles is muted while it stands: `--audit` stops charging "
-               "that pair, and `--settle-drop` takes it back if this decision turns out wrong too (boundary 294)")
-        _print_repair_delta(record_repair(root, "settle-restore", plan_before, repair_plan(root)))
+        plan_before = repair_plan(root)
+        done: List[Dict[str, Any]] = []
+        refused = 0
+        for pair in pairs:
+            record, successor = pair.split("=", 1)
+            record, successor = record.strip(), successor.strip()
+            try:
+                decision = restore_settlement(root, record, successor, why=str(args.settle_why or ""),
+                                              by=str(getattr(args, "settle_by", "") or ""))
+            except (OSError, ValueError) as error:
+                _print("cannot take that decision up again: %s" % error)
+                refused += 1
+                continue
+            done.append(decision)
+            if not decision["changed"]:
+                _print("taken up again  %s -> %s was already taken up again on %s; nothing to change"
+                       % (record, successor, decision["at"]))
+                continue
+            _print("taken up again  %s -> %s" % (record, successor))
+            _print("                the decision stands again from %s, and the withdrawal stays on record"
+                   % decision["at"])
+            _print("                because: %s" % str(args.settle_why or "").strip())
+            _print("                restored by: %s"
+                   % (str(getattr(args, "settle_by", "") or "").strip()
+                      or "(not recorded -- pass --settle-by NAME)"))
+            # Round 126: a decision is exactly the thing allowed to silence a contradiction, so the page must say
+            # that this one does -- and name what would undo it again if it turns out wrong too (boundary 294).
+            _print("                the contradiction it settles is muted while it stands: `--audit` stops "
+                   "charging that pair, and `--settle-drop` takes it back if this decision turns out wrong too "
+                   "(boundary 294)")
+        changed = sum(1 for item in done if item.get("changed"))
+        if len(pairs) > 1:
+            _print("re-taken       %d of %d decision(s), %d was already standing, %d refused"
+                   % (changed, len(pairs), len(done) - changed, refused))
+        if done:
+            _print_repair_delta(record_repair(root, "settle-restore", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump({"restored": decision}, handle, indent=2, sort_keys=False)
-                handle.write("\n")
-        return 0
+                handle.write(json.dumps({"restored": done, "restore_refused": refused},
+                                        indent=2, sort_keys=False) + "\n")
+        return 2 if refused else 0
 
     if getattr(args, "settle_reaffirm", None):
         # Round 119: round 118 can say the books moved under a decision but not re-take it, so the decision stayed
@@ -5241,9 +5288,13 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-drop", default=None, metavar="RECORD=SUCCESSOR",
                         help="withdraw a recorded decision: it keeps its date and gains the reason it stopped "
                              "standing, and the contradiction it settled is charged again; needs --settle-why")
-    evolve.add_argument("--settle-restore", default=None, metavar="RECORD=SUCCESSOR",
+    evolve.add_argument("--settle-restore", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="take a withdrawn decision up again as a new decision: the withdrawal stays on record, "
-                             "and the pair is decided again from this moment; needs --settle-why")
+                             "and the pair is decided again from this moment; takes one or more "
+                             "RECORD=SUCCESSOR pairs; needs --settle-why")
+    evolve.add_argument("--settle-restore-file", default=None, metavar="STREAM",
+                        help="take every unanswered withdrawal recorded against STREAM up again in one command, "
+                             "resolved from the same plan --campaign prints; needs --settle-why")
     evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="re-take decisions against today's books: keeps each first date, records the claims "
                              "it covered; takes one or more RECORD=SUCCESSOR pairs; needs --settle-why")

@@ -6976,6 +6976,64 @@ $ brian evolve --audit --strict --max-withdrawn-per-file 1   # exit 1
 - **300** 计划里每一桶都必须带一条能付掉**整桶**的命令：读者不会照着 N 条记录敲 N 次理由，而理由敲两次就开始
   走样（第 120 轮）。
 
+### 3.135 按文件排的队，就得能用一条命令付掉
+
+第 128 轮把撤销欠账按流文件分了桶，每桶给出一条命令。但那条命令是**单对**的——`--settle-restore A=B`。
+于是读者读完「这个文件上欠两条」，仍然要敲两次理由。分桶本来是为了让人按下午安排工作，结果省下的是分组、
+没省下的是重复劳动：一份按文件分组、却要逐条执行的计划，等于没分组（边界 301）。
+
+`--settle-restore-file STREAM` 补上这一格，形状与第 122 轮的 `--settle-reaffirm-file` 完全对称：从
+`withdrawal_plan` 取出该文件的全部待办对，再**递归**交给 `--settle-restore` 分支（这一轮把它改成 `nargs="+"`）。
+递归不是省事的写法，是唯一能保证两条命令规则一致的做法——逐对输出、被拒一对不打断其余（边界 277）、
+`--json-out` 是列表而不是随参数个数变形的形状（边界 278），这些都只有一个实现（边界 284）。
+
+演练账本延续 §3.134：`stream-real.json` 上一条、`stream-two.json` 上两条。第 128 轮以后，页面给出的命令已经是付文件的那条：
+
+```
+$ brian evolve --campaign
+links             withdrawn and waiting, by stream file: data/smd/stream-two.json 2 decision(s); data/smd/stream-real.json 1 decision(s)
+links             3 withdrawal(s) have no answer: round-old.json -> round-new.json was taken back on … (3.0 day(s) ago) and nothing has replaced it -- start with brian evolve --settle-restore-file data/smd/stream-two.json --settle-why TEXT --settle-by NAME
+
+$ brian evolve --settle-restore-file data/smd/stream-two.json \
+      --settle-why "both claims are dated after their decisions" --settle-by alice
+re-taking      2 decision(s) on data/smd/stream-two.json in one command
+taken up again  round-ninth.json -> round-tenth.json
+                the decision stands again from 2026-11-20T05:02:06.733623+00:00, and the withdrawal stays on record
+                because: both claims are dated after their decisions
+                restored by: alice
+                the contradiction it settles is muted while it stands: `--audit` stops charging that pair, and
+                `--settle-drop` takes it back if this decision turns out wrong too (boundary 294)
+taken up again  round-sixth.json -> round-seventh.json
+                …
+re-taken       2 of 2 decision(s), 0 was already standing, 0 refused
+repair plan      nothing left the table: cost 0 -> 0, 0 file(s) still owing
+```
+
+付掉一整个文件之后，页面对剩下那一条自动回落到单对命令——不是特例代码，是同一句话里的同一个选择：
+
+```
+links             1 withdrawal(s) have no answer: round-old.json -> round-new.json … -- start with brian evolve --settle-restore round-old.json=round-new.json --settle-why TEXT --settle-by NAME
+```
+
+再对那个已经清空的文件跑一次，命令拒绝而不是静默成功：
+
+```
+$ brian evolve --settle-restore-file data/smd/stream-two.json --settle-why x
+no unanswered withdrawal is recorded against data/smd/stream-two.json: `brian evolve --campaign` lists the files that hold one
+```
+
+三处实现细节：`--settle-restore` 由单值变 `nargs="+"` 后，`--json-out` 从对象变成 `{"restored": [...], "restore_refused": N}`，
+两条既有测试因此要改（一批数据的形状不能取决于敲了几个参数，边界 278）；加 `--settle-restore-file` 分支时必须放在
+`--settle-restore` **之前**，否则空参数会让 `--settle-restore` 先报「没有 = 」；递归调用要清掉 `settle_restore_file`
+本身，否则无限递归。
+
+边界：
+
+- **301** 按文件排的队必须能用一条命令付掉：一条按文件分组、却打印单对命令的计划，把省下的分组又还回去了。
+- **302** 批量命令不该自己实现一遍单条规则；递归复用同一个分支，拒绝策略、输出形状、JSON 形状才只有一份（第 284 轮的重申）。
+- **303** 批量里被拒的一对不能打断其余（边界 277），而且最后必须给出「几对成功、几对被拒」的总数——一份逐对输出而没有合计的
+  记录，等于让读者自己数。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7482,6 +7540,10 @@ missing for the next level
      `--max-withdrawn-per-file N`，只在一个文件的条数超限时收费，并把文件名与边界 279/299 说出来；`--history` 的
      撤销块与 `--campaign --json-out`（`withdrawal_plan`）读同一个函数。边界 299、300。
 
-115. 让 `--settle-restore` 也能一次付掉一整个文件（`--settle-restore-file STREAM`，与 `--settle-reaffirm-file`
-     对称）：现在计划里的 `batch` 只写出第一对，剩下的还得一条条敲，而一份按文件分组、却要逐条执行的计划等于
-     没分组（边界 283 的反面）。
+115. **已完成**（第 129 轮）：`--settle-restore-file STREAM` 从 `withdrawal_plan` 里取出该文件的全部待办对，
+     一次交回给 `--settle-restore` 那条（现在是 `nargs="+"`）分支，所以逐对输出、被拒一对不打断其余、`--json-out`
+     列表这些行为全部继承；计划里的 `batch` 改成付整个文件的命令，只留一个待办时才回落到单对命令。边界 301、302、303。
+
+116. 让 `--settle-restore-file`（以及 `--settle-reaffirm-file`）在动手之前先干跑一次：`--dry-run` 只打印它会
+     交回哪几对、谁会让整个文件归零，不写 `settlements.json`——一次改动 N 条记录的批量命令，应当能先看一眼
+     （第 83 轮 `--repair-links` 的 plan/apply 同一条规矩）。

@@ -187,7 +187,10 @@ def test_the_cli_takes_the_decision_up_again(tmp_path, monkeypatch, capsys):
     assert "restored by: bob" in printed
     assert "stops charging that pair" in printed
     payload = json.loads((tmp_path / "restore.json").read_text(encoding="utf-8"))
-    assert payload["restored"]["record"] == RETIRED and payload["restored"]["changed"] is True
+    # Round 129: `--settle-restore` takes one or more pairs, so the payload is a list -- a shape that depended on the
+    # argument count would be a sum type every reader has to special-case (boundary 278).
+    assert [item["record"] for item in payload["restored"]] == [RETIRED]
+    assert payload["restored"][0]["changed"] is True and payload["restore_refused"] == 0
     assert is_withdrawn(load_settlements(tmp_path)[0]) is False
 
 

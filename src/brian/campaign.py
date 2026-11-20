@@ -1327,13 +1327,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
     if result.settlements_unanswered:
         oldest = result.settlements_unanswered[0]
         age = oldest.get("age_days")
+        # Round 129: when a file holds more than one unanswered withdrawal, the command a reader copies must pay that
+        # whole file -- naming the single pair here would undo the grouping one line after making it (boundary 301).
+        _lead = result.withdrawal_plan[0] if result.withdrawal_plan else {}
+        _command = (str(_lead.get("batch") or "") if int(_lead.get("decisions") or 0) > 1
+                    else "brian evolve --settle-restore %s=%s --settle-why TEXT --settle-by NAME"
+                         % (str(oldest.get("record") or ""), str(oldest.get("successor") or "")))
         lines.append("links             %d withdrawal(s) have no answer: %s -> %s was taken back on %s (%s day(s) "
-                     "ago) and nothing has replaced it -- start with brian evolve --settle-restore %s=%s "
-                     "--settle-why TEXT --settle-by NAME"
+                     "ago) and nothing has replaced it -- start with %s"
                      % (len(result.settlements_unanswered), str(oldest.get("record") or ""),
                         str(oldest.get("successor") or ""), str(oldest.get("at") or ""),
-                        "?" if age is None else "%.1f" % float(age), str(oldest.get("record") or ""),
-                        str(oldest.get("successor") or "")))
+                        "?" if age is None else "%.1f" % float(age), _command))
     for item in result.reaffirm_plan[:1]:
         commands = [str(command) for command in item.get("commands") or [] if str(command)]
         walks = item.get("walks_since")
