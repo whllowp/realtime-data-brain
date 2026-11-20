@@ -9453,6 +9453,73 @@ exit 2
 **边界 421**：解析代码时要按**它自己的收尾标记**界定范围，不能按"下一行缩进就停"；截断的字面量和越界扫到的嵌套字典，
 都会把"声明少了键"变成"声明多了键"，这两种错误长得一样，方向相反。
 
+### 3.182 一批 15 行：声明从写入处抄，抄错了写者会当场拒绝
+
+第 161 项只声明了 `--campaign` 一行。第 162 项是"一次一批"：这一轮把**结算族、三种 backfill、claim、repair-links、两种
+walk、`run`** 一共 15 行的键集合也声明出来，每行都从它自己的 `_write_payload(` 调用点旁边那个字面量读出来——不是照
+一份运行的输出抄，因为一次运行只走它踩到的分支（边界 419）。声明从 4 行变成 19 行（共 24 行），剩下 5 行仍是散文。
+
+**第一颗钉子：单键元组没有逗号，声明就成了一条字符串。**
+
+```
+    "--set-stream-path": ("stream_path"),
+```
+
+括号不是元组。于是 `--payload-writers --check` 报出 27 条这样的问题：
+
+```
+inconsistent      the key 's' of --set-stream-path appears nowhere in this source: it was declared from memory
+inconsistent      the key 't' of --set-stream-path appears nowhere in this source: it was declared from memory
+…
+```
+
+每个**字符**算一个键——检查没有坏，它忠实地迭代了一条字符串。四行单键声明各缺一个逗号，一次补上就好了；真正值得
+记的是这个错误的形状：**"声明的键集合是一个字符串"和"声明里有一个乱写的键"在同一句报错里长得一模一样**，只有数一数
+问题条数才能分开（7 个字符的 `stream_path` 会报 7 条）。这也是为什么下一轮起，单键行写成 `("k",)` 要成为规矩。
+
+**第二颗钉子：把声明挖空，页面先崩了。**
+
+为了证明"声明是活的"，我先试 `--settle-link`（那条账本里没有对应轮，跑不起来），换成 `--claim-round-file` 就顺手把
+它的声明改成 `()`，结果不是"拒绝"，而是：
+
+```
+File ".../cli.py", line 661, in format_payload_writers
+    lines.append("  %-42s %-23s %s" % (command, kind, chunks[0]))
+IndexError: list index out of range
+```
+
+空声明让 `_key_chunks()` 返回空列表，页面在渲染这一行时取 `chunks[0]` 崩掉。**空集合也是一个断言**（"这个 payload 没有
+键"），一个连自己声称的东西都印不出来的检查器，比没有检查更糟——它把"有人改了声明"变成了一条 traceback。修法是那
+一行退化成 `{} (no keys declared)`，并且专门加了一条测试钉住它。
+
+**改动之后，三条现场证据：**
+
+```
+stream path     v020 already says data/smd/stream-one.json; nothing to change
+wrote ..\w_stream.json                       # --set-stream-path：声明满足，写成功
+
+would claim      round-out-of-reach.json  now names data/smd/stream-one.json (geometry disagrees)
+nothing was written; drop --dry-run to record the claim (boundary 304).
+wrote ..\w_claim.json                        # --claim-round-file --dry-run：预览也导出，声明满足
+
+payload shape     the payload this command built does not match the inventory:
+                  built but not declared: claimed, claim_refused
+                  PAYLOAD_KEYS in src/brian/cli.py is the declaration; both sides move together
+exit 2                                       # 把声明挖空之后：拒绝，不崩，报告已印完
+```
+
+**页面本身也被挤了一次。** 19 个命令名拼在"已声明 N 行"那一句里是 438 个字符，测试当场红了（第 175 轮定的 170 字符
+上限）。现在那句话把名字折行印，和键列表用同一套规矩——**页面是交付物，它在任何规模下都得能读**（边界 420 的推广版）。
+
+**剩下 5 行**（`--set-domain-limit`/`--set-domain-drain`、`--sensitivity`、`--withheld`、`evaluate`、`dataset --summary-out`）
+留给下一项：它们要么 payload 由 `result.to_dict()` 生成（得先像 `--campaign` 那样找到"哪个类、哪个方法"），要么由一份
+报告对象决定，不是写字面量。
+
+**边界 422**：空集合也是一个断言；一个在渲染自己声称的东西时崩溃的检查器，比没有检查更糟——它把"声明被改了"变成
+一条 traceback，而 traceback 看起来像"代码坏了"，不像"账本不一致"。
+**边界 423**：单元素元组要靠逗号才成立；`("k")` 是一条字符串，迭代出来是字符，于是每一个键检查都会给出**看起来像
+乱写、实际是类型**的报错——这类错误只能靠"问题条数 = 键长度"认出来。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -10113,6 +10180,9 @@ missing for the next level
      页面自报覆盖率。剩下 21 行仍是散文。
 161. 把剩下 21 行的键集合也声明出来，从 `--campaign` 开始（见 §3.181，**已完成 `--campaign` 这一行**）：
      `Campaign.to_dict()` 的 59 个键加写之前的 9 次赋值 = 68 个键，写者按它拒绝；页面折行后 4/24 行已声明。
-162. 把剩下 20 行也声明出来，同样按源码构造处解析，一次一批：先做会写记录的（`--set-domain-limit`、
-     `--retire`、`run`、`evaluate`），再做只读报告。每声明一行，页面上“还有 N 行是散文”那句话自己会减一；
-     每行的解析脚本留在 var/ 里，声明本身进 cli.py，测试按同一套解析重新读一遍源码。
+162. 把剩下 20 行也声明出来，同样按源码构造处解析，一次一批（见 §3.182，**本批 15 行已完成**：结算族、
+     三种 backfill、claim、repair-links、两种 walk、`run`；已声明 19/24 行）：单键元组要写 `("k",)`，
+     空声明必须能在页面上印出来，名字变多时那句话要折行。
+163. 剩下的 5 行也声明出来：`--set-domain-limit`/`--set-domain-drain`、`--sensitivity`、`--withheld`、
+     `evaluate`、`dataset --summary-out`。它们不是单纯的字面量——要么 payload 来自 `result.to_dict()`
+     （按 `--campaign` 的做法定位类与方法），要么来自一份报告对象，得先把键的来源说清楚再声明。

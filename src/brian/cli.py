@@ -570,6 +570,21 @@ PAYLOAD_KEYS: Dict[str, Tuple[str, ...]] = {
     # Round 175 (item 161): derived from the two places that build this payload -- the 59 keys of
     # `Campaign.to_dict()` in src/brian/campaign.py and the 9 keys the campaign branch assigns beside the
     # write -- not copied from a run's output, because a run only shows the branches it took (boundary 419).
+    "--claim-round-file": ("claim_refused", "claimed"),
+    "--backfill-claims": ("dry_run", "filled"),
+    "--backfill-walks": ("backfilled", "dry_run", "would_backfill"),
+    "--backfill-walks (a dry run)": ("backfilled", "dry_run", "would_backfill"),
+    "--set-stream-path": ("stream_path",),
+    "--settle-link": ("settled",),
+    "--settle-note": ("noted",),
+    "--settle-reanchor": ("reanchor_refused", "reanchored"),
+    "--settle-drop": ("drop_refused", "drop_skipped", "withdrawn"),
+    "--settle-restore": ("restore_refused", "restored"),
+    "--settle-reaffirm": ("reaffirm_refused", "reaffirm_skipped", "reaffirmed"),
+    "--repair-links --apply": ("repairs",),
+    "--from-queue (a walk)": ("store", "walks"),
+    "--from-queue (a walk that measured nothing)": ("store", "walks"),
+    "run": ("rca_report_ids", "summary", "windows_judged"),
     "--campaign": ("accepted", "backfilled_links", "blocked_dossier", "budget", "ceiling_drift", "ceilings_differ",
                 "ceilings_unrecorded", "claim_counts", "claims", "comparisons_inconsistent",
                 "comparisons_unreconstructable", "debt_plan", "domains", "domains_pooling_files",
@@ -600,6 +615,22 @@ WHY_EMPTY_REASONS: Tuple[Tuple[str, str], ...] = (
 )
 
 
+def _wrap_items(items: Sequence[str], width: int = 96) -> List[str]:
+    """Round 176 (item 162): a list of names as lines that fit a terminal."""
+    chunks: List[str] = []
+    current = ""
+    for item in items:
+        piece = ("" if not current else ", ") + item
+        if current and len(current) + len(piece) > width:
+            chunks.append(current)
+            current = item
+        else:
+            current = (current + piece).strip()
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _key_chunks(keys: Tuple[str, ...], width: int = 96) -> List[str]:
     """Round 175 (item 161): the key list as lines that fit a terminal, one key never split."""
     chunks: List[str] = []
@@ -626,7 +657,9 @@ def format_payload_writers() -> str:
         # Round 175 (item 161): `--campaign` declares 68 keys, so a declared row wraps instead of running off
         # the terminal; the keys are still the declaration, in its order, one key per token.
         if command in PAYLOAD_KEYS:
-            chunks = _key_chunks(PAYLOAD_KEYS[command])
+            # Round 176 (item 162): an empty declaration is a claim too ("this payload has no keys"), and a
+            # page that crashes on it turns a check into a traceback (boundary 422).
+            chunks = _key_chunks(PAYLOAD_KEYS[command]) or ["{} (no keys declared)"]
             lines.append("  %-42s %-23s %s" % (command, kind, chunks[0]))
             for chunk in chunks[1:]:
                 lines.append(" " * (2 + 42 + 23) + chunk)
@@ -657,8 +690,13 @@ def format_payload_writers() -> str:
     lines.append("  only reported   nothing was recorded: this command only reports, so only its export is missing")
     lines.append("                  -- also what a `records, unless --dry-run` row says while it previews (boundary 395)")
     lines.append("")
-    lines.append("A payload's keys are declared for %d row(s) -- %s -- and checked where the payload is built:"
-                 % (len(PAYLOAD_KEYS), ", ".join(sorted(PAYLOAD_KEYS))))
+    # Round 176 (item 162): nineteen declared rows made this sentence 438 characters, so the names wrap
+    # like a key list does -- the page is the deliverable (boundary 420).
+    lines.append("A payload's keys are declared for %d row(s), and each is checked where the payload is built:"
+                 % len(PAYLOAD_KEYS))
+    for chunk in _wrap_items(sorted(PAYLOAD_KEYS)):
+        lines.append("  " + chunk)
+    lines.append("_write_payload refuses a payload whose keys disagree with those declarations (boundary 416).")
     undeclared = len(PAYLOAD_WRITERS) - len(PAYLOAD_KEYS)
     lines.append("_write_payload refuses a payload whose keys disagree with the declaration (boundary 416);")
     lines.append("the %d row(s) not declared here describe their payload in prose, so a key can be added"
@@ -3263,6 +3301,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % sum(1 for item in claims if item.get("changed")))
         if getattr(args, "json_out", None) and not _write_payload(
                 args.json_out, {"claimed": claims, "claim_refused": refused},
+                keys=PAYLOAD_KEYS["--claim-round-file"],
                 # Round 164: a preview of a repairing command still repairs nothing, so the failure sentence must
                 # follow this branch's own behaviour rather than the command's category (boundary 395).
                 recorded=not getattr(args, "dry_run", False)):
@@ -3296,7 +3335,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("nothing to backfill: every claim chain already carries its origin, its first moment and "
                    "its hop count")
         if getattr(args, "json_out", None) and not _write_payload(
-                args.json_out, {"filled": rows, "dry_run": dry}, recorded=not dry):
+                args.json_out, {"filled": rows, "dry_run": dry}, recorded=not dry,
+                keys=PAYLOAD_KEYS["--backfill-claims"]):
             return 2
         return 0
 
@@ -3632,7 +3672,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        % (row["round"], row["successor"], row["at"] or "unknown"))
             _print("nothing was written; drop --dry-run to write the walks the ledger already names (boundary 304).")
             if getattr(args, "json_out", None) and not _write_payload(
-                    args.json_out, {"backfilled": [], "would_backfill": would, "dry_run": True}, recorded=False):
+                    args.json_out, {"backfilled": [], "would_backfill": would, "dry_run": True}, recorded=False,
+                    keys=PAYLOAD_KEYS["--backfill-walks (a dry run)"]):
                 return 2
             return 0
         try:
@@ -3651,7 +3692,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("backfilled        %d payment(s) the ledger recorded and the store never saw; each entry says so, "
                "and each keeps the moment of the payment (boundary 354)" % len(written))
         if getattr(args, "json_out", None) and not _write_payload(
-                args.json_out, {"backfilled": written, "would_backfill": [], "dry_run": False}):
+                args.json_out, {"backfilled": written, "would_backfill": [], "dry_run": False},
+                keys=PAYLOAD_KEYS["--backfill-walks"]):
             return 2
         return 0
 
@@ -4212,7 +4254,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if change["changed"]:
             # Round 111: a repair that cannot say whether it moved the plan leaves the reader ranking twice.
             _print_repair_delta(record_repair(root, "set-stream-path", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None) and not _write_payload(args.json_out, {"stream_path": change}):
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"stream_path": change}, keys=PAYLOAD_KEYS["--set-stream-path"]):
             return 2
         return 0
 
@@ -4256,7 +4299,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (decision["by"] if decision.get("by")
                       else "(not recorded -- pass --settle-by NAME to attribute this decision)"))
             _print_repair_delta(record_repair(root, "settle-link", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None) and not _write_payload(args.json_out, {"settled": decision}):
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"settled": decision}, keys=PAYLOAD_KEYS["--settle-link"]):
             return 2
         return 0
 
@@ -4293,7 +4337,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 114: the amendment is a repair too, and the plan's own numbers are how it reports itself
             # (round 111) -- "nothing changed in the plan" is the honest answer here and must print.
             _print_repair_delta(record_repair(root, "settle-note", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None) and not _write_payload(args.json_out, {"noted": noted}):
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"noted": noted}, keys=PAYLOAD_KEYS["--settle-note"]):
             return 2
         return 0
 
@@ -4495,7 +4540,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if done and any(item["changed"] for item in done):
             _print_repair_delta(record_repair(root, "settle-reanchor", plan_before, repair_plan(root)))
         out = getattr(args, "json_out", None)
-        if out and not _write_payload(out, {"reanchored": done, "reanchor_refused": refused}):
+        if out and not _write_payload(out, {"reanchored": done, "reanchor_refused": refused},
+                                      keys=PAYLOAD_KEYS["--settle-reanchor"]):
             return 2
         return 2 if refused else 0
 
@@ -4556,7 +4602,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (len(done), len(wanted), skipped, refused))
         _print_repair_delta(record_repair(root, "settle-drop", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None) and not _write_payload(
-                args.json_out, {"withdrawn": done, "drop_refused": refused, "drop_skipped": skipped}):
+                args.json_out, {"withdrawn": done, "drop_refused": refused, "drop_skipped": skipped},
+                keys=PAYLOAD_KEYS["--settle-drop"]):
             return 2
         return 2 if refused else 0
 
@@ -4665,7 +4712,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if done:
             _print_repair_delta(record_repair(root, "settle-restore", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None) and not _write_payload(
-                args.json_out, {"restored": done, "restore_refused": refused}):
+                args.json_out, {"restored": done, "restore_refused": refused},
+                keys=PAYLOAD_KEYS["--settle-restore"]):
             return 2
         return 2 if refused else 0
 
@@ -4741,7 +4789,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print_repair_delta(record_repair(root, "settle-reaffirm", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None) and not _write_payload(
                 args.json_out, {"reaffirmed": done, "reaffirm_refused": refused,
-                                "reaffirm_skipped": int(getattr(args, "settle_reaffirm_skipped", 0) or 0)}):
+                                "reaffirm_skipped": int(getattr(args, "settle_reaffirm_skipped", 0) or 0)},
+                keys=PAYLOAD_KEYS["--settle-reaffirm"]):
             return 2
         return 2 if refused else 0
 
@@ -4774,7 +4823,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % BACKFILL_KEY)
             _print("separately and does not treat them as independent confirmation.")
         json_out = getattr(args, "json_out", None)
-        if json_out and not _write_payload(json_out, {"repairs": rows}):
+        if json_out and not _write_payload(json_out, {"repairs": rows},
+                                           keys=PAYLOAD_KEYS["--repair-links --apply"]):
             return 2
         return 0
 
@@ -4955,7 +5005,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # just wrote -- the same numbers the campaign page reads (boundary 340).
                 if getattr(args, "json_out", None):
                     _write_payload(args.json_out, {"store": _walk_store(root, empty_entry),
-                                                   "walks": [empty_entry]})
+                                                   "walks": [empty_entry]},
+                                   keys=PAYLOAD_KEYS["--from-queue (a walk that measured nothing)"])
                 return 0
             if from_queued is not None and not from_queue:
                 # Round 102: a plan, not a measurement. It lists exactly the records `--from-queue N` would walk, in
@@ -5067,7 +5118,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # itself) and hand the caller nothing. One record for the whole walk is what it owes, and it is the record
             # the store just kept (boundary 340).
             if getattr(args, "json_out", None) and not _write_payload(
-                    args.json_out, {"store": _walk_store(root, walk_entry), "walks": [walk_entry]}):
+                    args.json_out, {"store": _walk_store(root, walk_entry), "walks": [walk_entry]},
+                keys=PAYLOAD_KEYS["--from-queue (a walk)"]):
                 worst = max(worst, 2)
             _print("")
             if stopped_at:
@@ -5852,7 +5904,7 @@ def cmd_demo(args: argparse.Namespace, settings: Settings) -> int:
 
     if args.json_out and not _write_payload(args.json_out, {
             "summary": summary, "windows_judged": judged,
-            "rca_report_ids": [r.rca_id for r in reports]}):
+            "rca_report_ids": [r.rca_id for r in reports]}, keys=PAYLOAD_KEYS["run"]):
         return 2
     return 0
 

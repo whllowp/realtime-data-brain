@@ -178,3 +178,34 @@ def test_a_declared_row_wraps_instead_of_running_off_the_terminal():
     start = next(index for index, line in enumerate(page) if line.strip().startswith("--campaign "))
     assert page[start + 1].strip().startswith('"'), "the campaign row does not continue on the next line"
     assert len(cli.PAYLOAD_KEYS["--campaign"]) > 60
+
+
+def test_an_empty_declaration_prints_instead_of_crashing(monkeypatch):
+    """Round 176: doctoring a declaration to `()` used to make the page raise IndexError.
+
+    An empty tuple is a claim ("this payload has no keys"), and the page has to be able to print the claim it
+    enforces -- otherwise the command that checks the page is the command that crashes on it (boundary 422).
+    """
+    monkeypatch.setattr(cli, "PAYLOAD_KEYS", dict(cli.PAYLOAD_KEYS, **{"--settle-link": ()}))
+
+    page = cli.format_payload_writers()
+    row = [line for line in page.splitlines() if line.strip().startswith("--settle-link")][0]
+
+    assert "no keys declared" in row
+
+
+def test_the_declared_rows_come_from_their_write_sites_not_from_a_run():
+    """Every declared row's keys must be quoted somewhere in the source: the declaration is read off the writer.
+
+    This is the weak half of the check (round 174's `payload_writer_problems` owns the strong half at write time);
+    it exists so a row copied from a run's output with a key no branch builds fails here first.
+    """
+    import pathlib
+
+    source = pathlib.Path(cli.__file__).read_text(encoding="utf-8")
+
+    assert len(cli.PAYLOAD_KEYS) >= 19
+    for command, keys in cli.PAYLOAD_KEYS.items():
+        assert keys, command
+        for key in keys:
+            assert '"%s"' % key in source, "%s declares %r and no line of this source writes it" % (command, key)
