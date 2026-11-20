@@ -7403,6 +7403,72 @@ $ brian evolve --campaign --what-if-records data/smd/stream-two.json --plan reta
 `_plan_counts()` 一致。全套 1929 项通过，`pyflakes` 干净。
 
 
+### 3.143 一个约束要在两扇门上都检查：恢复与重开的两道门
+
+第 136 轮按顺序跑计划时，反向顺序给出的结果里有一行很刺眼：`after restore -> 2 cannot be re-taken`。也就是说，只要先恢复再重开，就会凭空多出两件"没有任何重开命令能付"的活；而第 133 轮的成果正是把这类活从可付清单里剔掉。往回追，原因不在计划，在写入端：
+
+- `reaffirm_link`（第 119 轮）一直拒绝在一份"已经不指向这个后继"的记录上重开决定，理由是那样等于断言账本否认的事；
+- `restore_settlement`（第 126 轮）做的是同一类断言，却从来没有这一句检查。
+
+同一个约束，两道写入的门，只检查了一道。于是"把撤回的决定拿回来"可以造出一件它自己付不掉的活，而页面（第 133 轮起只数可付的）会在下一轮把它如实算成"付不掉"，读者看到的是自己的债凭空长了两笔。
+
+这一轮把检查补到第二道门上，并把这道门的两半拆开：
+
+```
+refused: the record no longer names round-tenth.json as its successor (it names round-elsewhere.json):
+         taking the decision up again would assert something the ledger denies.
+         Record a new decision with `--settle-link round-ninth.json=<a successor the record names>`,
+         or drop it with `--settle-drop round-ninth.json=round-tenth.json` (boundary 323)
+```
+
+拒绝语同时给两条出路，因为这里确实有两条：改成一个记录实际指向的后继（新决定），或者干脆撤掉（转成"欠一个决定"，它有自己的队列、年龄和按文件分组）。
+
+**撤回队列也随之一分为二。** 第 128 轮把"没人接手的撤回"按文件分组，前提是每一笔都能被 `--settle-restore` 付掉；第二道门一收紧，这个前提就不成立了。于是 `withdrawal_plan` 的每一行现在有两个数：
+
+```
+links             1 withdrawal(s) on data/smd/stream-two.json cannot be taken up again: the records name
+                  other successors -- brian evolve --settle-drop-file data/smd/stream-two.json --settle-why TEXT
+links             withdrawn and waiting, by stream file: data/smd/stream-two.json 2 decision(s); data/smd/stream-real.json 1 decision(s)
+```
+
+第一行是真的付不掉的那一半，第二行是总数（`waiting`，不是 `decisions`）——两行一起才对得上"这个文件还欠多少、其中多少能付"。按文件那条命令也照此行事：
+
+```
+leaving        1 withdrawal(s) no restore can pay: the records name other successors -- `brian evolve --settle-drop-file data/smd/stream-two.json --settle-why TEXT`
+re-taking       1 decision(s) on data/smd/stream-two.json in one command
+taken up again  round-sixth.json -> round-seventh.json
+```
+
+它先把能付的付掉，再把付不掉的说出来并给出下一条命令；付不掉是新常态而不是错误，所以退出码仍是 0。反过来，当一个文件只剩付不掉的那一半时，它不再假装"没有欠账"，而是：
+
+```
+1 withdrawal(s) on data/smd/stream-two.json cannot be taken up again: the records name other successors --
+`brian evolve --settle-drop-file data/smd/stream-two.json --settle-why TEXT`
+```
+
+（退出码 2：这件事需要人做决定，没有一条 restore 能推进它。）
+
+**"如果全付掉"这个问题也补齐了这一半。** 第 132 轮的问题问的是"付这个文件会剩什么"，第 133 轮之后它只算可付的部分，于是答案是"剩 0"而读者会以为"什么都不欠"。现在它先说总数，再点名那半边够不着的：
+
+```
+what if          data/smd/stream-two.json owes 2 unanswered withdrawal(s), 1 stale decision(s) and 2 decision(s) no re-take can pay
+                 paying the withdrawals (1 pair(s), `--settle-restore-file data/smd/stream-two.json`):
+                   after this run  data/smd/stream-two.json would owe 0 unanswered withdrawal(s), and the ledger would go from 2 to 1
+                 NONE of that reaches 1 withdrawal(s) here: the records name other successors, so no restore can take
+                 them up again -- `brian evolve --settle-drop-file data/smd/stream-two.json --settle-why TEXT`
+```
+
+这三处输出都由同一份 `withdrawal_plan` 生成（第 131 轮的规矩：预言和结果共用一次计算），所以页面、干跑、命令不会各说一套。
+
+**边界 324：** 同一个约束有两道写入的门时，必须在两扇门上都检查；只在一扇上检查，等于把那扇门当成建议。计划页能把两道门并排放在读者眼前（这一轮正是这样发现的），但发现之后仍要去改另一扇门——否则计划页只是把别人的 bug 印得更清楚。
+
+**边界 325：** 一条队列里若有"没有任何命令能付"的一半，页面必须分别说出这一半和总数，而且两个数都要来自同一份计划，不能一处用可付数、一处用总数。总数小了读者会以为债在减少，总数大了读者会去找一条不存在的命令。
+
+**边界 326：** 拒绝时必须把"下一步能跑的命令"一起说出来。这里是"记录已经指向别的后继"，那么给出 `--settle-link`（朝着账本实际说的方向重记）和 `--settle-drop`（转成欠一个决定）两条路；只说"不行"等于让读者再猜一次，而猜测的成本正是这一整层记账要省掉的东西。
+
+这一轮没有改动任何测量：`--settle-restore` 的语义仍是"把撤回的决定重新立起来"，只是它现在只对账本还认的那一对生效；`--audit --strict` 在补检查之前是 0、补完之后对同一份账本仍是 0（demo 里恢复过的对子不再计费），而 `--max-withdrawn-per-file 0` 在同一份账本上退出 1，点名那一个文件——两种闸门各自回答自己的问题。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7932,4 +7998,13 @@ missing for the next level
 
 122. ~~让预览能回答"如果我按这个顺序做"：`--campaign --what-if-records FILE --plan restore,drop,retake` 依次算出每一步之后的两张账。~~ 已完成：每步在 store 拷贝上跑一条真命令，最后按反序再算一遍，只在结果不同时说"顺序有影响"（§3.142，边界 321/322/323）。
 
-123. 让 `--settle-restore` 跟 `reaffirm_link` 一样严格：记录不再认这个后继时拒绝接手（`--settle-restore-file` 跳过这一对并说明），因为第 136 轮的计划演示显示接手会立刻生产"不能重开"的对；顺带给 `--settle-restore` 的拒绝句加上"用 `--settle-drop` 或新决定"的出口。
+123. 已实现：`restore_settlement` 与 `reaffirm_link` 一样拒绝记录已经不指向的后继，拒绝语给出
+     `--settle-link` 与 `--settle-drop` 两条出路；`withdrawal_plan` 把撤回队列分成 `records`（能付）与
+     `unpayable`（付不掉），行里多了 `waiting`（总数）、`unpayable_pairs`、`stuck`；`--settle-restore-file`
+     先付能付的、再报剩下的，只剩付不掉时退出 2；`--campaign`、按文件队列行、`--what-if-records` 都按
+     可付/总数两个数说话。见 §3.143。
+
+124. 让 `--settle-link` 也能处理"记录已经改了指向"的一对：现在它只接受账本里存在的后继，读者若确认
+     新指向是对的，应当有一条"把记录与实际同步"的命令（例如 `--settle-link RECORD=SUCCESSOR --repoint`），
+     在 `stream_path_history` 之外留下 `successor_history`；同时让 `--campaign` 把"记录被改过指向"的
+     决定单列一类，避免它们永远停在"付不掉"。

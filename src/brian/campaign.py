@@ -1319,10 +1319,19 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
     # Round 127: of the withdrawals, the ones nobody has answered are the debt the gate charges, so the page names
     # the oldest and the command that clears it -- "N are waiting" without the oldest is a number the reader has to
     # go and sort himself (boundary 219's rule, applied to a withdrawal instead of a promise).
+    for _row in result.withdrawal_plan:
+        # Round 137: `restore_settlement` refuses a withdrawal whose record now names another successor, so part of
+        # this queue is work no command in this build can do -- the page must say which half is which instead of
+        # offering `--settle-restore-file` for a file it cannot empty (boundary 311, third family).
+        if int(_row.get("unpayable") or 0):
+            lines.append("links             %d withdrawal(s) on %s cannot be taken up again: the records name other "
+                         "successors -- brian evolve --settle-drop-file %s --settle-why TEXT"
+                         % (int(_row.get("unpayable") or 0), str(_row.get("origin") or "(unattributed)"),
+                            str(_row.get("origin") or "(unattributed)")))
     if len(result.withdrawal_plan) > 1:
         lines.append("links             withdrawn and waiting, by stream file: %s"
                      % "; ".join("%s %d decision(s)" % (str(row.get("origin") or "(unattributed)"),
-                                                        int(row.get("decisions") or 0))
+                                                        int(row.get("waiting") or row.get("decisions") or 0))
                                  for row in result.withdrawal_plan))
     if result.settlements_unanswered:
         oldest = result.settlements_unanswered[0]

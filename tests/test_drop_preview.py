@@ -41,7 +41,8 @@ def test_the_drop_preview_says_where_the_debt_goes(tmp_path, monkeypatch, capsys
     assert _dry(ONE, "--settle-why", "both moved", "--dry-run") == 0
     printed = " ".join(capsys.readouterr().out.split())
     assert "would owe 0 decision(s) no re-take can pay" in printed
-    assert "2 more withdrawal(s) would wait in the withdrawal queue (the queue goes from 0 to 2)" in printed
+    assert ("2 more withdrawal(s) would wait in the withdrawal queue (the queue goes from 0 to 2, and 2 of them "
+            "cannot be taken up again)") in printed
     assert "dropping a decision does not settle anything" in printed
     # the preview is a computation, not a write.
     stored = load_settlements(root)

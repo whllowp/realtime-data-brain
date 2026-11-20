@@ -332,8 +332,13 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
             before_rows = reaffirm_plan(rounds_all, stored)
             after_rows = reaffirm_plan(rounds_all, after)
             key = "unpayable"
-            before_queue = sum(int(row.get("decisions") or 0) for row in withdrawal_plan(rounds_all, stored))
-            after_queue = sum(int(row.get("decisions") or 0) for row in withdrawal_plan(rounds_all, after))
+            before_queue = sum(int(row.get("waiting") or row.get("decisions") or 0)
+                               for row in withdrawal_plan(rounds_all, stored))
+            after_queue = sum(int(row.get("waiting") or row.get("decisions") or 0)
+                              for row in withdrawal_plan(rounds_all, after))
+            # Round 137: a dropped pair lands in "nobody has taken it up again", and if its record names another
+            # successor it lands in the half of that queue no restore can pay -- so the preview has to say both.
+            after_stuck = sum(int(row.get("unpayable") or 0) for row in withdrawal_plan(rounds_all, after))
         elif kind == "restore":
             before_rows = withdrawal_plan(rounds_all, stored)
             after_rows = withdrawal_plan(rounds_all, after)
@@ -357,8 +362,9 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
         kind, "stale decision(s)")
     if kind == "drop":
         return ["after this run  %s would owe %d %s, and %d more withdrawal(s) would wait in the withdrawal queue "
-                "(the queue goes from %d to %d)"
-                % (origin, here(after_rows), noun, after_queue - before_queue, before_queue, after_queue),
+                "(the queue goes from %d to %d%s)"
+                % (origin, here(after_rows), noun, after_queue - before_queue, before_queue, after_queue,
+                   ", and %d of them cannot be taken up again" % after_stuck if after_stuck else ""),
                 "                dropping a decision does not settle anything: the pair becomes an unanswered "
                 "withdrawal, which has its own queue, age and file grouping (boundary 318)"]
     return ["after this run  %s would owe %d %s, and the ledger would go from %d to %d"
@@ -381,7 +387,7 @@ def _plan_counts(rounds_all: List[Mapping[str, Any]], stored: List[Mapping[str, 
                        if same_stream_path(str(row.get("origin") or ""), target)]
     reaffirm_rows = [row for row in reaffirm_plan(rounds_all, stored, runs)
                      if same_stream_path(str(row.get("origin") or ""), target)]
-    return (sum(int(row.get("decisions") or 0) for row in withdrawal_rows),
+    return (sum(int(row.get("waiting") or row.get("decisions") or 0) for row in withdrawal_rows),
             sum(int(row.get("stale") or 0) for row in reaffirm_rows),
             sum(int(row.get("unpayable") or 0) for row in reaffirm_rows))
 
@@ -481,7 +487,7 @@ def _print_what_if(root: Path, target: str, steps: Sequence[str] = ()) -> None:
                   for item in (reaffirm_rows[0].get("unpayable_pairs") if reaffirm_rows else [])]
     _print("what if          %s owes %d unanswered withdrawal(s), %d stale decision(s) and %d decision(s) no "
            "re-take can pay"
-           % (target, sum(int(row.get("decisions") or 0) for row in withdrawal_rows),
+           % (target, sum(int(row.get("waiting") or row.get("decisions") or 0) for row in withdrawal_rows),
               sum(int(row.get("stale") or 0) for row in reaffirm_rows),
               sum(int(row.get("unpayable") or 0) for row in reaffirm_rows)))
     if not restore_pairs and not retake_pairs and not drop_pairs:
@@ -492,6 +498,12 @@ def _print_what_if(root: Path, target: str, steps: Sequence[str] = ()) -> None:
                % (len(restore_pairs), target))
         for line in _after_preview_lines(root, restore_pairs, kind="restore", origin=target):
             _print("                   " + line.strip())
+    if withdrawal_rows and withdrawal_rows[0].get("unpayable"):
+        # Round 137: `restore_settlement` refuses a withdrawal whose record names another successor, so the queue
+        # has a half no restore can pay -- and this question owes the reader both halves (boundary 311 again).
+        _print("                 NONE of that reaches %d withdrawal(s) here: the records name other successors, so "
+               "no restore can take them up again -- `brian evolve --settle-drop-file %s --settle-why TEXT`"
+               % (int(withdrawal_rows[0].get("unpayable") or 0), target))
     if drop_pairs:
         # Round 135: round 133 stopped counting unpairable pairs as `stale`, which made the page honest and this
         # question false -- "paying it all" silently meant "paying the payable part" (boundary 319).
@@ -3464,9 +3476,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         pairs = ["%s=%s" % (str(entry.get("record") or ""), str(entry.get("successor") or ""))
                  for entry in (match[0].get("records") or [])] if match else []
         if not pairs:
+            if match and int(match[0].get("unpayable") or 0):
+                _print("%d withdrawal(s) on %s cannot be taken up again: the records name other successors -- "
+                       "`brian evolve --settle-drop-file %s --settle-why TEXT`"
+                       % (int(match[0].get("unpayable") or 0), match[0].get("origin") or target, target))
+                return 2
             _print("no unanswered withdrawal is recorded against %s: `brian evolve --campaign` lists the files "
                    "that hold one" % target)
             return 2
+        if match and int(match[0].get("unpayable") or 0):
+            leaving = int(match[0].get("unpayable") or 0)
+            _print("leaving        %d withdrawal(s) no restore can pay: the records name other successors -- "
+                   "`brian evolve --settle-drop-file %s --settle-why TEXT`"
+                   % (leaving, match[0].get("origin") or target))
         dry = bool(getattr(args, "dry_run", False))
         _print("%s  %d decision(s) on %s in one %s"
                % ("would take up" if dry else "re-taking     ", len(pairs), match[0].get("origin") or target,

@@ -3285,28 +3285,44 @@ def withdrawal_plan(rounds: Sequence[Mapping[str, Any]], settlements: Sequence[M
     alternative is the reader retyping the reason once per pair -- and a reason retyped is a reason that drifts
     (round 120's rule).
     """
+    by_name = {str(item.get("round") or ""): item for item in rounds}
     files: Dict[str, Dict[str, Any]] = {}
     for row in unanswered_withdrawals(settlements, now, rounds):
         origin = str(row.get("origin") or "")
-        bucket = files.setdefault(origin, {"origin": origin, "records": [], "oldest_at": "", "oldest_age": None})
-        bucket["records"].append({"record": row["record"], "successor": row["successor"], "at": row["at"],
-                                  "age_days": row["age_days"]})
+        bucket = files.setdefault(origin, {"origin": origin, "records": [], "unpayable": 0,
+                                           "unpayable_pairs": [], "stuck": [], "oldest_at": "",
+                                           "oldest_age": None})
+        # Round 137: a withdrawal whose record now names another successor cannot be taken up again, so it is work
+        # no command in this build can pay (boundary 311, second family). Counting it as payable is what made the
+        # page promise a restore that `restore_settlement` now refuses.
+        named_now = _named_successor(by_name.get(row["record"])) if rounds else ""
+        if named_now and named_now != row["successor"]:
+            bucket["unpayable"] += 1
+            bucket["unpayable_pairs"].append({"record": row["record"], "successor": row["successor"],
+                                              "names": named_now})
+            bucket["stuck"].append("brian evolve --settle-drop %s=%s --settle-why TEXT"
+                                   % (row["record"], row["successor"]))
+        else:
+            bucket["records"].append({"record": row["record"], "successor": row["successor"], "at": row["at"],
+                                      "age_days": row["age_days"]})
         if not bucket["oldest_at"] or str(row.get("at") or "") < str(bucket["oldest_at"]):
             bucket["oldest_at"] = str(row.get("at") or "")
             bucket["oldest_age"] = row.get("age_days")
     rows: List[Dict[str, Any]] = []
     for bucket in files.values():
         bucket["decisions"] = len(bucket["records"])
-        bucket["pair"] = ("brian evolve --settle-restore %s=%s --settle-why TEXT --settle-by NAME"
-                          % (bucket["records"][0]["record"], bucket["records"][0]["successor"]))
+        bucket["waiting"] = bucket["decisions"] + bucket["unpayable"]
+        bucket["pair"] = (("brian evolve --settle-restore %s=%s --settle-why TEXT --settle-by NAME"
+                           % (bucket["records"][0]["record"], bucket["records"][0]["successor"]))
+                          if bucket["records"] else "")
         # Round 129: the plan is grouped by file, so the command it prints must pay a file. Until this round it named
         # the first pair and left the rest to be typed one by one, which is a grouping that costs the reader the same
         # eleven reasons it was supposed to save (boundary 301).
         bucket["batch"] = (("brian evolve --settle-restore-file %s --settle-why TEXT --settle-by NAME"
-                            % bucket["origin"]) if bucket["origin"] else bucket["pair"])
-        bucket["more"] = bucket["decisions"] - 1
+                            % bucket["origin"]) if bucket["origin"] and bucket["records"] else bucket["pair"])
+        bucket["more"] = max(0, bucket["decisions"] - 1)
         rows.append(bucket)
-    rows.sort(key=lambda row: (-row["decisions"], row["origin"]))
+    rows.sort(key=lambda row: (-row["decisions"], -int(row.get("unpayable") or 0), row["origin"]))
     return rows
 
 
@@ -3351,6 +3367,17 @@ def restore_settlement(root: Path, record: str, successor: str, why: str = "", b
         when = str(back[-1].get("at") or "") if back else str(entry.get("at") or "")
         raise ValueError("the decision on %s -> %s still stands (since %s): nothing was withdrawn, so there is "
                          "nothing to take up again" % (name, target, when))
+    # Round 137: `reaffirm_link` has refused this since round 119 -- a re-take may not assert what the ledger
+    # denies. The restore door did not check, so taking a decision up again on a record that now names another
+    # successor manufactured exactly the debt round 133 had just stopped counting as payable (boundary 323).
+    by_name = {str(item.get("round") or ""): item for item in history(root, include_retired=True)}
+    named_now = _named_successor(by_name.get(name))
+    if named_now != target:
+        raise ValueError("the record no longer names %s as its successor (it names %s): taking the decision up "
+                         "again would assert something the ledger denies. Record a new decision with "
+                         "`--settle-link %s=<a successor the record names>`, or drop it with "
+                         "`--settle-drop %s=%s` (boundary 323)"
+                         % (target, named_now or "(nothing)", name, name, target))
     moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
     back.append({"at": moment.isoformat(), "why": reason, "by": author})
     entry["redecisions"] = back

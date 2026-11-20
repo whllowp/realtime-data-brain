@@ -7,7 +7,7 @@ after-states therefore do not add up to one plan -- and a reader who pastes them
 predicted (boundaries 321/322).
 """
 from brian import cli
-from brian.evolve import load_settlements, reaffirm_plan, withdrawal_plan
+from brian.evolve import load_settlements, reaffirm_plan, withdraw_settlement, withdrawal_plan
 from test_drop_batch import _two_unpayable
 from test_reaffirm_batch import _two_stale
 from test_restore_file import ONE
@@ -32,10 +32,40 @@ def test_the_plan_prints_every_step(tmp_path, monkeypatch, capsys):
     assert "nothing here is written: every step runs on a copy of the store" in printed
 
 
-def test_the_order_is_reported_when_it_changes_the_books(tmp_path, monkeypatch, capsys):
+def _withdrawn_but_restorable(root):
+    """A withdrawn decision whose record still names its successor, on a pair that has since gone stale."""
+    rows = [row for row in reaffirm_plan(cli.history(root, include_retired=True), load_settlements(root))
+            if row["origin"] == ONE and row.get("pairs")]
+    assert rows, "the fixture must owe at least one payable re-take"
+    pair = rows[0]["pairs"][0]
+    withdraw_settlement(root, str(pair["record"]), str(pair["successor"]), why="the earlier call was wrong",
+                        by="bob")
+    return pair
+
+
+def test_the_orders_agree_where_both_doors_refuse(tmp_path, monkeypatch, capsys):
+    """Round 137: on 136's own fixture the orders now agree, because the restore door refuses what the re-take
+    door refuses. A page that stayed silent about the order is telling the truth, not forgetting the feature."""
     root = _two_unpayable(_two_stale(tmp_path))
     monkeypatch.chdir(root)
     assert _plan("restore", "drop", "retake") == 0
+    printed = _printed(capsys)
+    assert "the order matters:" not in printed
+    assert "in the order: restore, drop, retake" in printed
+
+
+def test_the_order_matters_when_one_step_unlocks_the_next(tmp_path, monkeypatch, capsys):
+    root = _two_unpayable(_two_stale(tmp_path))
+    monkeypatch.chdir(root)
+    _withdrawn_but_restorable(root)
+    rounds_all = cli.history(root, include_retired=True)
+    runs = cli.queue_runs(root)["runs"]
+    stored = load_settlements(root)
+    forward = cli._run_steps(rounds_all, stored, runs, ONE, ["restore", "retake"])[1][-1][2]
+    backward = cli._run_steps(rounds_all, stored, runs, ONE, ["retake", "restore"])[1][-1][2]
+    assert forward != backward, (forward, backward)
+    assert forward[1] <= backward[1], "restoring before re-taking pays the stale decision it revives"
+    assert _plan("restore", "retake") == 0
     printed = _printed(capsys)
     assert "the order matters:" in printed
     assert "done the other way round it would end at" in printed
