@@ -5626,6 +5626,63 @@ stopped          v020 exited 2, and no other promise was waiting behind it: a co
 "答掉几笔"——检查可以跑完而不 settle 任何东西，两个数并成一个就把执行读成了成效）。
 
 
+### 3.110 同一笔账不要付两次：把走过的路当历史，把被账本挡住的记录标出来
+
+第 103 轮让每一趟队列都留下一条记录，于是"队列什么时候走过"有了答案；这一轮要答的是另外两个问题：
+**走过几趟、都量出了什么**，以及**同一笔账会不会被重复付**。
+
+一趟走完，`var/evolve/queue_runs.json` 里多一行：
+
+```
+2 queue run(s) recorded: measured 2 promise(s) in total, 0 of those left a clearing,
+2 run(s) ended on a build defect (1.0 promise(s) per run on average)
+```
+
+只有一趟时不打这句：一趟是事实，不是方向；把一趟说成"趋势"，等于把一次观测当成一条规律
+（第 60 轮的教训，换个地方）。
+
+**同一笔账不要付两次。** 第 103 轮的那趟队列停在了 `v020` 上，因为它的记录参与一条 `mismatch`
+链接——账本自己都不同意，重新量一遍只会得到同一个结论。于是下一趟走过来时，页面先说：
+
+```
+still blocked    1 promise(s) ended on a build defect last time and nothing has changed since: v020 (…)
+                 fix the books, or pass --retry-blocked to measure them again anyway
+no promise in the queue is left to measure: 1 record(s) still owe a check where they were made,
+                 and the last walk's refusal still stands (fix the books, or pass --retry-blocked).
+```
+
+`blocked_versions(root)` 从走法记录里读出"上一趟试过、并且以 exit 2 结束"的版本；`--retry-blocked`
+是绕过它的唯一方式——绕过不是默认，因为重复测量一份矛盾的账本既花 Laya 的时间，也不会改变结论。
+
+这里有一处判断被实跑推翻：第一版的 `not runnable` 分支只有一句话，于是**所有记录都被挡住**时，页面说的是
+
+```
+no promise in the queue can be measured here: … none of those files is in this checkout
+```
+
+——原件明明就在那里。两个不同的原因共用一个句子，读者就会去找不存在的问题。现在两条分支各自说话。
+
+**一趟什么都没量也是走了一趟。** 第二版把"没有可量的记录"当成早退，直接 `return 0`，不留记录；
+结果卡住的队列在 `--campaign` 上看起来像**没人来看过**。现在这种情况也写一行
+`{"measured": 0, "runnable": 0, "skipped": …, "skipped_origins": …}`，趋势因此能显示
+"反复来、反复量为零"：
+
+```
+2 queue run(s) recorded: measured 0 promise(s) in total, 0 of those left a clearing, 0 run(s) ended on a build defect
+origins skipped on more than one walk: data/smd/stream-real.json 2
+```
+
+**边界 230：只记"量了几条"不记"量了哪几条"的记录，分不清"没试过"和"试过、被拒了"。**
+`attempted: [{"version": 20, "code": 2}]` 才是把计数变成历史的那一项。
+
+**边界 231：趋势必须说明窗口。** 存储只留最近 20 趟，`trimmed` 数出掉出去的趟数；不写这句话，
+"每趟量 1.0 条"就是在为一段它已经不再持有的历史报数。
+
+**边界 232：记在某条承诺上的拒绝，必须能被"修好账本"清掉，而绕过它的命令必须写在这条拒绝旁边。**
+被拒的记录不是被禁止测量，而是"在账本自相矛盾时再量没有意义"；读者要知道两条出路，否则这条拒绝
+就变成一张永久的封条。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6032,6 +6089,10 @@ missing for the next level
     下一项（90）：让 `--campaign` 看队列执行的趋势（最近 N 次里几次以断账收场、平均量几条），并让 `--from-queue`
     跳过上一趟已经量过而仍然失败的那些记录（或把它们标成"量过、仍不成立"，而不是每趟都重花一次）。
 
-90. 让 `--campaign` 看队列执行的趋势：最近几次里有多少次以断账收场、平均一次量几条、哪些原件被反复跳过；
-    并让 `--from-queue` 不再重花一次在上一趟已经量过而仍然失败的记录上（把它们标成"量过、仍不成立"，
-    而不是每趟都重新量）。
+90. 让 `--campaign` 读出队列走过几趟、清掉几笔、栽在账本上有几趟：`queue_history` 是窗口统计，`trimmed`
+    说明有多少趟已经掉出窗口，`origins skipped on more than one walk` 把反复够不着的原件排出来。
+    让 `--from-queue` 不再重复付一笔账：`blocked_versions` 记住上一趟栽在 build defect 上的记录，除非
+    `--retry-blocked`，它们只被列出、不被再量；一趟什么都没量也算一趟，照样记进 `queue_runs.json`。
+    （第 104 轮完成。）
+91. 让每个原件文件都有一行档案：被账本挡过几次、最后一次是什么时候、那次是哪一条记录的书在互相矛盾，
+    并让被挡住的记录在 `--history` 上点名那条矛盾的记录，而不是只说"账本不同意"。

@@ -1780,6 +1780,11 @@ def record_queue_run(root: Path, run: Mapping[str, Any], now: Optional[datetime]
         "cleared": int(run.get("cleared") or 0),
         "worst": int(run.get("worst") or 0),
         "stopped_at": int(run.get("stopped_at") or 0),
+        # Round 104: which versions this walk actually attempted, and what the inner check returned for each. Without
+        # it the store knows how many were measured but not which ones -- so the next walk cannot tell "nobody has
+        # tried this" from "this was tried and the books refused it twice".
+        "attempted": [{"version": int(item.get("version") or 0), "code": int(item.get("code") or 0)}
+                      for item in run.get("attempted") or [] if isinstance(item, Mapping)],
     }
     held = queue_runs(root)
     runs = held["runs"] + [entry]
@@ -1792,6 +1797,59 @@ def record_queue_run(root: Path, run: Mapping[str, Any], now: Optional[datetime]
     payload = {"format": QUEUE_RUN_FORMAT, "runs": runs, "trimmed": trimmed}
     path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
     return entry
+
+
+def blocked_versions(root: Path) -> Dict[int, Dict[str, Any]]:
+    """Versions whose most recent walk ended on a build defect, and when that walk was.
+
+    Round 104: a record blocked by a contradictory ledger fails the same way on every walk, because the walk reads
+    the ledger and the ledger has not moved. Paying for it again is not diligence, it is a second bill for the same
+    refusal -- so the queue can name it and skip it, and `--retry-blocked` exists for the caller who has just fixed
+    the books. Newest attempt wins: a later walk that measured the record cleanly takes it off this list.
+    """
+    blocked: Dict[int, Dict[str, Any]] = {}
+    for run in reversed(queue_runs(root)["runs"]):
+        for item in run.get("attempted") or []:
+            if not isinstance(item, Mapping):
+                continue
+            version = int(item.get("version") or 0)
+            if not version or version in blocked:
+                continue
+            code = int(item.get("code") or 0)
+            if code == 2:
+                blocked[version] = {"version": version, "at": str(run.get("at") or ""), "code": code}
+            else:
+                # A later attempt that did not hit the wall settles the question: the record is not blocked.
+                blocked[version] = {"version": version, "at": "", "code": code}
+    return {version: item for version, item in blocked.items() if item["code"] == 2}
+
+
+def queue_history(root: Path) -> Dict[str, Any]:
+    """What the recorded walks add up to, for a page that should show a trend rather than a last line (round 104).
+
+    The store keeps a window, so the totals are the totals of that window and `trimmed` says how much of the older
+    history the window no longer represents. A trend printed without that number would be a claim about all of time.
+    """
+    held = queue_runs(root)
+    runs = held["runs"]
+    measured = sum(int(run.get("measured") or 0) for run in runs)
+    cleared = sum(int(run.get("cleared") or 0) for run in runs)
+    skipped: Dict[str, int] = {}
+    for run in runs:
+        for path in run.get("skipped_origins") or []:
+            skipped[str(path)] = skipped.get(str(path), 0) + 1
+    stopped = sum(1 for run in runs if int(run.get("worst") or 0) == 2 or int(run.get("stopped_at") or 0))
+    return {
+        "runs": len(runs),
+        "measured": measured,
+        "cleared": cleared,
+        "stopped": stopped,
+        "skipped": sum(int(run.get("skipped") or 0) for run in runs),
+        "last_at": str(runs[-1].get("at") or "") if runs else "",
+        "trimmed": int(held.get("trimmed") or 0),
+        "mean_measured": (measured / len(runs)) if runs else 0.0,
+        "skipped_origins": dict(sorted(skipped.items())),
+    }
 
 
 def origin_queue(root: Path) -> List[Dict[str, Any]]:

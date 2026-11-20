@@ -99,6 +99,7 @@ from .promote import (
     clearing_evidence,
     in_force_disputes,
     in_force_history,
+    blocked_versions,
     last_queue_run,
     in_force_overrides,
     legacy_state_note,
@@ -119,6 +120,7 @@ from .promote import (
     dead_record_paths,
     never_tested_at_origin,
     origin_queue,
+    queue_history,
     state_budgets,
     state_drains,
     version_label,
@@ -2262,7 +2264,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                      refusal_expiry_days=horizon, limits=limits_view,
                                      in_force=in_force_rows, in_force_cleared=in_force_cleared,
                                      in_force_stale=in_force_stale_rows, in_force_history=in_force_record,
-                                     queue_run=last_queue_run(root))
+                                     queue_run=last_queue_run(root), queue_history=queue_history(root))
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
@@ -2711,9 +2713,40 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 return 2
             runnable = [row for row in queued if row.get("origin_exists")]
             skipped = len(queued) - len(runnable)
+            skipped_origins = [str(item.get("origin") or "") for item in queued if not item.get("origin_exists")]
+            # Round 104: a record whose last walk was refused by a contradictory ledger will be refused the same way
+            # now, because nothing about the books has moved. It is listed and counted, not measured again -- unless
+            # the caller has just repaired the ledger, which `--retry-blocked` says.
+            blocked = {} if getattr(args, "retry_blocked", False) else blocked_versions(root)
+            held_back = [row for row in runnable if int(row.get("version") or 0) in blocked]
+            runnable = [row for row in runnable if int(row.get("version") or 0) not in blocked]
+            if held_back:
+                _print("still blocked    %d promise(s) ended on a build defect last time and nothing has changed "
+                       "since: %s" % (len(held_back),
+                                      ", ".join("v%03d (%s)"
+                                                % (int(row.get("version") or 0),
+                                                   str((blocked.get(int(row.get("version") or 0)) or {})
+                                                       .get("at") or "unknown"))
+                                                for row in held_back)))
+                _print("                 fix the books, or pass --retry-blocked to measure them again anyway")
             if not runnable:
-                _print("no promise in the queue can be measured here: %d record(s) hold no verdict on the file "
-                       "they were born with, and none of those files is in this checkout." % len(queued))
+                # Round 104: two different reasons leave nothing to measure, and naming the wrong one sends the reader
+                # to look for a file that is sitting right there.
+                if held_back:
+                    _print("no promise in the queue is left to measure: %d record(s) still owe a check where they "
+                           "were made, and the last walk's refusal still stands (fix the books, or pass "
+                           "--retry-blocked)." % len(held_back))
+                else:
+                    _print("no promise in the queue can be measured here: %d record(s) hold no verdict on the file "
+                           "they were born with, and none of those files is in this checkout." % len(queued))
+                # A walk that measured nothing is still a walk: it is the observation behind "nobody has measured
+                # this", and leaving it out would let a queue that is stuck read as a queue nobody visits.
+                try:
+                    record_queue_run(root, {"limit": from_queue, "runnable": 0, "measured": 0, "skipped": skipped,
+                                            "skipped_origins": skipped_origins, "cleared": 0, "worst": 0,
+                                            "stopped_at": 0, "attempted": []})
+                except OSError:
+                    pass
                 return 0
             if from_queued is not None and not from_queue:
                 # Round 102: a plan, not a measurement. It lists exactly the records `--from-queue N` would walk, in
@@ -2746,6 +2779,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 queued_before = 0
             worst = 0
             measured_now: List[int] = []
+            codes: Dict[int, int] = {}
             stopped_at = 0
             remaining: List[int] = []
             for index, row in enumerate(chosen):
@@ -2762,8 +2796,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # whatever `--stream-file` happened to say.
                 inner.stream_file = origin
                 inner.json_out = None
-                worst = max(worst, cmd_evolve(inner, settings))
+                code = cmd_evolve(inner, settings)
+                worst = max(worst, code)
                 measured_now.append(version)
+                codes[version] = code
                 if worst == 2:
                     # Round 103: exit 2 means the books for this record contradict each other, and that is not a
                     # defect the next promise in the queue can measure away. Stop, name what was left, and let the
@@ -2788,6 +2824,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     "cleared": max(0, cleared_here),
                     "worst": worst,
                     "stopped_at": stopped_at,
+                    "attempted": [{"version": version, "code": codes.get(version, 0)}
+                                  for version in measured_now],
                 })
             except OSError:
                 pass
@@ -4479,6 +4517,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--from-queue", type=int, default=None, metavar="N",
                         help="with --verify: measure the first N promises that hold no verdict on the file "
                              "they were born with, each on that file, in the queue's order")
+    evolve.add_argument("--retry-blocked", action="store_true",
+                        help="with --verify --from-queue: measure again the promises whose last walk was refused "
+                             "by the ledger, instead of listing them as still blocked")
     evolve.add_argument("--verify-version", type=int, default=0,
                         help="with --verify: only that version number (default: everything unverified)")
     evolve.add_argument("--accept-copied", action="store_true",

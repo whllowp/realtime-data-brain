@@ -173,6 +173,7 @@ class Campaign:
     #: debt that stopped being visible, not a debt that was paid, so the two are never added together.
     in_force_history: Dict[str, Any] = field(default_factory=dict)
     queue_run: Optional[Dict[str, Any]] = None
+    queue_history: Dict[str, Any] = field(default_factory=dict)
     # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
     retired: int = 0
     # Refusals the loop still holds: the count `previously_rejected` would return, and how many of them
@@ -271,6 +272,7 @@ class Campaign:
             "in_force_stale": self.in_force_stale,
             "in_force_cleared_history": dict(self.in_force_history),
             "queue_run": dict(self.queue_run) if isinstance(self.queue_run, Mapping) else None,
+            "queue_history": dict(self.queue_history),
             "in_force_untested": self.in_force_untested,
             "domains": [row.to_dict() for row in self.rows],
         }
@@ -314,7 +316,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
              in_force_cleared: Optional[Sequence[Mapping[str, Any]]] = None,
              in_force_stale: Optional[Sequence[Mapping[str, Any]]] = None,
              in_force_history: Optional[Mapping[str, Any]] = None,
-             queue_run: Optional[Mapping[str, Any]] = None) -> Campaign:
+             queue_run: Optional[Mapping[str, Any]] = None,
+             queue_history: Optional[Mapping[str, Any]] = None) -> Campaign:
     """Summarise every recorded round, grouped by the stream each one measured.
 
     A round that does not say which stream it measured cannot be attributed to a domain, and is counted
@@ -518,6 +521,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.in_force_stale = len(report.in_force_stale)
     result.in_force_history = dict(in_force_history or {})
     result.queue_run = dict(queue_run) if isinstance(queue_run, Mapping) else None
+    result.queue_history = dict(queue_history or {})
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
@@ -1034,6 +1038,30 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                          % (int(item.get("version") or 0), str(item.get("stream_path") or ""),
                             " (in force)" if item.get("in_force") else "",
                             int(item.get("version") or 0)))
+
+    history = result.queue_history
+    if isinstance(history, Mapping) and int(history.get("runs") or 0) > 1:
+        # Round 104: one line says the last walk; several walks are a trend, and a trend is what tells a reader
+        # whether the queue is being drained or simply walked. Printed only from two runs on: one run is a fact, not
+        # a direction, and a "trend" of one would read as a rate.
+        line = ("links             %d queue run(s) recorded: measured %d promise(s) in total, %d of those left a "
+                "clearing, %d run(s) ended on a build defect (%.1f promise(s) per run on average)"
+                % (int(history.get("runs") or 0), int(history.get("measured") or 0),
+                   int(history.get("cleared") or 0), int(history.get("stopped") or 0),
+                   float(history.get("mean_measured") or 0.0)))
+        if int(history.get("trimmed") or 0):
+            line += "; %d older run(s) fell out of the store, so this is the recent window" % int(
+                history.get("trimmed") or 0)
+        lines.append(line)
+        origins = history.get("skipped_origins")
+        if isinstance(origins, Mapping) and origins:
+            repeated = {str(name): int(count) for name, count in origins.items() if int(count or 0) > 1}
+            # A file that had to be skipped once may be a checkout that has not fetched it; the same file skipped on
+            # every walk is a promise nobody can measure here, and that is worth naming (round 47's rule: an
+            # unattributable record is reported, never quietly pooled).
+            if repeated:
+                lines.append("links             origins skipped on more than one walk: %s"
+                             % "; ".join("%s %d" % (name, count) for name, count in sorted(repeated.items())))
 
     run = result.queue_run
     if isinstance(run, Mapping) and run.get("at"):
