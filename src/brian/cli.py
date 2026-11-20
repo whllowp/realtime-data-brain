@@ -76,7 +76,9 @@ from .evolve import (
     BACKFILL_KEY,
     backfilled_links,
     format_repairs,
-    repair_legacy,)
+    load_settlements,
+    repair_legacy,
+    settle_link,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
 from .laya.gate import explain_thresholds
@@ -1753,7 +1755,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # Round 81: the replacement links, checked once for the whole page. Both ends of a relation are
         # printed here (the retired row says what replaced it, the successor says what it replaced), so this
         # is the one page where a disagreement is visible to a reader who does not already suspect one.
-        link_rows = replacement_links(rounds)
+        # Round 112: a settled pair is a decision, not a disagreement, and this page must read it the same way
+        # `--audit` does -- otherwise the audit stops charging a pair that this page still marks as broken, and two
+        # pages disagreeing about one ledger is the defect this campaign keeps finding (boundary 252).
+        settled_rows = load_settlements(root)
+        link_rows = replacement_links(rounds, settled_rows)
         # Round 83: an end written by a repair agrees with the other side by construction, so it is counted
         # apart from the links the queue wrote. "Every link agrees" is true of both, and means different
         # things; a page that prints only the first sentence lets a copied statement read as a witness.
@@ -1804,7 +1810,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("links             %d replacement link(s) were backfilled by a repair: the agreement is "
                        "copied, not a second opinion" % len(repaired_links))
             if not link_legacy and not repaired_links:
-                _print("links             every replacement link agrees with the other end it names")
+                if settled_rows:
+                    _print("links             every replacement link that no decision settled agrees with the "
+                           "other end it names")
+                else:
+                    _print("links             every replacement link agrees with the other end it names")
+        if settled_rows:
+            # Printed after the sentence it qualifies: "every link agrees" is false here, and "2 links disagree" is
+            # misleading, because a person decided them and `--strict` no longer charges either (boundary 251).
+            _print("links             %d pair(s) were settled by a recorded decision, not by agreement: %s"
+                   % (len(settled_rows),
+                      ", ".join("%s -> %s" % (str(entry.get("record")), str(entry.get("successor")))
+                                for entry in settled_rows)))
         _print("ceilings          %d of %d round(s) record the wait ceilings they were judged under; %d do not"
                % (len(recorded_limits), len(rounds), len(rounds) - len(recorded_limits)))
         history_rows: List[Dict[str, Any]] = []
@@ -1942,6 +1959,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # Round 105: one row can be named by two findings (each nominator offends on its own), and the same
                 # sentence twice reads as two separate defects. The row says it once; the header says how many.
                 if others and sentence not in mark:
+                    mark += sentence
+            # Round 112: the row a settled pair names says so, because the header's count is no substitute for
+            # finding out which rounds it was about. A reader who lands on the retired row sees who decided.
+            for entry in settled_rows:
+                pair = (str(entry.get("record") or ""), str(entry.get("successor") or ""))
+                if own_name not in pair:
+                    continue
+                other = pair[1] if own_name == pair[0] else pair[0]
+                sentence = "  [settled with %s by a recorded decision]" % other
+                if sentence not in mark:
                     mark += sentence
             # Round 107: the row is about what happened to this promise, not only about what is still true of it. A
             # refusal the ledger has since answered is history a reader searching for "why was this never measured"
@@ -2653,6 +2680,36 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps({"stream_path": change}, indent=2, sort_keys=False) + "\n")
+        return 0
+
+    if getattr(args, "settle_link", None):
+        # Round 112: a contradiction is two claims and no evidence, so no measurement settles it and the only
+        # repair commands edit other books. This records the decision instead, and then says what the decision
+        # did to the plan -- the same before/after every other repair writes (round 111).
+        pair = str(args.settle_link or "")
+        if "=" not in pair:
+            _print("--settle-link takes RECORD=SUCCESSOR, for example `--settle-link round-old.json=round-new.json`")
+            return 2
+        record, successor = pair.split("=", 1)
+        plan_before = repair_plan(root)
+        try:
+            decision = settle_link(root, record.strip(), successor.strip(), why=str(args.settle_why or ""))
+        except (OSError, ValueError) as error:
+            _print("cannot settle that link: %s" % error)
+            return 2
+        if not decision["changed"]:
+            _print("settled         %s -> %s was already recorded on %s; nothing to change"
+                   % (decision["record"], decision["successor"], decision["at"]))
+        else:
+            _print("settled         %s -> %s" % (decision["record"], decision["successor"]))
+            _print("                recorded in var/evolve/settlements.json: this is a decision, not a measurement,")
+            _print("                and `--audit` prints it apart from the links that agree by checking.")
+            if decision.get("why"):
+                _print("                because: %s" % decision["why"])
+            _print_repair_delta(record_repair(root, "settle-link", plan_before, repair_plan(root)))
+        if getattr(args, "json_out", None):
+            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps({"settled": decision}, indent=2, sort_keys=False) + "\n")
         return 0
 
     if getattr(args, "repair_links", False):
@@ -4622,6 +4679,11 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--set-stream-path", metavar="VERSION=FILE", default=None,
                         help="record that a version was measured on FILE, when its record names a file this "
                              "checkout does not have; writes stream_path_history")
+    evolve.add_argument("--settle-link", metavar="RECORD=SUCCESSOR", default=None,
+                        help="record that RECORD's measurement went into SUCCESSOR, so `--audit` stops charging "
+                             "that pair as a contradiction; a decision, not a measurement")
+    evolve.add_argument("--settle-why", metavar="TEXT", default="",
+                        help="with --settle-link: why the pair was decided, stored with the settlement")
     evolve.add_argument("--repair-links", action="store_true",
                         help="write the missing end of a legacy replacement link; plan only without --apply")
     evolve.add_argument("--history", action="store_true",

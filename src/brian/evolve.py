@@ -2549,7 +2549,8 @@ def retirement_overlap(root: Path, retired: str, successor: Optional[str]) -> Di
             "successor_readable": True}
 
 
-def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+def replacement_links(rounds: Sequence[Mapping[str, Any]],
+                      settled: Sequence[Mapping[str, Any]] = ()) -> List[Dict[str, Any]]:
     """Every replacement the ledger claims, checked against the other side of the link (round 81).
 
     A retirement writes one end of a relation (`retired.re_measured_as`) and the re-run queue writes the
@@ -2571,7 +2572,12 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
 
     `kind` is the charge, not the shape: `--strict` exits 2 on the first three (a build defect) and warns on
     `legacy`, exactly as round 33 split its two debts.
+
+    Round 112: a contradiction nobody can measure is settled by a person, so a `(record, successor)` pair the
+    operator settled is not a defect any more. The settlement is *not* consulted to pick a winner between two
+    contradicting books -- it silences that one claimant's claim, and the successor's own end is still printed.
     """
+    decided = {(str(item.get("record") or ""), str(item.get("successor") or "")) for item in settled}
     names = {str(record.get("round") or "") for record in rounds}
     by_name = {str(record.get("round") or ""): record for record in rounds}
     findings: List[Dict[str, Any]] = []
@@ -2589,23 +2595,26 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
             nominators.setdefault(claimed, []).append(str(record.get("round") or ""))
 
     for claimed in sorted(nominators):
-        claimants = nominators[claimed]
+        # Round 112: a settled pair is a decision, so that claimant no longer contradicts the successor.
+        claimants = [name for name in nominators[claimed] if (name, claimed) not in decided]
+        if not claimants:
+            continue
         if claimed not in names:
             findings.append({"round": claimants[0], "names": sorted({claimed} | set(claimants)),
-                             "kind": "dangling",
+                             "kind": "dangling", "claimant": claimants[0], "claimed": claimed,
                              "detail": "the retired round names a successor the ledger does not hold"})
             continue
         # The successor's own end of the link, if it wrote one.
         link = by_name[claimed].get("queue") or {}
         if not isinstance(link, Mapping) or not link:
             findings.append({"round": claimants[0], "names": sorted({claimed} | set(claimants)),
-                             "kind": "legacy",
+                             "kind": "legacy", "claimant": claimants[0], "claimed": claimed,
                              "detail": "the successor predates the queue's `paid_round` field"})
             continue
         named = str(link.get("paid_round") or "")
         if not named:
             findings.append({"round": claimants[0], "names": sorted({claimed} | set(claimants)),
-                             "kind": "legacy",
+                             "kind": "legacy", "claimant": claimants[0], "claimed": claimed,
                              "detail": "the successor was written by a command that did not record what "
                                        "it replaced"})
             continue
@@ -2614,7 +2623,7 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
             if claimant == named:
                 continue
             findings.append({"round": claimant, "names": sorted({claimant, claimed, named} - {""}),
-                             "kind": "mismatch",
+                             "kind": "mismatch", "claimant": claimant, "claimed": claimed,
                              "detail": "%s names %s as its successor, but %s says it replaced %s"
                                        % (claimant, claimed, claimed, named)})
 
@@ -2653,6 +2662,62 @@ IN_FORCE_GRACE_DAYS = 14.0
 # into the successor record, which makes both ends say the same thing -- so the mark has to say *how* they
 # came to agree, or the next audit will treat a copied statement as a second witness.
 BACKFILL_KEY = "backfilled"
+
+
+SETTLEMENTS = "settlements.json"
+SETTLEMENT_FORMAT = "brian.settled/1"
+
+
+def load_settlements(root: Path) -> List[Dict[str, Any]]:
+    """The link decisions somebody wrote down, newest last (round 112).
+
+    A mismatch is two claims and no evidence about which is right, so no measurement can settle it -- a person
+    has to. Until this round the only way to *stop* `--strict` charging it was to edit a record by hand, which
+    leaves no trace of who decided. A settlement is the decision itself, stored beside the ledger.
+    """
+    path = root / EVOLVE_DIR / SETTLEMENTS
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = stored.get("settlements") if isinstance(stored, Mapping) else None
+    return [dict(item) for item in rows or [] if isinstance(item, Mapping)]
+
+
+def settle_link(root: Path, record: str, successor: str, why: str = "",
+                now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Record that `record`'s measurement went into `successor`, and that a person decided it (round 112).
+
+    This writes no history: the retired record keeps its retirement, the successor keeps whatever `paid_round`
+    it recorded, and the audit keeps showing both ends on separate lines. What changes is that the *pair* is
+    no longer a contradiction -- it is a decision, dated and attributed, and a reader can see that agreement
+    came from somebody rather than from two witnesses (round 83's rule, applied to a contradiction).
+    """
+    name = str(record or "").strip()
+    to = str(successor or "").strip()
+    if not name or not to:
+        raise ValueError("a settlement needs both ends: --settle-link RECORD=SUCCESSOR")
+    if name == to:
+        raise ValueError("a record cannot be its own successor: %s" % name)
+    rounds = history(root, include_retired=True)
+    names = {str(item.get("round") or "") for item in rounds}
+    for side, label in ((name, "record"), (to, "successor")):
+        if side not in names:
+            raise ValueError("no recorded round named %s: %s" % (label, side))
+    store = {"format": SETTLEMENT_FORMAT, "settlements": load_settlements(root)}
+    existing = [item for item in store["settlements"]
+                if str(item.get("record") or "") == name and str(item.get("successor") or "") == to]
+    if existing:
+        return {"record": name, "successor": to, "at": str(existing[0].get("at") or ""), "changed": False}
+    # `evolve` owns no clock helper of its own: `promote._stamp_moment` is on the other side of the import
+    # cycle, so the moment is normalised here (round 112).
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    entry = {"record": name, "successor": to, "at": moment.isoformat(), "why": str(why or "")}
+    store["settlements"].append(entry)
+    path = root / EVOLVE_DIR / SETTLEMENTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(store, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    return dict(entry, changed=True)
 
 
 def legacy_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -3294,6 +3359,9 @@ class Audit:
     # by copying is not agreeing as two witnesses, and an audit that folds them in makes its own repair look
     # like corroboration.
     backfilled: List[str] = field(default_factory=list)
+    #: Round 112: link decisions a person recorded. Printed apart from the findings, because agreement that
+    #: came from a decision is not agreement that came from a check.
+    settled: List[Dict[str, Any]] = field(default_factory=list)
     # Round 85: versions the deployment states say are running whose producing record the books dispute or
     # that a repair copied. Round 84 refused to *stack* a promise there; once a version is applied that refusal
     # is not available, so the fact is reported here instead -- and charged when the two books contradict.
@@ -3316,7 +3384,7 @@ class Audit:
         is absent (boundary 184). One property, read by both call sites, is the only place that decides.
         """
         return bool(self.links or self.backfilled or self.in_force or self.in_force_cleared
-                    or self.in_force_stale)
+                    or self.in_force_stale or self.settled)
 
     @property
     def broken_links(self) -> int:
@@ -3444,7 +3512,8 @@ def audit(root: Path, rules: Optional[EvolveRules] = None,
             })
     return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials,
                  entries=entries, retired=retired,
-                 links=replacement_links(history(root, include_retired=True)),
+                 links=replacement_links(history(root, include_retired=True), load_settlements(root)),
+                 settled=load_settlements(root),
                  backfilled=backfilled_links(history(root, include_retired=True)),
                  in_force=[dict(item) for item in (in_force or [])],
                  in_force_cleared=[dict(item) for item in (in_force_cleared or [])],
@@ -3720,6 +3789,18 @@ def _link_lines(result: Audit) -> List[str]:
         lines.append("Counted separately on purpose: a copied end is not a second witness, and the repair is "
                      "not evidence")
         lines.append("that the replacement happened.")
+    if result.settled:
+        # Round 112: somebody decided these pairs. Printed as its own block: a settlement ends a charge, it does
+        # not produce evidence, and "every link agrees" must never quietly include a decision (boundary 174).
+        lines.append("%d replacement link(s) were settled by a recorded decision, not by agreement:"
+                     % len(result.settled))
+        for item in result.settled:
+            lines.append("  %-26s -> %-26s  (%s)"
+                         % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                            str(item.get("at") or "")))
+        lines.append("A settlement says who decided; it is not a second witness. `--audit` no longer charges "
+                     "these pairs,")
+        lines.append("and `brian evolve --history` still prints both ends where they disagree.")
     if result.in_force:
         # Round 85: round 84 could refuse to stack a promise, because a version that is not yet in force can
         # simply not be applied. A version that is already applied is running; the refusal is gone, and what

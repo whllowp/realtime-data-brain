@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .evolve import (BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
-                     rejection_provenance, withheld_due, withheld_evidence_age, withheld_records,
-                     withheld_staleness)
+                     load_settlements, rejection_provenance, withheld_due, withheld_evidence_age,
+                     withheld_records, withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
                       current_state, domain_slug,
                       load_promotions, never_tested_at_origin, repair_history, repair_plan, shape_note,
@@ -178,6 +178,9 @@ class Campaign:
     blocked_dossier: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     repair_plan: List[Dict[str, Any]] = field(default_factory=list)
     repair_history: Dict[str, Any] = field(default_factory=dict)
+    # Round 112: pairs a person decided, with the reason and the moment. A settlement ends a charge without
+    # producing evidence, so it travels with the books a reader checks (boundaries 251/252).
+    settlements: List[Dict[str, Any]] = field(default_factory=list)
     stale_refusals: List[Dict[str, Any]] = field(default_factory=list)
     # Round 107: per promise, how many of the recorded walks refused it, when the first and the last were, and whether
     # the refusal still stands. `blocked_versions` answers the last question only, so a promise refused twice and then
@@ -285,6 +288,7 @@ class Campaign:
             "blocked_dossier": {str(key): dict(value) for key, value in self.blocked_dossier.items()},
             "repair_plan": [dict(item) for item in self.repair_plan],
             "repair_history": {str(key): value for key, value in self.repair_history.items()},
+            "settlements": [dict(item) for item in self.settlements],
             "stale_refusals": [dict(item) for item in self.stale_refusals],
             "refusal_history": {str(key): dict(value) for key, value in self.refusal_history.items()},
             "in_force_untested": self.in_force_untested,
@@ -547,6 +551,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     # Round 110: which origin file to open first, computed from the same books the dossier counts.
     result.repair_plan = repair_plan(root)
     result.repair_history = repair_history(root)
+    result.settlements = load_settlements(root)
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
@@ -1149,6 +1154,13 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                 lines.append("links             then: %s -- %d walk(s), %d promise(s) held"
                              % (str(row.get("origin") or "(unnamed)"), int(row.get("walks_blocked") or 0),
                                 int(row.get("held") or 0)))
+    # Round 112: a decided pair is not an agreement, and the campaign page said nothing about it at all until the
+    # repair line arrived as a side effect. It is printed on its own, before the repair it may have paid for.
+    if result.settlements:
+        lines.append("links             %d pair(s) were settled by a recorded decision, not by agreement: %s"
+                     % (len(result.settlements),
+                        ", ".join("%s -> %s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
+                                  for item in result.settlements)))
     # Round 111: the ranking said which file to open first; this says whether last time's opening helped.
     last = (result.repair_history or {}).get("last") or {}
     if isinstance(last, Mapping) and last.get("at"):

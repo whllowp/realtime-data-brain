@@ -5990,6 +5990,64 @@ stream path     v020 already says data/smd/stream-moved.json; nothing to change
 **边界 250：一个只列诊断命令作为补救的计划，等于没有补救；机制落地后报告的第一件事往往是"给你的第一动作修不好它"，那不是失败，那是这一层账本该干的事。**
 
 
+### 3.118 矛盾只能由人裁定：一次结算是一条决定，不是第二个证人
+
+第 111 轮之后，`--campaign` 会按代价排出一个"先修哪本书"的顺序，而那个顺序里的 `remedy` 只有一个诊断命令
+（`brian evolve --audit`）。真跑一遍才发现原因：拒绝来自 `replacement_links` 的 `mismatch`——两条记录各自声称
+同一个后继（`retired.re_measured_as` 与 `queue.paid_round` 互相矛盾）。这不是测量能解决的问题：两条声称里没有
+第三条证据，只有人能说"这一条已经过时"。之前只能手工改记录文件，而手工改记录既不留决定者也不留理由，下一次
+`--audit` 会把改动当成原始事实读（正是第 83 轮 `backfilled` 那一类）。
+
+第 112 轮把"裁定"做成一条记录：
+
+```
+brian evolve --settle-link round-old.json=round-new.json --settle-why "队列付的是 round-other.json"
+settled         round-old.json -> round-new.json
+                recorded in var/evolve/settlements.json: this is a decision, not a measurement,
+                and `--audit` prints it apart from the links that agree by checking.
+                because: 队列付的是 round-other.json
+repair plan      1 file(s) off the table: data/smd/stream-real.json -- cost 1 -> 0
+```
+
+`var/evolve/settlements.json` 记 `{record, successor, at, why}`；重复执行是幂等的（`changed: false`，并说出原本的
+时间）。结算只做一件事：让**那一个声称者的声称**退出 `replacement_links` 的候选列表。它不参与"猜哪个对"——所以
+`round-new.json` 的 `queue.paid_round` 仍是 `round-other.json`，账本本身一个字也没改。`--audit` 把结算单独打印：
+
+```
+> 1 replacement link(s) were settled by a recorded decision, not by agreement:
+    round-old.json             -> round-new.json              (2026-11-20T01:37:35.544754+00:00)
+> A settlement says who decided; it is not a second witness. `--audit` no longer charges these pairs,
+```
+
+`--strict` 随之从 2 回到 0，`--verify` 也不再因这条断链而拒绝叠承诺（`provenance_block` 读同一份结算）。
+
+### 同一个账本，两页不能读成两件事
+
+第一次跑完演示就露了一个缺陷：`--audit` 说"已结算、不再收费"，`--history` 仍打印
+`2 replacement link(s) disagree with their other end` 并在行上标 `[broken link: …]`，`--strict` 却已经 0。两页对
+同一本账给出相反读法，正是这轮campaign一直在找的那类错（边界 244 的邻居）。修法不是让历史页也沉默——断链本身
+仍值得打印——而是让它用同一份结算读，并把"被裁定的"与"彼此吻合的"分开说：
+
+```
+links             every replacement link that no decision settled agrees with the other end it names
+links             1 pair(s) were settled by a recorded decision, not by agreement: round-old.json -> round-new.json
+ 1  …  [settled with round-new.json by a recorded decision]  [refused by the queue]
+```
+
+`--campaign --json-out` 也带上了 `settlements`（一个脚本问"这一对是不是人定的"不必自己开文件），页面则打印
+`1 pair(s) were settled by a recorded decision, not by agreement`，紧接着是第 111 轮的那行
+`the last repair (…, settle-link) took 1 file(s) off the table: … -- cost 1 -> 0`——第 111 轮永远只能打印
+"nothing left the table" 的那一格，到这里第一次有了内容。
+
+**边界 251：矛盾没有能结算它的测量，所以裁定必须作为"裁定"存下来**——带时间、带理由，而不是把记录改成"看起来
+本来就一致"。改记录会把一个人的判断变成原始证据。
+
+**边界 252：结算终止收费，但不产生证据**——已结算的一对必须与"彼此校验后吻合的链接"分开打印，否则
+"every link agrees" 会悄悄把一次人工决定算成一个证人。
+
+**边界 253：顺序里的 `remedy` 必须是能清掉它的命令**——`--audit` 只是诊断；一个 plan 若把诊断排成第一动作，
+它就在给没人做得到的工作排序。第 111 轮的记录之所以只能说"什么都没变"，是因为当时没有任何命令能改变它。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6434,8 +6492,6 @@ missing for the next level
     `repair_plan()`，把 `before` / `after` / `freed` / `cost_fell` 写进 `var/evolve/repairs.json`，
     `--campaign` 打"最后一个修复把哪个文件推出了表、代价从 X 降到 Y"，`--campaign --json-out` 给出
     `repair_history`。这一轮的第一个实测结论是反面的：两条修复命令改的都是"另一本书"，清不掉正在拒绝的那本，
-    所以每一次可执行的修复都只说"什么也没离开这张表"——账本拒绝只有诊断（`--audit`），没有可执行的修法。
-98. 给拒绝那本书一条修复命令：`--settle-link VERSION=SUCCESSOR`。它不改历史，只写一条"这一版的继承人按记录判定为
-    X"的决定（带 `settled.at` / `settled.by` / `settled.why`），让 `replacement_links` 读到两个端一致；
-    同时让 `repair_plan` 的 `remedy` 从 `brian evolve --audit` 变成这条命令，于是 `--repair-links` /
-    `--settle-link` 之后 `repair_history` 里终于会出现"freed"的那一种结果，而不只是"什么都没有离开"。
+    所以每一次可执行的修复都只说"什么也没离开这张表"——账本拒绝只有诊断（`--audit`），没有可执行的修法。98. **已完成（第 112 轮）**。`brian evolve --settle-link RECORD=SUCCESSOR [--settle-why TEXT]` 把"哪一条声称已经过时"记成一条决定：`var/evolve/settlements.json` 存 `{record, successor, at, why}`，重复执行幂等并说出原时间；`replacement_links(rounds, settled)` 只让被裁定的那一个声称退出候选，**不改账本**（`queue.paid_round` 原样保留）；`--audit` 把结算单独打印（"not by agreement…it is not a second witness"），`--strict` 因此从 2 回到 0；`provenance_block` 读同一份结算，`--verify` 不再拒绝叠承诺；`--history` 用同一份结算读（`every replacement link that no decision settled agrees…`、`[settled with … by a recorded decision]`），`--campaign` 页面与 `--json-out` 都带 `settlements`；`repair_plan` 的 `remedy` 改为 `brian evolve --settle-link …`，第 111 轮那句"changed nothing in the plan"第一次能打印出"1 file(s) off the table"。实测：`--audit --strict` 2 → 0，`repair plan      1 file(s) off the table: data/smd/stream-real.json -- cost 1 -> 0`，campaign JSON `settlements` 带理由与时间。测试 1617 → 1652（`tests/test_settle_link.py` 17，新）。
+
+99. 结算现在只终止"这一个声称者"的收费。下一步让 `--settle-link` 也能表达"谁的后继才是真的"（`--settle-link --prefer SUCCESSOR`），并在 `--campaign` 里把"被裁定的链接"按裁定者与时间分组，这样一个人一年后回头看，能知道自己当时在多少处做了决定、有没有重复裁定同一对。另外：`--settle-why` 目前是可选的，让它在裁定第一对时成为必填——一条没有理由的决定，正是三个月后没人敢复核的那种记录。

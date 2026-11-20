@@ -35,7 +35,10 @@ def test_the_plan_names_the_file_the_cost_and_the_remedy(tmp_path):
     assert row["walks"] == 2
     assert row["held"] == 1
     assert row["cost"] == 2
-    assert row["remedy"] == "brian evolve --audit"
+    # Round 112: the refusing book has a command, so the plan names the decision rather than the diagnostic --
+    # a plan whose remedy only diagnoses ranks work nobody can do (boundary 250).
+    assert row["pairs"] == [{"record": "round-old.json", "successor": "round-new.json"}]
+    assert row["remedy"] == "brian evolve --settle-link round-old.json=round-new.json"
 
 
 def test_a_file_that_holds_nothing_still_costs_the_walks_it_spent(tmp_path):
@@ -69,7 +72,7 @@ def test_the_plan_page_ends_with_the_repair_order(tmp_path, monkeypatch, capsys)
     assert cli.main(["evolve", "--verify", "--from-queue", "0"]) == 0
     printed = capsys.readouterr().out
     assert "repair order     %s costs 1 walk(s) of refusals and holds 1 promise(s) behind it" % FILE in printed
-    assert "(brian evolve --audit)" in printed
+    assert "(brian evolve --settle-link round-old.json=round-new.json)" in printed
 
 
 def test_a_clean_queue_page_does_not_print_a_repair_order(tmp_path, monkeypatch, capsys):

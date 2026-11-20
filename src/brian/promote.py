@@ -44,7 +44,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from .config import ENV_VARS, Settings
 from .deploy import overrides_from_state
 from .evolve import (EVIDENCE_MISSING, EVIDENCE_PRESENT, EVIDENCE_UNNAMED, LINK_DEFECTS, Candidate,
-                     EvolveRules, Measurement, backfilled_links, history, replacement_links)
+                     EvolveRules, Measurement, backfilled_links, history, load_settlements,
+                     replacement_links)
 
 GEOMETRY_TOLERANCE = 0.25
 
@@ -82,7 +83,7 @@ def provenance_block(root: Path, version: int) -> Optional[Tuple[str, str]]:
             produced.append(str(record.get("round") or ""))
     if not produced:
         return None
-    for item in replacement_links(rounds):
+    for item in replacement_links(rounds, load_settlements(root)):
         if item.get("kind") not in LINK_DEFECTS:
             continue
         participants = {str(item.get("round") or "")}
@@ -1834,7 +1835,9 @@ def blocked_versions(root: Path) -> Dict[int, Dict[str, Any]]:
                 # this round exists for, since `provenance_block` returning None is the strongest answer there is.
                 blocked[version] = {"version": version, "at": str(run.get("at") or ""), "code": code,
                                     "why": current or stored, "stored_why": stored,
-                                    "changed": bool(stored) and stored != current}
+                                    "changed": bool(stored) and stored != current,
+                                    # Round 112: the pairs a person could decide, so the plan can name the command.
+                                    "pairs": blocked_pairs(root, version)}
             else:
                 # A later attempt that did not hit the wall settles the question: the record is not blocked.
                 blocked[version] = {"version": version, "at": "", "code": code}
@@ -1970,6 +1973,37 @@ def _blocked_reason(root: Path, version: int) -> str:
 
 
 
+def blocked_pairs(root: Path, version: int) -> List[Dict[str, str]]:
+    """The link pairs that refuse this version, as the arguments of a command (round 112).
+
+    Round 111's record said every available repair changed nothing. The reason was that the refusing book is a
+    contradiction, and the only repair commands edit a legacy end or a record's path. This returns the pairs an
+    operator would have to decide, so `repair_plan` can name `--settle-link` instead of a diagnostic.
+    """
+    rounds = history(root, include_retired=True)
+    decided = load_settlements(root)
+    produced = set()
+    for record in rounds:
+        applied = record.get("applied")
+        if not isinstance(applied, list):
+            continue
+        for label in applied:
+            digits = "".join(character for character in str(label) if character.isdigit())
+            if digits and int(digits) == int(version):
+                produced.add(str(record.get("round") or ""))
+    pairs: List[Dict[str, str]] = []
+    for item in replacement_links(rounds, decided):
+        if item.get("kind") not in ("mismatch", "dangling"):
+            continue
+        claimant = str(item.get("claimant") or "")
+        claimed = str(item.get("claimed") or "")
+        if claimant and claimed and claimant in produced:
+            pair = {"record": claimant, "successor": claimed}
+            if pair not in pairs:
+                pairs.append(pair)
+    return pairs
+
+
 def queue_history(root: Path) -> Dict[str, Any]:
     """What the recorded walks add up to, for a page that should show a trend rather than a last line (round 104).
 
@@ -2096,7 +2130,7 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
     for version, row in blocked.items():
         origin = origins.get(version, "") or "(unnamed)"
         entry = dossier.setdefault(origin, {"origin": origin, "records": [], "attempts": 0, "last_at": "",
-                                            "reasons": []})
+                                            "reasons": [], "pairs": []})
         entry["records"].append(version)
         # A refusal recorded before round 104 has no attempt list, but it was refused at least once.
         tries = attempts.get(version, 1)
@@ -2109,6 +2143,9 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
         reason = str(row.get("why") or "")
         if reason and reason not in entry["reasons"]:
             entry["reasons"].append(reason)
+        for pair in row.get("pairs") or []:
+            if isinstance(pair, Mapping) and pair not in entry["pairs"]:
+                entry["pairs"].append(dict(pair))
     for entry in dossier.values():
         entry["records"] = sorted(entry["records"])
         entry["reasons"] = sorted(entry["reasons"])
@@ -2129,6 +2166,18 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
                                          for ordinal in history.get(version, {}).get("refused_walks") or []})
     return dict(sorted(dossier.items()))
 
+
+
+def _settle_command(pairs: Sequence[Mapping[str, Any]]) -> str:
+    """The command that would clear one refusal, or the diagnostic when nobody knows which pair to decide."""
+    for pair in pairs:
+        if not isinstance(pair, Mapping):
+            continue
+        record = str(pair.get("record") or "")
+        successor = str(pair.get("successor") or "")
+        if record and successor:
+            return "brian evolve --settle-link %s=%s" % (record, successor)
+    return "brian evolve --audit"
 
 
 def repair_plan(root: Path) -> List[Dict[str, Any]]:
@@ -2161,7 +2210,10 @@ def repair_plan(root: Path) -> List[Dict[str, Any]]:
             "held": held,
             # Named, not implied: the walks the queue already spent, times the promises still queued behind the file.
             "cost": walks_blocked * max(1, held),
-            "remedy": "brian evolve --audit",
+            # Round 112: the refusing book has a command now. `--audit` only diagnoses, and a plan whose remedy
+            # cannot clear anything is a plan that ranks work nobody can do (boundary 250).
+            "pairs": [dict(pair) for pair in entry.get("pairs") or [] if isinstance(pair, Mapping)],
+            "remedy": _settle_command(entry.get("pairs") or []),
         })
     plan.sort(key=lambda row: (-int(row["cost"]), -int(row["walks_blocked"]), str(row["origin"])))
     return plan
