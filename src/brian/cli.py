@@ -2113,6 +2113,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 sentence = "  [settled with %s %s]" % (other, explained_here)
                 if sentence not in mark:
                     mark += sentence
+                # Round 124: a decision re-taken repeatedly keeps going stale, and repeating a re-take is evidence
+                # about the decision (boundary 288). The row says how many times; the `re-takes` block above the
+                # list prints each one with what it covered.
+                retakes = len([note for note in entry.get("reaffirmations") or [] if isinstance(note, Mapping)])
+                # The decision settles the *record*; its successor was never re-taken, so the mark sits on the
+                # record's own row only (round 124's demo printed it on both ends, which read as six re-takes of
+                # a round that was never a decision).
+                if retakes >= 3 and own_name == pair[0]:
+                    sentence = "  [re-taken %d time(s): the decision keeps going stale]" % retakes
+                    if sentence not in mark:
+                        mark += sentence
             # Round 107: the row is about what happened to this promise, not only about what is still true of it. A
             # refusal the ledger has since answered is history a reader searching for "why was this never measured"
             # still needs, so the loop walks every refused promise and says which kind it is.

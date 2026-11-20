@@ -6667,6 +6667,48 @@ domains[0].settlements == {"moved": 3, "stale_never": 2, "stale_again": 1}
 
 **边界 287：数的东西必须是命令能付的东西。** 把无人可付的条目并进某一类工作里，读者会按那个数去排期，而排出来的活干不完——分类跟着可付集合走，跟着计划列表走就会多算。
 
+### 3.130 反复重开说明的是决定，不是账本
+
+`settlements.json` 一直存着两样东西：决定被作出的时刻 `at`，以及每一次重开的 `reaffirmations`（带时刻、理由、署名和「这次覆盖了哪几条主张」）。可页面上能说的只有「重开过」，说不出「重开过几次、按什么顺序、每次覆盖了什么」——于是一个被重开三次的决定和一个只重开过一次的决定，看起来是同一行字。
+
+这一轮把时间线做成一等事实：
+
+```
+$ brian evolve --campaign
+links             1 decision(s) have been re-taken at least 3 time(s), which usually means the decision is wrong and not that the books moved: round-old.json -> round-new.json (3 time(s), last 2026-11-17T03:49:46.164802+00:00)
+```
+
+```
+$ brian evolve --history
+ 1  ...  [retired, re-measured as round-new.json]  [settled with round-new.json by a recorded decision]  [re-taken 3 time(s): the decision keeps going stale]
+```
+
+载荷里是一份有序的时间线，第一条是决定本身（`kind: taken`），后面每条是重开（`kind: retaken`，带署名与覆盖面）：
+
+```json
+["taken:", "retaken:alice", "retaken:bob", "retaken:alice"]
+```
+
+第一版的 `by` 是空字符串——决定是 `_settled_without_reason` 造的，本来就没有署名。空着是对的：那是一份没人署名的决定，而第 113 轮的规则是「默认值不能让环境冒充人」。
+
+### 为什么阈值是三次
+
+一次重开的意思是「我读了今天的账本，这条决定还成立」。账本动一次是常事，所以一次、两次重开都还算「书动了」。第三次之后，最省力的解释换成了另一个：这条决定本身选错了——它认的那个后继不断有人来主张，或者它本来就该被换成一条新决定。
+
+所以页面的措辞是 `which usually means the decision is wrong and not that the books moved`，而且**点名**：点名的目的不是让读者再重开一次，而是让读者去看那条主张本身。
+
+### 一个被演示逼出来的修正
+
+第一版把 `[re-taken N time(s)]` 标在所有匹配 `own_name in pair` 的行上，于是**后继记录**那一行也写着重开次数——而后继从来没有被「重开」过，它是被裁定的那一边。演示里那两行读起来像「某个从没做过决定的轮次被重开了六次」。
+
+修法是这条标注只落在决定settle的那条记录自己的行上（`own_name == pair[0]`）。这和第 107 / 241 轮同一条规矩：一条事实标到它并不描述的行上，读者就分不清它说的是哪条记录。
+
+**边界 288：反复重开是「关于决定」的证据，不是「关于账本」的证据。** 第一次重开说明账本动了；第三次之后更省力的解释是决定选错了，页面该点名让读者去看那条决定，而不是再排一次重开。
+
+**边界 289：时间线要能读出顺序，并且区分「作出」与「重开」。** 同一对记录的两类条目含义不同（一个是原始决定，一个是复核），混成一条列表读者就无法判断哪条是第一次。
+
+**边界 290：只有次数而没有时刻，读者无法拿它跟账本核对。** 时间线是原始事实，次数是从它派生的；先有可核对的条目，才有可引用的数字。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7147,4 +7189,6 @@ missing for the next level
 
 109. ✓（第 123 轮，改写了原意）原本排的是「只重开 `last_retaken` 之后变脏的那些」，但 `reaffirm_plan` 里列出的每一条**已经**是「上次确认之后变脏」的那一类——再按时间过滤等于什么都不选。真正缺的是两件事：把 `never` / `again` 两种活分开付（`--settle-kind`，并在输出里说留下了什么），以及把两栏按域分进 `--campaign --json-out` 的行里。
 
-110. （下一轮）重开的记录该有一条自己的时间线：`settlements.json` 只存了最后一次确认，应该能回答「这条决定被重开过几次、每次覆盖了哪几条主张、哪次之后又脏的」，`--campaign` 按「从未读过 / 读过一次 / 反复重开」分三栏，并把反复重开的那几条点到名字——重开多次说明这条决定本身有问题，而不是书总在动。
+110. ✓（第 124 轮）重开的时间线：`retake_timeline` 给出每条决定的 `taken` / `retaken` 有序条目（含署名与每次覆盖的主张），`frequent_retakes` 点名被重开三次以上的决定，`settlement_summary` 多一栏 `repeated`，两条页面（`--campaign` 的 `links` 行与 `--history` 的行标注）都从这份时间线读。
+
+111. （下一轮）一条反复重开的决定，需要一条「不再重开」的出口：`--settle-drop RECORD=SUCCESSOR --settle-why TEXT` 把它标记为撤销（保留在 `settlements.json` 里，带撤销时刻与理由），页面把它从「欠着重开」里拿掉但仍列在「曾有过的决定」里，并在它撤销后仍被 `replacement_links` 当成候选时给出提示——撤销一条决定不能悄悄让一个矛盾消失。

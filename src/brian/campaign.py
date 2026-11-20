@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .evolve import (
-    moved_settlements, reaffirm_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
+    frequent_retakes, retake_timeline, moved_settlements, reaffirm_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
                      load_settlements, rejection_provenance, settlement_summary, withheld_due,
                      withheld_evidence_age,
                      withheld_records, withheld_staleness)
@@ -194,6 +194,10 @@ class Campaign:
     settlement_moved: List[Dict[str, Any]] = field(default_factory=list)
     # Round 120: the same debt grouped by the file the decision is about, with the command that re-takes each pair.
     reaffirm_plan: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 124: each decision's re-takes in order, and the ones that keep needing one. A count says a decision
+    # was re-taken; the timeline says what each re-take covered, which is what a reader checks it against.
+    retake_timeline: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    frequent_retakes: List[Dict[str, Any]] = field(default_factory=list)
     stale_refusals: List[Dict[str, Any]] = field(default_factory=list)
     # Round 107: per promise, how many of the recorded walks refused it, when the first and the last were, and whether
     # the refusal still stands. `blocked_versions` answers the last question only, so a promise refused twice and then
@@ -305,6 +309,9 @@ class Campaign:
             "settlement_summary": dict(self.settlement_summary),
             "settlements_moved": [dict(item) for item in self.settlement_moved],
             "reaffirm_plan": [dict(item) for item in self.reaffirm_plan],
+            "retake_timeline": {key: [dict(entry) for entry in value]
+                                for key, value in self.retake_timeline.items()},
+            "frequent_retakes": [dict(item) for item in self.frequent_retakes],
             "stale_refusals": [dict(item) for item in self.stale_refusals],
             "refusal_history": {str(key): dict(value) for key, value in self.refusal_history.items()},
             "in_force_untested": self.in_force_untested,
@@ -572,6 +579,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     # Round 118: the same reading the audit page prints, from the same two files.
     result.settlement_moved = moved_settlements(everything, result.settlements)
     result.reaffirm_plan = reaffirm_plan(everything, result.settlements, queue_runs(root)["runs"])
+    result.retake_timeline = retake_timeline(result.settlements)
+    result.frequent_retakes = frequent_retakes(result.settlements)
     # Round 117: attribute each decision to the stream of the round it settled, so the row a reader opens can
     # say "one decision here has no explanation". `load_settlements` names round files; the source lives on the
     # round record, retired ones included, because a decision can settle a round that has since been superseded.
@@ -1254,6 +1263,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                             ", ".join("%s -> %s" % (str(item.get("record") or ""),
                                                     str(item.get("successor") or ""))
                                       for item in result.settlement_moved)))
+        # Round 124: a re-take says "I read today's books and the decision still stands". Doing that three times
+        # says the decision keeps going stale -- evidence about the decision, not about the books (boundary 288).
+        # Naming the pairs is the whole point: the next action is a new decision, not a fourth re-take.
+        if result.frequent_retakes:
+            lines.append("links             %d decision(s) have been re-taken at least 3 time(s), which usually "
+                         "means the decision is wrong and not that the books moved: %s"
+                         % (len(result.frequent_retakes),
+                            ", ".join("%s -> %s (%d time(s), last %s)"
+                                      % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                                         int(item.get("retakes") or 0), str(item.get("last_at") or ""))
+                                      for item in result.frequent_retakes)))
         for item in result.reaffirm_plan[:1]:
             commands = [str(command) for command in item.get("commands") or [] if str(command)]
             walks = item.get("walks_since")

@@ -2693,11 +2693,61 @@ def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, An
                 continue
             author = str(note.get("by") or "").strip()
             explainers[author] = explainers.get(author, 0) + 1
-    return {"reaffirmed": sum(1 for item in pairs if item.get("reaffirmations")),
+    repeated = sum(1 for item in pairs if len([note for note in item.get("reaffirmations") or []
+                                                if isinstance(note, Mapping)]) >= 3)
+    return {"reaffirmed": sum(1 for item in pairs if item.get("reaffirmations")), "repeated": repeated,
             "pairs": len(pairs), "explained": explained, "explained_later": later,
             "unexplained": unexplained,
             "deciders": dict(sorted(deciders.items())), "explainers": dict(sorted(explainers.items())),
             "unattributed": sum(1 for item in pairs if not str(item.get("by") or "").strip())}
+
+def retake_timeline(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Each decision's re-takes in order, with what each one covered (round 124).
+
+    The store keeps `at` (when the decision was taken) plus `reaffirmations` (each re-take with the claims it
+    covered), so "re-taken three times" was countable and "re-taken in this order, covering these claims" was not.
+    A count without the moments cannot be checked against the books (boundary 290), and "taken" and "re-taken"
+    mean different things about the same pair (boundary 289), which is why every entry carries its kind.
+
+    Keyed by `"<record>=<successor>"` so the JSON payload is a plain mapping and the pages can look one pair up.
+    """
+    rows: Dict[str, List[Dict[str, Any]]] = {}
+    for item in settlements or []:
+        record = str(item.get("record") or "")
+        successor = str(item.get("successor") or "")
+        if not record or not successor:
+            continue
+        entries = [{"at": str(item.get("at") or ""), "why": str(item.get("why") or ""),
+                    "by": str(item.get("by") or ""), "kind": "taken"}]
+        for note in item.get("reaffirmations") or []:
+            if not isinstance(note, Mapping):
+                continue
+            entries.append({"at": str(note.get("at") or ""), "why": str(note.get("why") or ""),
+                            "by": str(note.get("by") or ""), "kind": "retaken",
+                            "claimants": [str(name) for name in note.get("claimants") or []]})
+        rows["%s=%s" % (record, successor)] = sorted(entries, key=lambda entry: entry["at"])
+    return rows
+
+
+def frequent_retakes(settlements: Sequence[Mapping[str, Any]],
+                     at_least: int = 3) -> List[Dict[str, Any]]:
+    """Decisions re-taken at least `at_least` times, most re-taken first (round 124).
+
+    A re-take says "I have read today's books and the decision still stands". Doing that repeatedly says the
+    decision keeps going stale, which is evidence about the decision, not about the books (boundary 288): the
+    answer is a new decision, and the page should name the pairs so a reader can look at the claim itself.
+    """
+    rows: List[Dict[str, Any]] = []
+    for key, entries in retake_timeline(settlements).items():
+        retaken = [entry for entry in entries if entry.get("kind") == "retaken"]
+        if len(retaken) < max(1, int(at_least)):
+            continue
+        last = retaken[-1]
+        rows.append({"pair": key, "record": key.split("=", 1)[0], "successor": key.split("=", 1)[-1],
+                     "retakes": len(retaken), "last_at": last.get("at", ""), "last_by": last.get("by", "")})
+    rows.sort(key=lambda row: (-row["retakes"], row["pair"]))
+    return rows
+
 
 def unexplained_decisions(settlements: Sequence[Mapping[str, Any]],
                           now: Optional[datetime] = None) -> List[Dict[str, Any]]:
