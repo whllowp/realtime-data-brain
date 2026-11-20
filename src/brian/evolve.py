@@ -2610,7 +2610,14 @@ def inherit_claim(record: Dict[str, Any], target_file: str,
              "inherited_from": str(record.get("round") or ""),
              "claim_origin": origin,
              "claim_since": since,
-             "claim_hops": hops}]
+             "claim_hops": hops,
+             # Round 157: if the moment this entry inherits was itself completed by a repair, the successor
+             # inherits the repair too -- an age a repair produced never becomes a record that carried it
+             # (boundary 379).
+             "claim_since_source": ("backfilled"
+                                    if entry.get("backfilled")
+                                    or str(entry.get("claim_since_source") or "") == "backfilled"
+                                    else str(entry.get("claim_since_source") or "derived"))}]
 
 
 def claim_note(record: Dict[str, Any]) -> Optional[str]:
@@ -2654,7 +2661,9 @@ def claimed_rounds(rounds: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
                      "at": str(last.get("at") or ""),
                      "origin": str(last.get("claim_origin") or last.get("inherited_from") or ""),
                      "since": str(last.get("claim_since") or last.get("at") or ""),
-                     "hops": int(last.get("claim_hops") or 0)})
+                     "hops": int(last.get("claim_hops") or 0),
+                     "backfilled": bool(last.get("backfilled")) or str(
+                         last.get("claim_since_source") or "") == "backfilled"})
     return rows
 
 

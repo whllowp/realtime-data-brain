@@ -1037,8 +1037,10 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         aged = [row for row in claims if int(row.get("hops") or 0)]
         if aged:
             lines.append("claims            %s" % "; ".join(
-                "the one on %s was inherited %d time(s) and was first recorded on %s at %s"
-                % (row["round"], int(row["hops"]), row.get("origin") or "?", row.get("since") or "?")
+                "the one on %s was inherited %d time(s) and was first recorded on %s at %s%s"
+                % (row["round"], int(row["hops"]), row.get("origin") or "?", row.get("since") or "?",
+                   " (that date was completed by a repair, not carried by the record)"
+                   if row.get("backfilled") else "")
                 for row in aged))
     if result.broken_links:
         # Round 82: round 81 counted these so `--strict` could exit 2, and printed them only on `--audit`.

@@ -8540,6 +8540,51 @@ nothing to backfill: every claim chain already carries its origin, its first mom
 **边界 378**：一个补写无法推导的日期只能写"未知"，不能填一个看起来合理的替代值——provenance 字段里的错日期
 不会显得可疑，它会被当成证据。
 
+### 3.163 修补出来的年龄，不能变成"本来就带着的年龄"
+
+第 156 轮补完了旧记录的链，并在每条被补的条目上写了 `backfilled: true`。但页面照旧把那个日期当成"记录一直带着
+的日期"打出来——修补成功的那一刻，修补就成了唯一记录（第 83/147 轮说过同一件事：修补产生的"一致"从来不是第二个
+证人）。
+
+这一轮让**修补本身跟着事实走**：继承时，如果被继承的那个日期是补出来的，后继条目就继承"它是补出来的"这件事，
+而不是只继承日期。新键 `claim_since_source`（`derived` / `unknown` / `backfilled`），页面对 `backfilled` 的那一行
+加一句括号说明。
+
+真跑（`var/demo157`，第 156 轮补过的 demo 再次重测）：
+
+```
+---- re-running round-20261120T090613Z.json on data/smd/stream-one.json
+recorded round var\evolve\round-20261120T092858Z.json
+retired round-20261120T090613Z.json (re-measured as round-20261120T092858Z.json)
+```
+
+新条目：
+
+```
+{"at": "2026-11-20T09:28:58.642337+00:00", "inherited_from": "round-20261120T090613Z.json",
+ "claim_origin": "round-out-of-reach.json", "claim_since": "2026-11-20T08:38:50.882396+00:00",
+ "claim_hops": 2, "claim_since_source": "backfilled"}
+```
+
+页面：
+
+```
+claims   the one on round-20261120T092858Z.json was inherited 2 time(s) and was first recorded on
+         round-out-of-reach.json at 2026-11-20T08:38:50.882396+00:00 (that date was completed by a repair,
+         not carried by the record)
+```
+
+注意括号里的那句话跨了两跳还在：`round-out-of-reach.json` 那次记录是真的，`08:38:50` 也是真的，但**它是被
+`--backfill-claims` 从被指记录里推导出来写回去的**，不是那条记录当年自己带着的。一次修补的证据，会跟着它修出来的
+那个事实到处走——包括走到两跳之后。
+
+**"未知"也要能传。** `unknown` 的日期同样会被继承（`claim_since: ""` 加 `source: "unknown"`），页面显示成
+`at ?`：一条链上只要有一次无法确定，后面所有继承都带着这个不确定，而不是靠某次重测的 `at` 把它"填满"。
+
+**边界 379**：修补产生的事实必须把"它是修补出来的"带给它的每一个后继；只在被修的那条记录上盖一个章，
+下一跳就会把修补读成原始记录。
+**边界 380**：一个推导出来的数字，页面必须同时说出它有多少是推导的；否则"完整"和"被补完"在页面上无法区分。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9142,5 +9187,8 @@ missing for the next level
 142. **已完成（见 §3.162）** `--backfill-claims` 给第 154 轮写出的继承记录补上 `claim_origin` /
      `claim_since` / `claim_hops`：能顺着 `inherited_from` 推导出断言时刻的就推导，走不到就写
      `claim_since_source: "unknown"` 而不是拿重测时刻顶替；每条被补的条目自报 `backfilled`。
-143. 让页面的年龄句标出"这段年龄是补写出来的"：`--campaign` 的 `claims` 目前只说被继承了几次、最初记在哪一轮，
-     不区分"这条链一直完整"与"这条链是补写的"，读者会把修补读成原始记录（第 147 轮 `boundary 355` 的同形）。
+143. **已完成（见 §3.163）** 修补出来的年龄带上它的来历：`claim_since_source`（`derived` / `unknown` /
+     `backfilled`）随继承一起传；`claimed_rounds` 的行与 `--campaign` 的年龄句都会为 `backfilled` 的那一条加一句
+     "这个日期是修补补出来的，不是记录自己带着的"，两跳之后仍然在。
+144. 让 `--history` 的行也标出"这一轮站在一条人的断言上"（含继承了几次）：现在只有 `--campaign` 与重跑时说，
+     而读者排错时最先打开的是历史页。

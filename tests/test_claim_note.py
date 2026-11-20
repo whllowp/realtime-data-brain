@@ -70,9 +70,11 @@ def test_the_page_lists_the_rounds_that_rest_on_a_claim():
     rows = claimed_rounds([CLAIMED, {"round": "round-clean.json"}])
 
     # Round 155 added the chain columns: a claim recorded by hand is its own origin, with no inheritance yet.
+    # Round 157 added whether the age came from a repair; a hand-recorded claim's date never did.
     assert rows == [{"round": "round-out-of-reach.json", "stream_path": "data/smd/stream-one.json",
                      "geometry": "disagrees", "at": "2026-11-20T08:38:50+00:00",
-                     "origin": "", "since": "2026-11-20T08:38:50+00:00", "hops": 0}]
+                     "origin": "", "since": "2026-11-20T08:38:50+00:00", "hops": 0,
+                     "backfilled": False}]
 
 
 def test_a_round_whose_claim_agrees_is_not_counted():
