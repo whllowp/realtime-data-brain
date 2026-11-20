@@ -46,6 +46,7 @@ from .evolve import (
     claim_note,
     inherit_claim,
     claim_round_file,
+    backfill_claims,
     claimed_rounds,
     debt_history,
     format_audit,
@@ -479,6 +480,7 @@ BATCH_PREVIEWS: Tuple[Tuple[str, str], ...] = (
     ("--settle-drop-file", "settle_drop_file"),
     ("--settle-reanchor-file", "settle_reanchor_file"),
     ("--claim-round-file", "claim_round_file"),
+    ("--backfill-claims", "backfill_claims"),
     ("--backfill-walks", "backfill_walks"),
 )
 
@@ -2827,6 +2829,37 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 args.json_out, {"claimed": claims, "claim_refused": refused}):
             return 2
         return 2 if refused else 0
+
+    if getattr(args, "backfill_claims", False):
+        # Round 156 (item 142): round 155 carries the chain forward, but the records round 154 wrote have only
+        # `inherited_from` and a refreshed `at` -- so their chain starts counting at 155 and `claim_since`
+        # would fall back to the re-measurement's moment, which is the confusion the field exists to prevent.
+        dry = bool(getattr(args, "dry_run", False))
+        try:
+            rows = backfill_claims(root, dry_run=dry)
+        except OSError as error:
+            _print("cannot read the records: %s" % error)
+            return 2
+        for row in rows:
+            if dry:
+                _print("would fill       %s  %d entr(y/ies): %d dated from the record they point at, %d unknown"
+                       % (row["round"], row["entries"], row["derived"], row["unknown"]))
+            else:
+                _print("filled           %s  %d entr(y/ies): %d dated from the record they point at, %d unknown"
+                       % (row["round"], row["entries"], row["derived"], row["unknown"]))
+        if dry:
+            _print("nothing was written; drop --dry-run to complete the chain (boundary 304).")
+        elif rows:
+            _print("filled           %d record(s); each entry says backfilled, and a date this command could not "
+                   "derive stays unknown rather than repeating the re-measurement's moment (boundary 378)."
+                   % len(rows))
+        else:
+            _print("nothing to backfill: every claim chain already carries its origin, its first moment and "
+                   "its hop count")
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"filled": rows, "dry_run": dry}):
+            return 2
+        return 0
 
     if args.rerun_unrecorded:
         # Round 52: round 51 turned "which file did this round measure?" into a printed answer; this turns the
@@ -6259,6 +6292,10 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--claim-round-file", dest="claim_round_file", nargs="+", metavar="ROUND=FILE",
                         help="record the file a round measured, for a round whose record names none; the file "
                              "must agree with the geometry the round recorded unless --force-claim")
+    evolve.add_argument("--backfill-claims", dest="backfill_claims", action="store_true",
+                        help="complete the claim chain (claim_origin / claim_since / claim_hops) on the records "
+                             "written before it existed; every entry it touches says backfilled, and a date it "
+                             "cannot derive says unknown instead of guessing")
     evolve.add_argument("--force-claim", dest="force_claim", action="store_true",
                         help="with --claim-round-file: record a file the round's geometry does not point at")
     evolve.add_argument("--claim-why", dest="claim_why", default="",

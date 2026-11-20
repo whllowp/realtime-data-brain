@@ -8489,6 +8489,57 @@ claims            the one on round-20261120T091408Z.json was inherited 2 time(s)
 **边界 376**：一条链需要两个指针——上一跳（"这条重测了什么"）与原点（"这句话最早是谁、在哪一轮说的"）；
 一个字段同时承担两种语义，迟早会被后来的代码按其中一种解读。
 
+### 3.162 补写一条更老的断言：能推导就推导，推不出就写"未知"
+
+第 155 轮让断言带着 `claim_origin` / `claim_since` / `claim_hops` 一路传下去。但**第 154 轮写出的记录没有这三个
+字段**，它们只有 `inherited_from` 和一个被刷新过的 `at`。于是那些记录的链从第 155 轮才开始数，而 `claim_since`
+会退回到**那次重测**的时刻——正是这个字段存在的目的所要防的那种混淆：一条更老的断言，拿到一个更新的日期。
+
+这一轮给它们补上，并且分两步：**能推导的推导，推不出的写"未知"**。
+
+推导规则很简单：条目说它 `inherited_from` 某条轮记录，就去那条记录里找这条断言的时刻（它自己的 `claim_since`，
+或者它的 `inherited_from`，一路往回走）；没有 `inherited_from`（断言就是那一轮自己记的）就用它自己的 `at`。
+走不到（记录被裁掉、改名、损坏）时写 `claim_since: ""` 加 `claim_since_source: "unknown"`，**不回填一个像样的
+替代值**。
+
+真跑（`var/demo156`，就是 154 轮那个 demo，记录还没被 155 修过）：
+
+```
+would fill       round-20261120T090613Z.json  1 entr(y/ies): 1 dated from the record they point at, 0 unknown
+would fill       round-out-of-reach.json  1 entr(y/ies): 1 dated from the record they point at, 0 unknown
+nothing was written; drop --dry-run to complete the chain (boundary 304).
+```
+
+补完之后页面：
+
+```
+claims            1 round(s) name a file a person claimed, and the geometry never confirmed it:
+                  round-20261120T090613Z.json data/smd/stream-one.json (disagrees)
+claims            the one on round-20261120T090613Z.json was inherited 1 time(s) and was first recorded on
+                  round-out-of-reach.json at 2026-11-20T08:38:50.882396+00:00
+```
+
+注意那个 `08:38:50`：**它是从被指的那条记录里推导出来的**，不是这次重测的 `09:06:13`。补写之前，这一行要么
+干脆不出现（`hops = 0`），要么会把重测时刻当成断言年龄。
+
+再跑一次：
+
+```
+nothing to backfill: every claim chain already carries its origin, its first moment and its hop count
+```
+
+**真实账本上是"无事可做"**：这台机器上还没有任何一条记录带过 `stream_path_history`（那些断言都只活在 demo 与
+测试里）。所以这一轮的能力由 fixture 与 demo 证明，不由实账本证明——这一点必须说出来，否则"补完了"会被读成
+"实账本被清理过"。
+
+**每一条被补的条目自己说 `backfilled: true`。** 一次修补产生的"完整"，不能读起来像是这条链一直就是完整的
+（第 147 轮的 `--backfill-walks`、第 83 轮的同一条规矩）。
+
+**边界 377**：后加的字段会把历史读成"缺省值"；补写时必须把**补过什么**记在补过的位置，否则修复成功的那一刻，
+"这条链本来就是这样"就成了唯一的记录。
+**边界 378**：一个补写无法推导的日期只能写"未知"，不能填一个看起来合理的替代值——provenance 字段里的错日期
+不会显得可疑，它会被当成证据。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9088,5 +9139,8 @@ missing for the next level
 141. **已完成（见 §3.161）** 被继承的断言带上了自己的年龄：`claim_origin`（最初记下它的轮）、
      `claim_since`（那一刻，不随重测刷新）、`claim_hops`（继承了几次）；`claimed_rounds` 与 `--campaign` 说得出
      "这条断言被继承过几次、最初记在哪一轮"。
-142. 给第 154 轮写出的继承记录补上 `claim_origin` / `claim_since` / `claim_hops`（自报 `backfilled`，与第 147 轮
-     同形）：现在是"旧记录的链从 155 轮才开始数"，`claim_since` 会误取那次重测的时刻。
+142. **已完成（见 §3.162）** `--backfill-claims` 给第 154 轮写出的继承记录补上 `claim_origin` /
+     `claim_since` / `claim_hops`：能顺着 `inherited_from` 推导出断言时刻的就推导，走不到就写
+     `claim_since_source: "unknown"` 而不是拿重测时刻顶替；每条被补的条目自报 `backfilled`。
+143. 让页面的年龄句标出"这段年龄是补写出来的"：`--campaign` 的 `claims` 目前只说被继承了几次、最初记在哪一轮，
+     不区分"这条链一直完整"与"这条链是补写的"，读者会把修补读成原始记录（第 147 轮 `boundary 355` 的同形）。

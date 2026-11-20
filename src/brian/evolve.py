@@ -2482,6 +2482,86 @@ def _rewrite_ledger_line(root: Path, name: str, changes: Dict[str, Any]) -> bool
     return True
 
 
+def _first_moment(root: Path, name: str, seen: Optional[List[str]] = None) -> Optional[str]:
+    """The moment a claim was first recorded, found by walking `inherited_from` back through the records.
+
+    Round 156: a record written before round 155 keeps only `inherited_from`, so its own `at` is the moment it
+    was re-measured, not the moment the assertion appeared. Returning None (rather than that `at`) is the
+    whole point: a backfill that guesses here produces a date that looks derived and is not (boundary 378).
+    """
+    walked = list(seen or [])
+    if not name or name in walked:
+        return None
+    walked.append(name)
+    path = root / EVOLVE_DIR / name
+    if not path.exists():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    entries = [item for item in (record.get("stream_path_history") or []) if isinstance(item, dict)]
+    if not entries:
+        return None
+    last = entries[-1]
+    if last.get("claim_since"):
+        return str(last.get("claim_since"))
+    if last.get("claim_origin") and last.get("claim_origin") != name:
+        return _first_moment(root, str(last.get("claim_origin")), walked)
+    if last.get("inherited_from"):
+        return _first_moment(root, str(last.get("inherited_from")), walked)
+    return str(last.get("at") or "") or None
+
+
+def backfill_claims(root: Path, *, dry_run: bool = False,
+                    now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Complete the chain fields on the records written before round 155 (round 156).
+
+    Only the entries that lack `claim_hops` are touched, so a second run finds nothing. A derived date is
+    marked `claim_since_source: "derived"`; an entry whose origin cannot be reached says `"unknown"` and keeps
+    `claim_since` empty rather than repeating its own `at` -- a wrong date in a provenance field is worse than
+    a missing one, because it reads as evidence.
+    """
+    rows: List[Dict[str, Any]] = []
+    directory = root / EVOLVE_DIR
+    for path in sorted(directory.glob("round-*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        entries = [item for item in (record.get("stream_path_history") or []) if isinstance(item, dict)]
+        if not entries:
+            continue
+        touched = 0
+        derived = 0
+        unknown = 0
+        for entry in entries:
+            if entry.get("claim_hops") or entry.get("claim_hops") == 0:
+                continue
+            origin = str(entry.get("claim_origin") or entry.get("inherited_from") or "")
+            if not origin:
+                origin = path.stem
+            moment = _first_moment(root, origin) if entry.get("inherited_from") else str(entry.get("at") or "")
+            entry["claim_origin"] = origin
+            entry["claim_hops"] = 1 if entry.get("inherited_from") else 0
+            entry["claim_since"] = moment or ""
+            entry["claim_since_source"] = "derived" if moment else "unknown"
+            entry["backfilled"] = True
+            touched += 1
+            if moment:
+                derived += 1
+            else:
+                unknown += 1
+        if not touched:
+            continue
+        rows.append({"round": path.name, "entries": touched, "derived": derived, "unknown": unknown})
+        if dry_run:
+            continue
+        path.write_bytes(json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8"))
+        _rewrite_ledger_line(root, path.name, {"stream_path_history": record.get("stream_path_history")})
+    return rows
+
+
 def unconfirmed_claim(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The claim behind the file this record now names, when the geometry never confirmed it (round 154).
 

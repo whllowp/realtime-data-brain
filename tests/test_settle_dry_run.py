@@ -81,8 +81,9 @@ def test_the_dry_run_flag_must_preview_something(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert cli.main(["evolve", "--audit", "--dry-run"]) == 2
     printed = " ".join(capsys.readouterr().out.split())
-    assert ("--dry-run previews --settle-reaffirm-file, --settle-restore-file, --settle-drop-file, "
-            "--settle-reanchor-file, --claim-round-file or --backfill-walks" in printed)
+    # Round 156: the sentence is read from the table, because a hand-typed copy is the drift this whole
+    # round exists to stop (rounds 135/147/152 each updated one of the two copies).
+    assert ("--dry-run previews %s" % cli.previews_sentence()) in printed
 
 
 def test_a_dry_run_does_not_touch_the_json_payload(tmp_path, monkeypatch):

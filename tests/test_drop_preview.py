@@ -101,4 +101,5 @@ def test_the_dry_run_guard_names_the_third_family(tmp_path, monkeypatch, capsys)
     monkeypatch.chdir(root)
     assert cli.main(["evolve", "--audit", "--dry-run"]) == 2
     printed = " ".join(capsys.readouterr().out.split())
-    assert "--settle-drop-file, --settle-reanchor-file, --claim-round-file or --backfill-walks" in printed
+    # Round 156: read from the table, not from a copy of it (rounds 135/147/152 each updated one copy).
+    assert cli.previews_sentence() in printed

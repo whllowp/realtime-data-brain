@@ -63,6 +63,7 @@ def test_the_table_holds_every_file_level_command_the_parser_offers() -> None:
     # only what it happens to cover stops covering the next member (round 152 added the second, boundary 357).
     offered.add("--backfill-walks")
     offered.add("--claim-round-file")
+    offered.add("--backfill-claims")
     assert {flag for flag, _attribute in cli.BATCH_PREVIEWS} == offered
 
 
