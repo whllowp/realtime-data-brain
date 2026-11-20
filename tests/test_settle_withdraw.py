@@ -189,7 +189,10 @@ def test_the_cli_withdraws_and_says_whether_a_contradiction_waits(tmp_path, monk
     assert "the contradiction it settled is back" in printed
 
     payload = json.loads((tmp_path / "drop.json").read_text(encoding="utf-8"))
-    assert payload["withdrawn"]["record"] == RETIRED and payload["withdrawn"]["changed"] is True
+    # Round 134: one drop or three, the payload has one shape -- a list (boundary 278's rule, applied here).
+    assert [item["record"] for item in payload["withdrawn"]] == [RETIRED]
+    assert payload["withdrawn"][0]["changed"] is True
+    assert payload["drop_refused"] == 0
 
 
 def test_the_cli_refuses_a_withdrawal_without_a_reason(tmp_path, monkeypatch, capsys):

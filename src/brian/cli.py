@@ -2055,6 +2055,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # pages disagreeing about one ledger is the defect this campaign keeps finding (boundary 252).
         settled_rows = load_settlements(root)
         link_rows = replacement_links(rounds, settled_rows)
+        # Round 134: the row that carries a settled decision also says when no re-take can pay it. The plan is the
+        # one computation that knows (round 133), so the page asks it rather than re-deriving the rule (boundaries
+        # 264/308) -- and the reader sees it without opening `--campaign` first (boundary 315).
+        _unpayable_rows: Dict[Tuple[str, str], str] = {
+            (str(item.get("record") or ""), str(item.get("successor") or "")): str(item.get("names") or "(nothing)")
+            for row in reaffirm_plan(rounds, settled_rows)
+            for item in (row.get("unpayable_pairs") or [])
+        }
         # Round 83: an end written by a repair agrees with the other side by construction, so it is counted
         # apart from the links the queue wrote. "Every link agrees" is true of both, and means different
         # things; a page that prints only the first sentence lets a copied statement read as a witness.
@@ -2311,6 +2319,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # a round that was never a decision).
                 if retakes >= 3 and own_name == pair[0]:
                     sentence = "  [re-taken %d time(s): the decision keeps going stale]" % retakes
+                    if sentence not in mark:
+                        mark += sentence
+                # Round 134: a pair no re-take can pay says so on its own row, with the successor the record names
+                # now -- the `--campaign` line already names it, and a reader who lands here should not have to
+                # guess why the re-take command will refuse this decision.
+                names_now = _unpayable_rows.get(pair)
+                if names_now and own_name == pair[0]:
+                    sentence = "  [cannot be re-taken: the record names %s]" % names_now
                     if sentence not in mark:
                         mark += sentence
             # Round 107: the row is about what happened to this promise, not only about what is still true of it. A
@@ -3199,50 +3215,92 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         inner.settle_reaffirm_skipped = skipped
         return cmd_evolve(inner, settings)
 
+    if getattr(args, "settle_drop_file", None):
+        # Round 134: the sibling of `--settle-restore-file`. Round 133 names the pairs no re-take can pay and spells
+        # one `--settle-drop` per pair; a file owing three of them asked the same reason three times, which is how a
+        # reason comes to be retyped differently (boundary 315). The pairs come from the same plan `--campaign`
+        # prints (boundary 283) and the walk is the single-pair branch below (boundary 284).
+        target = str(args.settle_drop_file or "").strip()
+        if not target:
+            _print("--settle-drop-file takes the stream file whose decisions cannot be re-taken")
+            return 2
+        plan_rows = reaffirm_plan(history(root, include_retired=True), load_settlements(root))
+        match = [row for row in plan_rows if same_stream_path(str(row.get("origin") or ""), target)]
+        pairs = ["%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
+                 for item in (match[0].get("unpayable_pairs") or [])] if match else []
+        if not pairs:
+            _print("no decision recorded against %s cannot be re-taken: `brian evolve --campaign` lists the files "
+                   "that hold one" % target)
+            return 2
+        _print("dropping       %d decision(s) on %s in one command" % (len(pairs), match[0].get("origin") or target))
+        inner = argparse.Namespace(**vars(args))
+        inner.settle_drop_file = None
+        inner.settle_drop = pairs
+        inner.json_out = None
+        return cmd_evolve(inner, settings)
+
     if getattr(args, "settle_drop", None):
         # Round 125: round 124 names the decisions that keep needing a re-take, and the honest answer to one of them
         # is often "this decision is wrong". Until now the only ways out were another re-take or editing the store by
         # hand, which leaves no trace of who decided. A withdrawal keeps the decision and the reason it stopped
         # standing -- and it does not make the contradiction disappear, because `replacement_links` reads only the
         # decisions still standing, so the pair is charged again (boundary 292).
-        raw = str(args.settle_drop or "").strip()
-        if not raw or "=" not in raw:
+        # Round 134: several pairs in one command, so one reason covers the batch and a refused pair does not stop
+        # the rest (boundary 303) -- the JSON payload is a list for the same reason it is a list everywhere else.
+        raw_drop = getattr(args, "settle_drop", None)
+        wanted = [str(item).strip() for item in (raw_drop if isinstance(raw_drop, (list, tuple)) else [raw_drop])
+                  if str(item).strip()]
+        if not wanted:
             _print("--settle-drop takes RECORD=SUCCESSOR, for example "
                    "`--settle-drop round-old.json=round-new.json`")
             return 2
-        record, successor = raw.split("=", 1)
-        record, successor = record.strip(), successor.strip()
-        plan_before = repair_plan(root)
-        try:
-            decision = withdraw_settlement(root, record, successor, why=str(args.settle_why or ""),
-                                           by=str(getattr(args, "settle_by", "") or ""))
-        except (OSError, ValueError) as error:
-            _print("cannot withdraw that decision: %s" % error)
+        bad = next((item for item in wanted if "=" not in item), "")
+        if bad:
+            _print("--settle-drop takes RECORD=SUCCESSOR, and %s has no = in it" % bad)
             return 2
-        if not decision["changed"]:
-            _print("withdrawn      %s -> %s was already withdrawn on %s; nothing to change"
-                   % (record, successor, decision["at"]))
-            return 0
-        _print("withdrawn      %s -> %s" % (record, successor))
-        _print("                the decision stays in the store, with this withdrawal on %s" % decision["at"])
-        _print("                because: %s" % str(args.settle_why or "").strip())
-        _print("                withdrawn by: %s"
-               % (str(getattr(args, "settle_by", "") or "").strip()
-                  or "(not recorded -- pass --settle-by NAME)"))
-        waiting = [item for item in replacement_links(history(root, include_retired=True),
-                                                      load_settlements(root))
-                   if record in {str(item.get("claimant") or ""), str(item.get("round") or "")}]
-        if waiting:
-            _print("                the contradiction it settled is back: `--audit` charges it again until a new "
-                   "decision is taken (boundary 292)")
-        else:
-            _print("                no contradiction is waiting on that pair: the decision simply stops applying")
+        plan_before = repair_plan(root)
+        done: List[Dict[str, Any]] = []
+        refused = 0
+        skipped = 0
+        for item in wanted:
+            record, successor = (part.strip() for part in item.split("=", 1))
+            try:
+                decision = withdraw_settlement(root, record, successor, why=str(args.settle_why or ""),
+                                               by=str(getattr(args, "settle_by", "") or ""))
+            except (OSError, ValueError) as error:
+                _print("cannot withdraw that decision: %s" % error)
+                refused += 1
+                continue
+            if not decision["changed"]:
+                _print("withdrawn      %s -> %s was already withdrawn on %s; nothing to change"
+                       % (record, successor, decision["at"]))
+                skipped += 1
+                continue
+            done.append(decision)
+            _print("withdrawn      %s -> %s" % (record, successor))
+            _print("                the decision stays in the store, with this withdrawal on %s" % decision["at"])
+            _print("                because: %s" % str(args.settle_why or "").strip())
+            _print("                withdrawn by: %s"
+                   % (str(getattr(args, "settle_by", "") or "").strip()
+                      or "(not recorded -- pass --settle-by NAME)"))
+            waiting = [row for row in replacement_links(history(root, include_retired=True),
+                                                        load_settlements(root))
+                       if record in {str(row.get("claimant") or ""), str(row.get("round") or "")}]
+            if waiting:
+                _print("                the contradiction it settled is back: `--audit` charges it again until a new "
+                       "decision is taken (boundary 292)")
+            else:
+                _print("                no contradiction is waiting on that pair: the decision simply stops applying")
+        if len(wanted) > 1:
+            _print("withdrawn      %d of %d decision(s), %d already withdrawn, %d refused"
+                   % (len(done), len(wanted), skipped, refused))
         _print_repair_delta(record_repair(root, "settle-drop", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump({"withdrawn": decision}, handle, indent=2, sort_keys=False)
+                json.dump({"withdrawn": done, "drop_refused": refused, "drop_skipped": skipped},
+                          handle, indent=2, sort_keys=False)
                 handle.write("\n")
-        return 0
+        return 2 if refused else 0
 
     if getattr(args, "settle_restore_file", None):
         # Round 129: the sibling of `--settle-reaffirm-file`. Round 128 groups the withdrawal debt by stream file and
@@ -5417,7 +5475,10 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-kind", default=None,
                         help="with --settle-reaffirm-file: `never` pays only the decisions nobody has read the "
                              "books for, `again` only the ones the books moved under after the last reading")
-    evolve.add_argument("--settle-drop", default=None, metavar="RECORD=SUCCESSOR",
+    evolve.add_argument("--settle-drop-file", default=None, metavar="STREAM",
+                        help="withdraw every decision on STREAM that cannot be re-taken in one command, resolved "
+                             "from the same plan --campaign prints; needs --settle-why")
+    evolve.add_argument("--settle-drop", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="withdraw a recorded decision: it keeps its date and gains the reason it stopped "
                              "standing, and the contradiction it settled is charged again; needs --settle-why")
     evolve.add_argument("--settle-restore", metavar="RECORD=SUCCESSOR", nargs="+", default=None,

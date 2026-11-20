@@ -7227,6 +7227,56 @@ links             2 stale decision(s) on data/smd/stream-two.json cannot be re-t
 第 133 轮：1902 tests，pyflakes 0；`var/demo133` 里 2 → 1 → 消失三段实录。
 
 
+### 3.140 一条命令付一整个文件，以及「为什么付不掉」要写在那一行上
+
+第 133 轮把不可付的对从 `stale` 里分离出来，`--campaign` 单独一行点名，补救命令写成
+`--settle-drop round-other.json=round-new.json --settle-why TEXT`。那句话是真的，但一个文件欠三对时要打三遍同
+一个理由——而理由每打一遍都有机会变得不一样（这正是第 133 轮全部论证的反面）。这一轮把它做成和
+`--settle-restore-file` / `--settle-reaffirm-file` 同形状的第三个批量命令：
+
+```
+$ brian evolve --settle-drop-file data/smd/stream-two.json --settle-why "both records name other successors now" --settle-by bob
+dropping       2 decision(s) on data/smd/stream-two.json in one command
+withdrawn      round-other.json -> round-new.json
+                because: both records name other successors now
+                withdrawn by: bob
+                the contradiction it settled is back: `--audit` charges it again until a new decision is taken (boundary 292)
+withdrawn      round-sixth.json -> round-new.json
+                because: both records name other successors now
+                withdrawn by: bob
+                no contradiction is waiting on that pair: the decision simply stops applying
+withdrawn      2 of 2 decision(s), 0 already withdrawn, 0 refused
+```
+
+三件事照着前两族的规矩办：对子从 `--campaign` 印的同一份计划里取（边界 283），走的是单对分支（边界 284），
+一对被拒不影响其余（边界 303），JSON 载荷永远是一个列表（边界 278 的第四次应用）。所以 `--settle-drop` 的
+载荷也从对象变成列表 `{"withdrawn": [...], "drop_refused": N, "drop_skipped": N}`——一个随参数个数变形的载荷，
+是每个读者都要分支处理的类型。
+
+#### 第二个发现：读者不必先跑到另一页才知道自己看的是一条付不掉的账
+
+`--history` 的行里原本只有「已按决定结算」和「被重开过几次」，至于这一对**能不能被重开**，只有 `--campaign`
+说。读者从 `--history` 打开一条记录，看到的是一句平静的 `[settled with round-new.json by a recorded decision]`，
+而那条决定早就指不动了。现在行上多一句，用的还是计划那份计算（边界 264/308，不另写一套规则）：
+
+```
+ 7  2026-11-18T07:05:00+00:00  …  [retired, re-measured as round-seventh.json]  [data/smd/stream-two.json]
+    [settled with round-new.json by a recorded decision]  [cannot be re-taken: the record names round-seventh.json]
+```
+
+同一行还能同时挂着 `[the decision on round-seventh.json was withdrawn …]`——那是**另一条**决定被撤回，两句都是
+真的，只是挤在一行。这一轮没把行拆开：拆行是排版问题，而边界 241 已经讲过「一行只放属于这一行的事实」。
+
+**边界 315**：读者要据此行动的事实，必须写在他正在看的那一行上——只在另一页出现的「这条付不掉」，等于让读者
+先怀疑再验证。
+**边界 316**：一个必须逐项敲的命令，会把一个理由变成 N 个理由；批量不是省事，是让理由只有一份。
+**边界 317**：文件形状的命令必须从同一份计划取对子、走同一条单对分支、把拒绝数进总数——三族命令一个形状，
+读者才不用为每个族记一套语法。
+
+第 134 轮：1911 tests，pyflakes 0；`var/demo134` 里一条命令付掉一个文件的 2 对不可付决定，`var/demo134b`
+留下行内那句「为什么付不掉」。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7751,6 +7801,7 @@ missing for the next level
      这是干跑同一份推算」。作用于没有 `--campaign` 的命令行时 exit 2。边界 309、310。
 
 119. 已做成：`reaffirm_plan` 把不可付的对分离成 `unpayable`/`unpayable_pairs`/`stuck`，带上 `--settle-drop` 补救；`--campaign` 单独一行点名（文件、当前后继、命令）；批量命令的头行数字与之自动一致；`--max-moved-per-file` 只数可付的；顺带修掉 `moved_settlements` 把撤销过的决定算成「欠一次重开」的旧账。1902 tests，pyflakes 0。
-120. 让 `--settle-drop` 也能一次带几对、或按文件带走（`--settle-drop-file STREAM`），并把「不可再
-     确认」的记账从「当前这一对」扩到「这个文件上有几对」，因为 `--campaign` 现在只点第一对；另外让
-     `--history` 的 settled 行按 `unpayable` 打标，读者不必先跑 `--campaign` 才知道自己在看一条付不掉的账。
+120. 已做成：`--settle-drop` 改成 `nargs="+"`（载荷为列表，含 `drop_refused`/`drop_skipped`）；新增 `--settle-drop-file STREAM`，对子取自 `reaffirm_plan` 的 `unpayable_pairs`，走单对分支、按文件一次付完；`--history` 的 settled 行新增 `[cannot be re-taken: the record names <后继>]`，与 `[retired, re-measured as …]` 对得上。1911 tests，pyflakes 0。
+121. 干跑也要能预览这一族：`--settle-drop-file --dry-run` 现在直接退出（`--dry-run` 只认两个 restore /
+     reaffirm 命令），而它已经是第三个批量命令；顺手把 `--campaign --what-if-records` 里「不可付的对」也算进
+     「付完还欠」，否则那句预报对这一族不成立。
