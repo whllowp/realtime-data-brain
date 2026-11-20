@@ -367,7 +367,91 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
             "command does not touch -- run `--campaign` afterwards to see it (boundary 307)"]
 
 
-def _print_what_if(root: Path, target: str) -> None:
+PLAN_STEPS = ("restore", "drop", "retake")
+
+
+def _plan_counts(rounds_all: List[Mapping[str, Any]], stored: List[Mapping[str, Any]],
+                 runs: Sequence[Mapping[str, Any]], target: str) -> Tuple[int, int, int]:
+    """(unanswered withdrawal(s), payable stale decision(s), decision(s) no re-take can pay) on one file.
+
+    Round 136: the three numbers the what-if speaks in, computed from one store. Every step of a plan is "run one
+    of the batch commands on a copy", so a step's effect is exactly this function called twice (boundary 308).
+    """
+    withdrawal_rows = [row for row in withdrawal_plan(rounds_all, stored)
+                       if same_stream_path(str(row.get("origin") or ""), target)]
+    reaffirm_rows = [row for row in reaffirm_plan(rounds_all, stored, runs)
+                     if same_stream_path(str(row.get("origin") or ""), target)]
+    return (sum(int(row.get("decisions") or 0) for row in withdrawal_rows),
+            sum(int(row.get("stale") or 0) for row in reaffirm_rows),
+            sum(int(row.get("unpayable") or 0) for row in reaffirm_rows))
+
+
+def _step_pairs(rounds_all: List[Mapping[str, Any]], stored: List[Mapping[str, Any]],
+                runs: Sequence[Mapping[str, Any]], target: str, step: str) -> List[str]:
+    """The pairs one batch command would hand over, read from the plan that command would read."""
+    if step == "restore":
+        rows = [row for row in withdrawal_plan(rounds_all, stored)
+                if same_stream_path(str(row.get("origin") or ""), target)]
+        entries = rows[0].get("records") if rows else []
+    else:
+        rows = [row for row in reaffirm_plan(rounds_all, stored, runs)
+                if same_stream_path(str(row.get("origin") or ""), target)]
+        key = "pairs" if step == "retake" else "unpayable_pairs"
+        entries = rows[0].get(key) if rows else []
+    return ["%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or "")) for item in entries or []]
+
+
+def _run_steps(rounds_all: List[Mapping[str, Any]], stored: List[Mapping[str, Any]],
+               runs: Sequence[Mapping[str, Any]], target: str,
+               steps: Sequence[str]) -> Tuple[List[Mapping[str, Any]], List[Tuple[str, int, Tuple[int, int, int]]]]:
+    """Apply each step to a copy of the store, and record what it handed over and what was left behind."""
+    trace: List[Tuple[str, int, Tuple[int, int, int]]] = []
+    current = list(stored)
+    for step in steps:
+        pairs = _step_pairs(rounds_all, current, runs, target, step)
+        wanted = [pair.split("=", 1) for pair in pairs]
+        if step == "drop":
+            current = preview_withdrawal_change(current, wanted, why="(preview)", by="")
+        else:
+            current = preview_settlement_change(current, wanted,
+                                                kind="restore" if step == "restore" else "reaffirm",
+                                                why="(preview)", by="")
+        trace.append((step, len(pairs), _plan_counts(rounds_all, current, runs, target)))
+    return current, trace
+
+
+def _print_what_if_plan(root: Path, target: str, steps: Sequence[str]) -> None:
+    """Round 136: "what if I did these, in this order" -- the one question the three answers cannot answer apart.
+
+    Dropping a decision turns a pair no re-take can pay into an unanswered withdrawal; restoring one turns an
+    unanswered withdrawal back into a settled pair. So the same commands, reordered, end in different books, and a
+    page that quotes each command's own after-state is answering three questions nobody can add up (boundary 321).
+    """
+    try:
+        stored = load_settlements(root)
+        rounds_all = history(root, include_retired=True)
+        runs = queue_runs(root)["runs"]
+    except (OSError, ValueError) as error:
+        _print("what if          the plans could not be read: %s" % error)
+        return
+    start = _plan_counts(rounds_all, stored, runs, target)
+    _print("what if          %s owes %d unanswered withdrawal(s), %d stale decision(s) and %d decision(s) no "
+           "re-take can pay" % ((target,) + start))
+    _print("                 in the order: %s" % ", ".join(steps))
+    _finished, trace = _run_steps(rounds_all, stored, runs, target, steps)
+    for step, count, counts in trace:
+        _print("                   after %-8s %d pair(s) -> %d unanswered withdrawal(s), %d stale decision(s), "
+               "%d cannot be re-taken" % (step, count, counts[0], counts[1], counts[2]))
+    reversed_counts = _plan_counts(rounds_all, _run_steps(rounds_all, stored, runs, target,
+                                                          list(reversed(steps)))[0], runs, target)
+    if reversed_counts != start and reversed_counts != trace[-1][2]:
+        _print("                 the order matters: done the other way round it would end at %d unanswered "
+               "withdrawal(s), %d stale decision(s) and %d it cannot re-take (boundary 322)" % reversed_counts)
+    _print("                 nothing here is written: every step runs on a copy of the store, so the order is the "
+           "only thing that changed (boundary 321)")
+
+
+def _print_what_if(root: Path, target: str, steps: Sequence[str] = ()) -> None:
     """Round 132: "what if I paid this file off", asked from the page instead of from the command that pays it.
 
     Both families are asked, because a file can owe both and paying one does not touch the other. The numbers come
@@ -375,6 +459,9 @@ def _print_what_if(root: Path, target: str) -> None:
     (boundary 308) -- and the block says that it wrote nothing, because a recomputation that looks like a receipt is
     the one mistake this whole thread keeps finding.
     """
+    if steps:
+        _print_what_if_plan(root, target, steps)
+        return
     try:
         stored = load_settlements(root)
         rounds_all = history(root, include_retired=True)
@@ -1903,6 +1990,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("--max-withdrawn-days caps a --strict charge; without --strict nothing reads it")
         return 2
 
+    _plan_steps = [str(step).strip() for step in str(getattr(args, "plan", "") or "").split(",")
+                   if str(step).strip()]
+    if _plan_steps and not getattr(args, "what_if_records", None):
+        # Round 136: only the page's what-if steps through a plan. Anywhere else it would be ignored, and a flag
+        # that looks like a question must not be answered with silence (boundary 305's rule, third appearance).
+        _print("--plan steps --campaign --what-if-records through the batch commands; without that question nothing "
+               "reads it")
+        return 2
+    unknown_steps = [step for step in _plan_steps if step not in PLAN_STEPS]
+    if unknown_steps:
+        _print("--plan takes some of %s in the order to run them; %s is not one of them"
+               % (", ".join(PLAN_STEPS), ", ".join(unknown_steps)))
+        return 2
     if getattr(args, "what_if_records", None) and not getattr(args, "campaign", False):
         # Round 132: only the campaign branch reads it. Anywhere else the question would be ignored, and a flag that
         # looks like a question must not be answered with silence (boundary 305 again).
@@ -2817,7 +2917,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if getattr(args, "what_if_records", None):
             # Round 132: a reader looking at "this file owes two" should not have to conjure the batch commands to
             # ask what paying them would leave. The block is a recomputation, never a write.
-            _print_what_if(root, str(args.what_if_records).strip())
+            _print_what_if(root, str(args.what_if_records).strip(), _plan_steps)
         worst, payable = _debt_view(root)
         if args.json_out:
             # Round 60: the page's next-step lines are derived facts, so the machine-readable form carries the
@@ -5506,6 +5606,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-note", metavar="RECORD=SUCCESSOR", default=None,
                         help="append the explanation a recorded settlement lacked: the decision keeps its date "
                              "and successor; needs --settle-why")
+    evolve.add_argument("--plan", default="", metavar="STEPS",
+                        help="with --campaign --what-if-records: run the batch commands in this order and print "
+                             "each step's books (restore, drop, retake)")
     evolve.add_argument("--what-if-records", default=None, metavar="STREAM",
                         help="with --campaign: print what that stream file would still owe if its unresolved "
                              "decisions were paid off now (a recomputation; nothing is written)")

@@ -7345,6 +7345,64 @@ what if          data/smd/stream-two.json owes 2 unanswered withdrawal(s), 1 sta
 （边界 190）。全套 1920 项通过，`pyflakes` 干净。
 
 
+### 3.142 一个问题问三遍，不等于问三个问题：按顺序的计划
+
+到第 135 轮，页面能回答"把这个文件付掉会怎样"，而且分三族答：接手（`--settle-restore-file`）、丢掉付不掉的对
+（`--settle-drop-file`）、重开（`--settle-reaffirm-file`）。三段的账都是真的，加起来却不是一个计划——三条命令
+把债在两张账之间搬来搬去：
+
+- 丢掉一条决定，不是解决它，是把"重开付不掉"变成"没人接手"（边界 318）；
+- 接手一条决定，又把"没人接手"变回一条站着的决定；
+- 重开只改"这条决定现在从哪一刻说话"，不动上面两个账本。
+
+所以同一批命令换个顺序，最后的账不一样。读的人把三段抄下来自己排顺序，排出来的结果没人预言过。
+
+第 136 轮加的是顺序本身：`--campaign --what-if-records FILE --plan restore,drop,retake`，每一步都在 store 的
+**拷贝**上跑一条真命令（`preview_settlement_change` / `preview_withdrawal_change`），每步之后重算两张账，
+最后再按相反顺序算一遍，只有在结果不同的时候才说"顺序有影响"：
+
+```text
+$ brian evolve --campaign --what-if-records data/smd/stream-two.json --plan restore,drop,retake
+what if          data/smd/stream-two.json owes 4 unanswered withdrawal(s), 1 stale decision(s) and 0 decision(s) no
+                 re-take can pay
+                 in the order: restore, drop, retake
+                   after restore  4 pair(s) -> 0 unanswered withdrawal(s), 1 stale decision(s), 2 cannot be re-taken
+                   after drop     2 pair(s) -> 2 unanswered withdrawal(s), 1 stale decision(s), 0 cannot be re-taken
+                   after retake   1 pair(s) -> 2 unanswered withdrawal(s), 0 stale decision(s), 0 cannot be re-taken
+                 the order matters: done the other way round it would end at 0 unanswered withdrawal(s), 0 stale
+                 decision(s) and 2 it cannot re-take (boundary 322)
+                 nothing here is written: every step runs on a copy of the store, so the order is the only thing
+                 that changed (boundary 321)
+```
+
+反过来问一遍，现场就露出真正的发现：
+
+```text
+$ brian evolve --campaign --what-if-records data/smd/stream-two.json --plan retake,drop,restore
+                 in the order: retake, drop, restore
+                   after retake   1 pair(s) -> 4 unanswered withdrawal(s), 0 stale decision(s), 0 cannot be re-taken
+                   after drop     0 pair(s) -> 4 unanswered withdrawal(s), 0 stale decision(s), 0 cannot be re-taken
+                   after restore  4 pair(s) -> 0 unanswered withdrawal(s), 0 stale decision(s), 2 cannot be re-taken
+```
+
+**接手一条"记录已经不认那个后继"的决定，会立刻生产出 2 条"重开付不掉"的对。** `--settle-restore` 只检查这对
+决定存在，没检查那条记录现在还认不认这个后继；`reaffirm_link` 在同样的情况下是拒绝的（第 119 轮）。于是同一条
+约束在两个写入口上不一样严：重开拒绝断言账本否认的事，接手却照单全收，然后由下一个人去收拾。计划功能本身没有
+制造这个缺陷，它只是第一次把两条命令并排放到同一张纸上看。
+
+**边界 321：三条命令各自"付完之后还剩什么"，不等于"按这个顺序做完还剩什么"；答案里必须有时序，
+或者说清它只是单步的账。**
+
+**边界 322：顺序会影响结果时，页面必须自己算一遍反序并说出来，否则读者得到的是他恰好抄下来的那个顺序。**
+
+**边界 323：同一条约束不能只在一条写入口上校——重开拒绝的事，接手也不能默认接受；
+一个计划能把两个入口并排照出来，但照出来之后得有人补上另一边。**
+
+测试：`tests/test_what_if_plan.py`（7 项）覆盖每步的账、顺序有影响时的提示、单步不假装有顺序、
+计划不写盘（store 与两张账逐字不变）、`--plan` 没有那个问题时被拒绝、未知步骤被点名、以及页面数字与
+`_plan_counts()` 一致。全套 1929 项通过，`pyflakes` 干净。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7872,4 +7930,6 @@ missing for the next level
 120. 已做成：`--settle-drop` 改成 `nargs="+"`（载荷为列表，含 `drop_refused`/`drop_skipped`）；新增 `--settle-drop-file STREAM`，对子取自 `reaffirm_plan` 的 `unpayable_pairs`，走单对分支、按文件一次付完；`--history` 的 settled 行新增 `[cannot be re-taken: the record names <后继>]`，与 `[retired, re-measured as …]` 对得上。1911 tests，pyflakes 0。
 121. ~~把 `--dry-run` 教给第三条批量命令（`--settle-drop-file`），并让 `--campaign --what-if-records` 把"不能重开"的那一族也算进"付完还剩什么"。~~ 已完成：预览说清"这条决定会搬到没人接手的队列里"，页面对三个家族各算各的，共用 `_after_preview_lines()`（§3.141，边界 318/319/320）。
 
-122. 让预览能回答"如果我按这个顺序做"：`--campaign --what-if-records FILE --plan restore,drop,retake` 依次算出每一步之后的两张账，因为三条命令互相改变对方的队列（丢弃会把对推进没人接手，接手又把对推回可重开），单独看不等于合起来看。
+122. ~~让预览能回答"如果我按这个顺序做"：`--campaign --what-if-records FILE --plan restore,drop,retake` 依次算出每一步之后的两张账。~~ 已完成：每步在 store 拷贝上跑一条真命令，最后按反序再算一遍，只在结果不同时说"顺序有影响"（§3.142，边界 321/322/323）。
+
+123. 让 `--settle-restore` 跟 `reaffirm_link` 一样严格：记录不再认这个后继时拒绝接手（`--settle-restore-file` 跳过这一对并说明），因为第 136 轮的计划演示显示接手会立刻生产"不能重开"的对；顺带给 `--settle-restore` 的拒绝句加上"用 `--settle-drop` 或新决定"的出口。
