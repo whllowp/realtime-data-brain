@@ -8065,6 +8065,50 @@ every row is enforced by the structural test
 它不是再跑一遍测试，而是把"漏掉一行"这件事真的做一次，看判据是否出声。
 
 
+## 3.155 0 与 17 之后的那一句：页面要说今天能付几轮、用哪条命令
+
+第 147 轮把账本里的退休标记读回仓库之后，页面一直印着 `0 by the queue, 17 typed by hand`。这句话是真的，却是
+**关于过去**的：它说最近这 17 笔付款是怎么记下的，没有一个读者能拿它做决定。第 135 条要的就是补上那一句。真账本
+现在这样答：
+
+```
+re-run walks      17 invocation(s) of the re-run queue: 0 by the queue, 17 typed by hand; 0 paid no round;
+                  17 round(s) paid in all; the last was walk 17 at 2026-11-18T04:39:56+00:00; 17 of them were
+                  written after the fact from the ledger's retirement marks, so they say when the payment happened,
+                  not when it was recorded
+re-run offer      9 round(s) the queue could pay today (9 that named their file but never recorded their ceilings):
+                  brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0; the queue has paid none of this
+                  store's 17 payment(s): every one was typed by hand, so the store says nothing about what the
+                  queue would do
+```
+
+`_rerun_offer()` 每次印页面时重新算：家族来自 `_unrecorded_matters` 与 `_ceiling_matters`（就是守卫与队列用的那两份
+名单，所以"能付几轮"不是另一份估计），存入的行走数来自 `rerun_walks()`。三种输出：没有可付的说"今天没有可付的"；
+只有未知文件的家族给不带 `--with-ceilings` 的命令；有命了文件却没记上限的家族给带 `--with-ceilings` 的。同一个
+offer 也进 `--campaign --json-out`：
+
+```json
+"rerun_offer": {"rounds": 9, "file_rounds": 0, "ceiling_rounds": 9,
+                "command": "brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0",
+                "text": "9 round(s) the queue could pay today (...) ...; the queue has paid none of this store's 17 payment(s) ..."}
+```
+
+**这一轮顺手改掉了自己刚犯的错**：第一版在 `_rerun_offer` 里又手写了一遍命令字符串，和 `_ceiling_command` 各写一份
+——正是第 148 轮刚立的规矩。（同一页上还有一行 `ceiling debt …` 也叫这条命令。）于是把命令收进
+`_rerun_command(with_ceilings)`，`_ceiling_command` 也改用它，并且加了一条测试直接比对两条线的命令是同一个字符串。
+两行仍然都印命令，因为它们各自要能被单独读、单独执行——但它们出自同一个生成器，不可能是"两个命令"。
+
+**边界 360：页面上的计数只陈述过去；能改变它的那一句（能付几轮、哪条命令）必须和它同页。**否则读者只知道历史，
+不知道下一步。
+
+**边界 361：同一命令被两行引用时，必须由同一个生成器产生，并由测试比对这两行。**否则两行会各自漂移成两个命令，
+而读者无从知道该敲哪一个。
+
+**边界 362：同一页上的两个数字，如果一个来自历史、一个来自当下，就必须分别命名时间。**`0 by the queue` 是累积的
+过去，`9 round(s) … today` 是此刻的状态；不加限定并排印出来，会被读成"今天也做不了"，而那恰恰是第 147 轮那句话
+最容易被误读的方向。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8640,6 +8684,10 @@ missing for the next level
 134. ~~把 `--dry-run` 的家族清单收敛成一张表，句子与判断都从它生成。~~ 已完成（§3.154）：`BATCH_PREVIEWS`
      一张表供判断、拒绝句子与帮助文本三种读法；结构测试从解析器读出 `--settle-*-file` 家族加例外
      `--backfill-walks`，逐项比对；`var/prove_148.py` 逐行删除以证明测试会触发。2050 tests。
-135. 让 `--campaign` 的"重跑行走"那行带上**能改变它的那条命令**：真账本现在是
-     `0 by the queue, 17 typed by hand`，页面只陈述过去，不指出下一笔该由谁来付（哪条命令、今天能付几轮）。
-     第 147 轮的结论不该只留在 §3.153 里。
+135. ~~让 `--campaign` 的"重跑行走"那行带上能改变它的命令。~~ 已完成（§3.155）：新的 `re-run offer` 行给出
+     今天可付的轮数（来自守卫同款的两份名单）、该敲的那条命令，以及"这个仓库的 17 笔全是人打的"；同一份
+     结构进 `--campaign --json-out` 的 `rerun_offer`；命令字符串收进 `_rerun_command()`，与 `ceiling debt` 那行
+     由测试比对。真账本：9 轮可付。2050 → 2062 tests。
+136. 让 `--rerun-unrecorded` 在开始测量前，把同一句 offer 印出来（今天能付几轮、会不会带上 `--with-ceilings`），
+     这样"页面说的"和"命令做的"是同一句话；命令结束时再印一次剩下的（第 60 轮 `budget_text` 的形状：一处算、
+     两处印）。

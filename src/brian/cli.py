@@ -136,6 +136,7 @@ from .promote import (
     backfill_walks,
     begin_rerun_run,
     finish_rerun_run,
+    rerun_walks,
     walk_held,
     record_queue_run,
     revert_promotion,
@@ -1288,6 +1289,43 @@ def _rerun_limit(args: Any, ready: int) -> int:
     return min(value, ready)
 
 
+def _rerun_offer(root: Path) -> Dict[str, Any]:
+    """Round 149: what the re-run queue could pay today, and the one command that pays it (boundary 360).
+
+    Round 147 read the real ledger's retirement marks back into the store, and the page has printed `0 by the queue,
+    17 typed by hand` ever since. That is a fact about the past -- how the last payments were made -- and a reader
+    cannot do anything with it. So the page now also carries the count the queue could pay and the command that pays
+    it; and when the store records hand payments but not one queued walk, it says that in the same breath, because
+    "the queue has never run here" is the part an operator needs and it is invisible in a count of walks.
+    """
+    file_rounds = _unrecorded_matters(root)
+    ceiling_rounds = _ceiling_matters(root)
+    total = len(file_rounds) + len(ceiling_rounds)
+    try:
+        walks = rerun_walks(root)
+    except OSError:
+        walks = {}
+    queued = int(walks.get("queued") or 0)
+    hand = int(walks.get("hand") or 0)
+    if not total:
+        text = ("nothing for the queue to pay today: every round that still decides something records the file and "
+                "the ceilings it was measured under")
+        command = ""
+    else:
+        parts = []
+        if file_rounds:
+            parts.append("%d from the file queue" % len(file_rounds))
+        if ceiling_rounds:
+            parts.append("%d that named their file but never recorded their ceilings" % len(ceiling_rounds))
+        command = _rerun_command(bool(ceiling_rounds))
+        text = "%d round(s) the queue could pay today (%s): %s" % (total, ", ".join(parts), command)
+        if hand and not queued:
+            text += ("; the queue has paid none of this store's %d payment(s): every one was typed by hand, so the "
+                     "store says nothing about what the queue would do" % hand)
+    return {"rounds": total, "file_rounds": len(file_rounds), "ceiling_rounds": len(ceiling_rounds),
+            "command": command, "text": text}
+
+
 def _rerun_progress(root: Path) -> Dict[str, Any]:
     """How far the queue of nameable rounds has been paid down (round 53).
 
@@ -1542,6 +1580,16 @@ def _wants_ceilings(args) -> bool:
     return int(getattr(args, "rerun_limit", 1) or 0) <= 0
 
 
+def _rerun_command(with_ceilings: bool) -> str:
+    """The one command that pays the re-run queue, in one place (round 149).
+
+    Two lines of the campaign page name this command -- the ceiling debt's remedy and the queue's own offer -- and
+    the round's own lesson is that a hand-written second copy drifts. So there is one builder, and a test compares
+    the two lines rather than trusting them to agree.
+    """
+    return "brian evolve --rerun-unrecorded %s--rerun-limit 0" % ("--with-ceilings " if with_ceilings else "")
+
+
 def _ceiling_command(payable: int, named: int) -> Optional[str]:
     """The command that lowers the ceiling debt, or None when no command can (round 74).
 
@@ -1551,9 +1599,9 @@ def _ceiling_command(payable: int, named: int) -> Optional[str]:
     that would measure nothing is not a next step (round 59's lesson about true next steps).
     """
     if int(named) > 0:
-        return "brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0"
+        return _rerun_command(True)
     if int(payable) > 0:
-        return "brian evolve --rerun-unrecorded --rerun-limit 0"
+        return _rerun_command(False)
     return None
 
 
@@ -3190,11 +3238,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         ceiling_note = format_ceiling_shortfall(ceiling_rows, payable=ceiling_file_payable,
                                                 named=ceiling_named,
                                                 command=_ceiling_command(ceiling_file_payable, ceiling_named))
+        # Round 149: `0 by the queue` is a fact about the past; the page also says what the queue could pay
+        # today and names the command, computed once so the page and the payload print one sentence (boundary 360).
+        rerun_offer = _rerun_offer(root)
         _print(format_campaign(result, expiry_days=args.expiry_days, rules=rules,
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
                                budget=budget, limits=_limits_text(limits_view),
-                               ceiling_note=ceiling_note))
+                               ceiling_note=ceiling_note, rerun_offer=rerun_offer))
         if getattr(args, "what_if_records", None):
             # Round 132: a reader looking at "this file owes two" should not have to conjure the batch commands to
             # ask what paying them would leave. The block is a recomputation, never a write.
@@ -3214,6 +3265,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload["ceiling_drift"] = drift
             # Round 101: the queue the page counts, in the form a script can execute.
             payload["origin_queue"] = origin_queue_state
+            # Round 149: what the queue could pay today travels with the page that printed it.
+            payload["rerun_offer"] = rerun_offer
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)

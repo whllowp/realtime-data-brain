@@ -852,7 +852,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     plan: Optional[Sequence[Mapping[str, Any]]] = None,
                     budget: Optional[Mapping[str, Any]] = None,
                     limits: Optional[str] = None,
-                    ceiling_note: Optional[str] = None) -> str:
+                    ceiling_note: Optional[str] = None,
+                    rerun_offer: Optional[Mapping[str, Any]] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -1477,6 +1478,10 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
     rerun_note = format_rerun_walks(result.reruns) if result.reruns else None
     if rerun_note:
         lines.append("re-run walks      %s" % rerun_note)
+    if rerun_offer and rerun_offer.get("text"):
+        # Round 149: the line above counts how the payments were made; this one says how many the queue could
+        # make today and which command makes them (boundary 360).
+        lines.append("re-run offer      %s" % rerun_offer["text"])
 
     if result.in_force_history and int(result.in_force_history.get("total") or 0):
         record = result.in_force_history
