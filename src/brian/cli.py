@@ -83,6 +83,7 @@ from .evolve import (
     repair_legacy,
     moved_clearable,
     reaffirm_link,
+    settlement_moment,
     settle_link,
     settle_note,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
@@ -2894,42 +2895,76 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # stale for ever and the gate could never charge it. This branch re-reads today's books and records what
         # it saw -- the claims standing on that successor now -- because a decision that does not name what it
         # covered is exactly the defect round 118 exists to catch (boundary 274).
-        pair = str(args.settle_reaffirm or "")
-        if "=" not in pair:
+        # Round 120: several pairs in one command. The reason belongs to the action ("I read today's books"); what
+        # each decision covered belongs to the pair, and typing the same reason eleven times is how it drifts.
+        raw = args.settle_reaffirm
+        pairs = [str(item) for item in (raw if isinstance(raw, (list, tuple)) else [raw]) if str(item).strip()]
+        if not pairs:
             _print("--settle-reaffirm takes RECORD=SUCCESSOR, for example "
                    "`--settle-reaffirm round-old.json=round-new.json`")
             return 2
-        record, successor = pair.split("=", 1)
-        record, successor = record.strip(), successor.strip()
-        seen = sorted(str(row.get("round") or "") for row in history(root, include_retired=True)
-                      if str((row.get("retired") or {}).get("re_measured_as") or "") == successor
-                      and str(row.get("round") or "") != record)
-        plan_before = repair_plan(root)
-        try:
-            again = reaffirm_link(root, record, successor, why=str(args.settle_why or ""),
-                                  by=str(getattr(args, "settle_by", "") or ""), claimants=seen)
-        except (OSError, ValueError) as error:
-            _print("cannot re-affirm that decision: %s" % error)
+        bad = [pair for pair in pairs if "=" not in pair]
+        if bad:
+            _print("--settle-reaffirm takes RECORD=SUCCESSOR, and %s has no = in it" % bad[0])
             return 2
-        if not again["changed"]:
-            _print("reaffirmed     %s -> %s was already re-taken on %s; nothing to change"
-                   % (again["record"], again["successor"], again["at"]))
-        else:
+        plan_before = repair_plan(root)
+        done: List[Dict[str, Any]] = []
+        refused = 0
+        for pair in pairs:
+            record, successor = pair.split("=", 1)
+            record, successor = record.strip(), successor.strip()
+            seen = sorted({str(row.get("round") or "") for row in history(root, include_retired=True)
+                           if str((row.get("retired") or {}).get("re_measured_as") or "") == successor
+                           and str(row.get("round") or "") != record})
+            # Round 120: what the books looked like *before* this call. Asking afterwards would always find them
+            # unchanged -- the call itself is what covers the claims (boundary 276).
+            stored = load_settlements(root)
+            moment = settlement_moment(stored, record, successor)
+            moved_before = [row for row in moved_settlements(history(root, include_retired=True), stored)
+                            if str(row.get("record") or "") == record
+                            and str(row.get("successor") or "") == successor]
+            try:
+                again = reaffirm_link(root, record, successor, why=str(args.settle_why or ""),
+                                      by=str(getattr(args, "settle_by", "") or ""), claimants=seen)
+            except (OSError, ValueError) as error:
+                # One refused pair must not stop the rest: the queue is a backlog, and a decision whose books moved
+                # under it is a reason to skip that pair, not to abandon the walk (boundary 277).
+                _print("cannot re-affirm that decision: %s" % error)
+                refused += 1
+                continue
+            done.append(again)
+            if not again["changed"]:
+                _print("reaffirmed     %s -> %s was already re-taken on %s; nothing to change"
+                       % (again["record"], again["successor"], again["at"]))
+                continue
             _print("reaffirmed     %s -> %s" % (again["record"], again["successor"]))
             _print("                the decision keeps its first date; this re-affirmation is on %s"
                    % again["at"])
             _print("                what it covered: %s"
                    % (", ".join(seen) if seen else "no other claim stood on that successor"))
+            if not moved_before:
+                # Two facts, and the page must say which one it did: a re-take answers a claim that arrived after
+                # the decision; a confirmation says the books have not moved under it since (boundary 276).
+                _print("                nothing had moved since %s: this records a fresh confirmation, not a re-take"
+                       % (moment or "the decision was taken"))
             _print("                because: %s" % str(args.settle_why or "").strip())
             _print("                re-affirmed by: %s"
                    % (str(getattr(args, "settle_by", "") or "").strip()
                       or "(not recorded -- pass --settle-by NAME)"))
-            _print("                `--audit` stops reporting it as resting on books that have moved.")
+        changed = sum(1 for item in done if item.get("changed"))
+        if len(pairs) > 1:
+            # The count is the headline when several pairs were asked for: one line per pair is a transcript, and a
+            # transcript without a total makes the reader count.
+            _print("re-taken       %d of %d decision(s), %d kept its date (already re-taken), %d refused"
+                   % (changed, len(pairs), len(done) - changed, refused))
+        if done:
+            _print("                `--audit` stops reporting these as resting on books that have moved.")
             _print_repair_delta(record_repair(root, "settle-reaffirm", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps({"reaffirmed": again}, indent=2, sort_keys=False) + "\n")
-        return 0
+                handle.write(json.dumps({"reaffirmed": done, "reaffirm_refused": refused},
+                                        indent=2, sort_keys=False) + "\n")
+        return 2 if refused else 0
 
     if getattr(args, "repair_links", False):
         # Round 83: a `legacy` end is repaired by copying the retirement's claim into the successor record.
@@ -4911,9 +4946,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-note", metavar="RECORD=SUCCESSOR", default=None,
                         help="append the explanation a recorded settlement lacked: the decision keeps its date "
                              "and successor; needs --settle-why")
-    evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", default=None,
-                        help="re-take a decision against today's books: keeps its first date, records the claims "
-                             "it covered; needs --settle-why")
+    evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
+                        help="re-take decisions against today's books: keeps each first date, records the claims "
+                             "it covered; takes one or more RECORD=SUCCESSOR pairs; needs --settle-why")
     evolve.add_argument("--max-moved", type=int, default=None, metavar="N",
                         help="with --strict: fail when more than N decisions rest on books that have moved and "
                              "could be re-taken with --settle-reaffirm")

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .evolve import (
-    moved_settlements,BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
+    moved_settlements, reaffirm_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
                      load_settlements, rejection_provenance, settlement_summary, withheld_due,
                      withheld_evidence_age,
                      withheld_records, withheld_staleness)
@@ -192,6 +192,8 @@ class Campaign:
     settlement_summary: Dict[str, Any] = field(default_factory=dict)
     # Round 118: decisions that rest on books which have moved since they were taken (reported, not charged).
     settlement_moved: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 120: the same debt grouped by the file the decision is about, with the command that re-takes each pair.
+    reaffirm_plan: List[Dict[str, Any]] = field(default_factory=list)
     stale_refusals: List[Dict[str, Any]] = field(default_factory=list)
     # Round 107: per promise, how many of the recorded walks refused it, when the first and the last were, and whether
     # the refusal still stands. `blocked_versions` answers the last question only, so a promise refused twice and then
@@ -302,6 +304,7 @@ class Campaign:
             "settlements": [dict(item) for item in self.settlements],
             "settlement_summary": dict(self.settlement_summary),
             "settlements_moved": [dict(item) for item in self.settlement_moved],
+            "reaffirm_plan": [dict(item) for item in self.reaffirm_plan],
             "stale_refusals": [dict(item) for item in self.stale_refusals],
             "refusal_history": {str(key): dict(value) for key, value in self.refusal_history.items()},
             "in_force_untested": self.in_force_untested,
@@ -568,6 +571,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.settlement_summary = settlement_summary(result.settlements)
     # Round 118: the same reading the audit page prints, from the same two files.
     result.settlement_moved = moved_settlements(everything, result.settlements)
+    result.reaffirm_plan = reaffirm_plan(everything, result.settlements)
     # Round 117: attribute each decision to the stream of the round it settled, so the row a reader opens can
     # say "one decision here has no explanation". `load_settlements` names round files; the source lives on the
     # round record, retired ones included, because a decision can settle a round that has since been superseded.
@@ -1226,6 +1230,21 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                 lines.append("links             explained later by: %s"
                              % ", ".join("%s %d" % (who if who else "and no explainer named", count)
                                          for who, count in ordered))
+        # Round 120: round 118 computed this and printed it only in the JSON. The page is what a reader opens, and
+        # "which file do I re-take the decision on" is the question that follows "two decisions moved".
+        if result.settlement_moved:
+            lines.append("links             %d decision(s) rest on books that have moved since they were taken: %s"
+                         % (len(result.settlement_moved),
+                            ", ".join("%s -> %s" % (str(item.get("record") or ""),
+                                                    str(item.get("successor") or ""))
+                                      for item in result.settlement_moved)))
+        for item in result.reaffirm_plan[:1]:
+            commands = [str(command) for command in item.get("commands") or [] if str(command)]
+            lines.append("links             re-take next: %s -- %d stale of %d recorded decision(s)%s -- %s"
+                         % (str(item.get("origin") or "(unnamed stream)"), int(item.get("stale") or 0),
+                            int(item.get("decisions") or 0),
+                            " (%d re-taken)" % int(item.get("retaken") or 0) if item.get("retaken") else "",
+                            commands[0] if commands else "brian evolve --settle-reaffirm <record>=<successor>"))
     # Round 111: the ranking said which file to open first; this says whether last time's opening helped.
     last = (result.repair_history or {}).get("last") or {}
     if isinstance(last, Mapping) and last.get("at"):

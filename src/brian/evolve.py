@@ -2809,6 +2809,52 @@ def reaffirm_link(root: Path, record: str, successor: str, *, why: str = "", by:
                      "re-takes one" % (name, target))
 
 
+def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
+                  settlements: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Which decisions need re-taking, grouped by the file they are about (round 120).
+
+    Round 119 gave the debt a command, one pair at a time, and said nothing about how many pairs a reader was
+    looking at: "one decision moved" and "eleven of them did, all on the same file" printed the same row. The
+    group is the round's own `stream_path` -- what the ledger already knows about where the promise lives -- and
+    the command is spelled out per group so a reader does not retype a path (round 101's rule).
+
+    Sorted by the number of stale decisions, then by file: a page that reshuffles between two runs teaches the
+    reader not to trust it (round 110).
+    """
+    moved = {(str(row.get("record") or ""), str(row.get("successor") or "")): row
+             for row in moved_settlements(rounds, settlements)}
+    by_name = {str(record.get("round") or ""): record for record in rounds}
+    files: Dict[str, Dict[str, Any]] = {}
+    for item in settlements or []:
+        record = str(item.get("record") or "")
+        successor = str(item.get("successor") or "")
+        origin = str((by_name.get(record) or {}).get("stream_path") or "")
+        bucket = files.setdefault(origin, {"origin": origin, "decisions": 0, "stale": 0, "retaken": 0,
+                                           "records": [], "commands": []})
+        bucket["decisions"] += 1
+        if item.get("reaffirmations"):
+            bucket["retaken"] += 1
+        if (record, successor) in moved:
+            bucket["stale"] += 1
+            bucket["records"].append(record)
+            bucket["commands"].append("brian evolve --settle-reaffirm %s=%s" % (record, successor))
+    rows = [bucket for bucket in files.values() if bucket["stale"]]
+    rows.sort(key=lambda row: (-row["stale"], row["origin"]))
+    return rows
+
+
+def settlement_moment(settlements: Sequence[Mapping[str, Any]], record: str, successor: str) -> str:
+    """The moment the decision for a pair speaks about, or "" when no such decision is stored.
+
+    Round 120 needs this to say what a fresh confirmation was measured against: the CLI has to know the moment
+    *before* it appends, because appending is what moves it (boundary 276).
+    """
+    for item in settlements:
+        if str(item.get("record") or "") == str(record) and str(item.get("successor") or "") == str(successor):
+            return _effective_moment(item)
+    return ""
+
+
 def moved_clearable(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """The moved decisions `--settle-reaffirm` can clear: the pair still exists, only a claim arrived later."""
     return [dict(row) for row in rows if row.get("clearable")]
@@ -2875,6 +2921,9 @@ def moved_settlements(rounds: Sequence[Mapping[str, Any]],
         if reasons:
             rows.append({"record": name, "successor": successor, "at": str(item.get("at") or ""),
                          "effective_at": own,
+                         # The file the round was measured on. A decision is about a promise, a promise is about
+                         # a file, and a page that says "two decisions moved" without the file has no first step.
+                         "origin": str((record or {}).get("stream_path") or ""),
                          "reaffirmed": len(item.get("reaffirmations") or []),
                          "clearable": not pair_gone,
                          "reasons": reasons,

@@ -6456,6 +6456,74 @@ settled         2 decision(s) rest on books that have moved since they were take
 
 **边界 275：清不掉的债继续报告，只对能清掉的那一类收费。** 这是 154/171/266/271 的第四次出现：`retargeted`/`gone` 的 pair 没有东西可重新确认，闸门对它收费只会训练人忽略闸门。
 
+### 3.126 一笔债要有一个文件，一个动作要能带多笔
+
+第 119 轮让「书动了」这件事有了命令，但命令一次只能带一对，而且这一笔债在页面上没有名字：`settlement_moved` 从第 118 轮起就只出现在 JSON 里，读者想看「几条决定被重开过、它们属于哪个文件」必须自己去翻账本。于是「先打开哪个文件」这个问题——它恰好是「书动了」之后必然出现的下一个问题——在页面上没有答案。同时 `--settle-reaffirm` 一次一对，意味着一次走查要把同一条理由手打十一遍，而重复手打的理由就是会漂移的理由。
+
+这一轮做两件事：把债按来源文件排成一张表，并让一个动作带上多对。
+
+**一张表：`reaffirm_plan`**
+
+`moved_settlements` 的每一行现在都带 `origin`（记录自己的 `stream_path`），`reaffirm_plan(rounds, settlements)` 按这个来源分组：
+
+```python
+{"origin": ..., "decisions": n, "stale": k, "retaken": r, "records": [...],
+ "commands": ["brian evolve --settle-reaffirm <record>=<successor>", ...]}
+```
+
+只保留 `stale` 非零的文件，按 `(-stale, origin)` 排序，命令照第 101 轮的规矩写成一条能直接粘进终端的字符串——页面印出来的清单，必须是命令能跑的那份清单。`--campaign` 因此多两行：
+
+```
+links             2 decision(s) rest on books that have moved since they were taken: round-other.json -> round-new.json, round-fifth.json -> round-new.json
+links             re-take next: data/smd/stream-two.json -- 2 stale of 2 recorded decision(s) -- brian evolve --settle-reaffirm round-other.json=round-new.json
+```
+
+第一行是第 118 轮算出来、到这一轮才写到页面上的事实；第二行是它的下一步。JSON 里同时有 `settlements_moved` 与 `reaffirm_plan`，脚本不用解析页面。
+
+**一个动作：`--settle-reaffirm` 带多对**
+
+`nargs="+"`，一条理由，一条 `--settle-by`，若干对：
+
+```
+$ brian evolve --settle-reaffirm round-old.json=round-new.json round-other.json=round-new.json \
+    --settle-why "read today's books" --settle-by alice
+reaffirmed     round-old.json -> round-new.json
+                the decision keeps its first date; this re-affirmation is on 2026-11-20T03:06:58.362463+00:00
+                nothing had moved since 2026-11-20T02:49:55.734918+00:00: this records a fresh confirmation, not a re-take
+reaffirmed     round-other.json -> round-new.json
+                what it covered: round-fifth.json, round-fourth.json, round-third.json
+re-taken       2 of 2 decision(s), 0 kept its date (already re-taken), 0 refused
+```
+
+一条被拒绝的 pair 不会中止其余的（第 277 条边界）：拒绝的原因写一行，`refused` 加一，循环继续。命令以退出码 2 收尾表示有人被拒——批次不是事务。
+
+**第三个发现：`nothing had moved since` 与「已经重开过」不是同一句话**
+
+第 119 轮的幂等分支按**微秒**判断「同一时刻」，所以它对人是不可达的：两次调用之间的时间差总是存在。真正能观察到的事实是「上一次确认之后，书有没有动过」：
+
+- 动过：这次是**重开**（retakes），理由必须写；
+- 没动：这次是**一次新的确认**（fresh confirmation），它记录的是「我今天读过账本，书没变」，同样有价值，但不是重开。
+
+两种情况都追加到 `reaffirmations`——一条决定被确认两次是两件事，页面上要说清是哪一件（第 276 条边界）。CLI 因此在调用 `reaffirm_link` **之前**先算一遍 `moved_settlements`：调用之后再算永远得到「没动」，因为这次调用本身就把那些 claim 覆盖了。这个顺序错误在自己的演示里出现过一次，写法上留了注释。
+
+**第三个发现：页面上的清单不能有重名**
+
+第一次演示时 `what it covered` 印出了 `round-old.json, round-old.json`：`history()` 会把同一轮从 round 文件与 ledger 各读一次（第 34 轮的合并规则），`sorted(...)` 于是把同一个名字排了两遍。改成一个集合，并且用 `sorted({...})` 保序去重。候选清单重复一次，读者会数出两条相反的证据。
+
+**第四个发现：演示夹具的日期必须落在过去**
+
+`var/demo119.py` 用 `NOW - timedelta(days=5)` 造日期，而 `NOW` 是 2026-12-01——比机器时钟晚 11 天，于是「后来的 claim」其实还在未来，任何重开都覆盖不了它，演示会显示一笔没有命令能还的债。`var/demo120.py` 复制夹具后把每个晚于当前时刻的 `retired.at` / `settlements.at` 拉回 `now - 6 days`。这条与第 119 轮的第 (2) 个夹具缺陷是同一个病：`NOW` 是给测试用的固定时刻，不是「今天」。
+
+**边界**
+
+- **边界 276**：一条决定被确认两次是两件事，页面必须说清是哪一件——「重开」与「书没动，只是再确认一次」含义不同，混成一句会把「有人复核过」读成「账本变过」。
+- **边界 277**：一批动作在第一次被拒时就整体停下，会教操作者手工重跑剩下的部分，而手工重跑正是理由漂移的入口；拒绝要记，循环要继续，退出码要说话。
+- **边界 278**：`--json-out` 的形状不能取决于参数个数——`{"reaffirmed": {...}}` 与 `{"reaffirmed": [{...}, {...}]}` 是两种类型，读它的人要写两个分支。现在永远是列表，外加 `reaffirm_refused` 计数。
+
+**这一轮没有做的事**
+
+`reaffirm_plan` 只按文件分组，没有按时间排序；「哪一天重开、隔了几次走查」留给第 107 项。`--max-moved` 仍然是按条数设上限，按文件设上限也留给第 107 项。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6928,4 +6996,6 @@ missing for the next level
 105. **已完成**：让一条决定可以被重开。`--settle-reaffirm` 保留第一天的日期、追加 `{at, why, by, claimants}`，`_effective_moment` 把「决定现在说话的时刻」推进到最新一次确认，`moved_settlements` 据此判断主张是否「后来才到」；`--max-moved N`（默认关）只对 `moved_clearable` 的那一类收费，`--history` 的行上并排打印 `[re-taken N time(s), last on …]` 与 `[never re-taken: …]`。测试 `tests/test_settlement_reaffirm.py`（15 条）。
     - 自己的缺陷：`clearable` 起初用子串 `"successor" in reason` 判断，而「后来的主张」那句含 successor，于是每一行都不可清掉——本轮唯一要收费的类别被自己的判断排除。改成布尔 `pair_gone`。
     - 文档缺陷：第 118 轮说「追加第 105 项」，而文件里没有第 105 项——只在末尾追加的队列，末尾是它唯一的锚点。
-106. 下一步：让 `--campaign` 按来源文件给出「几条决定被重开过、几条仍然是陈旧的」，并让 `--settle-reaffirm` 接受多个 `RECORD=SUCCESSOR`，这样一次走查能把整条队列里的决定重开一遍。
+106. 已完成（第 120 轮）：`--campaign` 现在按来源文件给出「几条决定被重开过、几条仍然陈旧」（`reaffirm_plan`，含一条可直接运行的命令），`--settle-reaffirm` 接受多个 `RECORD=SUCCESSOR`（一条理由、一条 `--settle-by`、被拒的一对不中止其余），`--json-out` 的形状不再随参数个数变化。
+
+107. 下一步：把重开的决定按来源文件在 `--campaign` 的 JSON 里给出时间线（哪一天重开、隔了几次走查），并让 `--max-moved` 能按文件而不是按条数设上限，使「这个文件的账还没人读过」变成一次可计量的欠账。

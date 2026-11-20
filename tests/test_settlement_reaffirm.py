@@ -169,7 +169,8 @@ def test_the_cli_records_the_reaffirmation_and_says_what_it_covered(tmp_path, mo
     assert "what it covered:" in flat and "round-third.json" in flat
     assert "re-affirmed by: alice" in flat
     payload = json.loads((tmp_path / "again.json").read_text(encoding="utf-8"))
-    assert payload["reaffirmed"]["changed"] is True
+    assert [item["changed"] for item in payload["reaffirmed"]] == [True]
+    assert payload["reaffirm_refused"] == 0
 
 
 def test_the_audit_stops_calling_a_reaffirmed_decision_stale(tmp_path, monkeypatch, capsys):
