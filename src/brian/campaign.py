@@ -19,7 +19,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from .evolve import (
     frequent_retakes, retake_timeline, moved_settlements, reaffirm_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
                      is_withdrawn, load_settlements, rejection_provenance,
-                     restored_settlements, settlement_summary, withdrawn_settlements, withheld_due,
+                     restored_settlements,
+    unanswered_withdrawals, settlement_summary, withdrawn_settlements, withheld_due,
                      withheld_evidence_age,
                      withheld_records, withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
@@ -194,6 +195,7 @@ class Campaign:
     # Round 126: decisions a later decision took up again, after the withdrawal. A pair decided twice with a
     # withdrawal in between is a different history from one decided once (boundary 295).
     settlements_restored: List[Dict[str, Any]] = field(default_factory=list)
+    settlements_unanswered: List[Dict[str, Any]] = field(default_factory=list)
     # Round 116: the counts a script needs are computed once, beside the copies the page prints, so "how many
     # decisions still have no explanation" is a number in the JSON rather than a sentence to be parsed.
     settlement_summary: Dict[str, Any] = field(default_factory=dict)
@@ -317,6 +319,7 @@ class Campaign:
             "settlements_moved": [dict(item) for item in self.settlement_moved],
             "settlements_withdrawn": [dict(item) for item in self.settlements_withdrawn],
             "settlements_restored": [dict(item) for item in self.settlements_restored],
+            "settlements_unanswered": [dict(item) for item in self.settlements_unanswered],
             "reaffirm_plan": [dict(item) for item in self.reaffirm_plan],
             "retake_timeline": {key: [dict(entry) for entry in value]
                                 for key, value in self.retake_timeline.items()},
@@ -586,6 +589,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.settlements = load_settlements(root)
     result.settlements_withdrawn = withdrawn_settlements(result.settlements)
     result.settlements_restored = restored_settlements(result.settlements)
+    result.settlements_unanswered = unanswered_withdrawals(result.settlements)
     result.settlement_summary = settlement_summary(result.settlements)
     # Round 118: the same reading the audit page prints, from the same two files.
     result.settlement_moved = moved_settlements(everything, result.settlements)
@@ -1307,6 +1311,19 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                                      str((item.get("withdrawn") or [{}])[-1].get("at") or ""),
                                      str((item.get("redecisions") or [{}])[-1].get("at") or ""))
                                   for item in result.settlements_restored)))
+    # Round 127: of the withdrawals, the ones nobody has answered are the debt the gate charges, so the page names
+    # the oldest and the command that clears it -- "N are waiting" without the oldest is a number the reader has to
+    # go and sort himself (boundary 219's rule, applied to a withdrawal instead of a promise).
+    if result.settlements_unanswered:
+        oldest = result.settlements_unanswered[0]
+        age = oldest.get("age_days")
+        lines.append("links             %d withdrawal(s) have no answer: %s -> %s was taken back on %s (%s day(s) "
+                     "ago) and nothing has replaced it -- start with brian evolve --settle-restore %s=%s "
+                     "--settle-why TEXT --settle-by NAME"
+                     % (len(result.settlements_unanswered), str(oldest.get("record") or ""),
+                        str(oldest.get("successor") or ""), str(oldest.get("at") or ""),
+                        "?" if age is None else "%.1f" % float(age), str(oldest.get("record") or ""),
+                        str(oldest.get("successor") or "")))
     for item in result.reaffirm_plan[:1]:
         commands = [str(command) for command in item.get("commands") or [] if str(command)]
         walks = item.get("walks_since")

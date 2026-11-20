@@ -6878,6 +6878,50 @@ links             1 decision(s) were taken up again by a new decision: round-old
 `--settle-link` 的拒绝、计划里的 remedy、文档里的 item 文本三处都跟着改了。
 
 
+### 3.133 撤销之后没人接手的那些天，是唯一能收费的那一段
+
+第 125 轮把「这条决定不算了」写进了记录，并且让那一对重新成为矛盾——于是它被 `--strict` 以 exit 2 收着费（边界 292）。第 126 轮补上了「重新决定」这条命令。两轮之后仍然缺一件小事：**撤销本身有多久了，没人说**。
+
+不是记账上的小事。`settlements.json` 里一条被撤销的决定和一条三天前被撤销的决定长得一样，页面只数「有几条被撤销」；读者因此无法回答「我今天该先做什么」，而第 111 轮刚刚教会循环「一条没人解释的决定是一项可以收费的债」——撤销是同一类债，而且它的补救命令从第 126 轮起**确实存在**，这就满足了收费的条件（边界 266 的另一半）。
+
+`unanswered_withdrawals(settlements, now=None)` 遍历仍在撤销状态的决定，从**最新一次**撤销的时刻起算天数，最老的排前面，带上当时的理由与署名：
+
+```
+$ brian evolve --audit
+1 decision(s) were withdrawn by a person, and the contradiction each one settled is back:
+  round-old.json             -> round-new.json              (2026-11-16T04:45:53.032630+00:00, by alice)
+A withdrawal says the decision no longer stands; it does not settle anything, so the pair is charged again until a new decision is recorded (boundary 291).
+1 withdrawal(s) have no answer yet: round-old.json -> round-new.json (withdrawn 2026-11-16T04:45:53.032630+00:00, 4.0 day(s) ago)
+`--settle-restore RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` decides one again: the withdrawal stays on the record, and the pair stops being charged (boundary 297).
+```
+
+两点：**年龄与命令印在同一页**（边界 297），**年龄在有没有上限时都印**（第 117 轮的规矩，用在这一类债上）。上限是政策，年龄是事实；把政策关掉不该让事实消失。
+
+```
+$ brian evolve --audit --strict                        # exit 0
+$ brian evolve --audit --strict --max-withdrawn-days 3 # exit 1
+1 decision(s) have been withdrawn for longer than the 3 day(s) asked for:
+  each of those pairs is a contradiction nobody has ruled on: the withdrawal says the decision no
+  longer stands, and nothing has taken its place, so `--audit` charges it and
+  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` is the command that pays it:
+  the pair is decided again, and the withdrawal stays on the record (boundary 297).
+```
+
+`--history` 与 `--campaign` 各有一行，campaign 那行指名最老的一条和它自己的命令：
+
+```
+withdrawn       1 decision(s) were withdrawn and nobody has taken them up again:
+  round-old.json -> round-new.json  (withdrawn 2026-11-16T04:45:53.032630+00:00, 4.0 day(s) ago)
+links    1 withdrawal(s) have no answer: round-old.json -> round-new.json was taken back on 2026-11-16T04:45:53.032630+00:00 (4.0 day(s) ago) and nothing has replaced it -- start with brian evolve --settle-restore round-old.json=round-new.json --settle-why TEXT --settle-by NAME
+```
+
+`--settle-restore` 之后同样的命令 exit 0，`--audit` 换成 `1 decision(s) carry a withdrawal a later decision answered:`：收费消失，撤销仍在。
+
+**演示逼出来的一个区别**（这是本轮真正的发现）：一开始的演练账本里，那一对既是「被撤销」又是 `mismatch`，`--strict` 早就以 exit 2 收着费了——**年龄收的是第二笔钱**，而缺陷只有一个。年龄收费真正能做的事只在一个状态里：**账本已经不再互相矛盾，但没人重新决定**（那条记录的后继改指别处、其它宣称者被 retire 掉，撤销孤零零地留着）。这个状态是真实的，而且恰好是最容易被忽视的：矛盾消失让人以为问题解决了，其实只是没人再提。所以演示把矛盾先化开，再让年龄收费；两种状态在页面上必须说得出区别（边界 298）。
+
+**边界 297**：一项债的页面必须同时印出它的年龄与能清掉它的那一条命令——只写「有 N 条在等」，读者拿到的是一句抱怨，不是一件工作。
+**边界 298**：同一条缺陷只能收一笔钱：撤销让矛盾回来了，链规则已经在 exit 2 上收费，年龄不得再收一次；年龄收费属于「账已经和好、却没人裁定」的那个状态，页面必须让这两种状态分得开。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7376,7 +7420,6 @@ missing for the next level
      `_settle_command` 与 `settle_link` 的判词改为指名 `--settle-restore`（不再说「没有这个命令」），
      `restore_settlement` 的幂等检查提前到拒绝之前，历史行上的标记只落在被决定的那个记录上（第 124 轮的同一处），
      以及 CLI 夹具的时钟。
-113. 被撤销、并且一直没人重新决定的那一对，现在有年龄了（`withdrawn[].at`），但没人收费：`--max-withdrawn-days N`
-     （默认关）在某一对已经「重新成为矛盾」超过 N 天而无人重新决定时让 `--strict` 退 1；`--campaign` 打印最老的那一条
-     撤销（谁、什么时候、为什么），并指名 `--settle-restore`——和「没人能解释的决定」那一类不同，这一类的补救命令确实
-     存在，所以它可以被收费（第 266 条边界）。
+113. ✅ 给「撤了、一直没人重新决定」的一对收费（本轮）：`unanswered_withdrawals()`、`--max-withdrawn-days N`（默认关，`--strict` 才读）、`--audit` / `--history` / `--campaign` 各印年龄，`--settle-restore` 清账。演练发现「年龄收费只在矛盾已经和好时才有意义」，写进边界 298。
+
+114. 撤销欠账按流文件拆开：`--campaign` 像 `reaffirm_plan` 那样按 origin 分桶，`--audit --strict` 加 `--max-withdrawn-per-file N`——十一条撤销散在十一个文件上是十一个下午，堆在一个文件上是一个（边界 279 用在这一类债上）；同时把 `--history` 的撤销块与 `--campaign --json-out` 的键对齐。

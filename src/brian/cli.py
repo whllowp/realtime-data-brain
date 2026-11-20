@@ -77,6 +77,7 @@ from .evolve import (
     backfilled_links,
     format_repairs,
     load_settlements,
+    unanswered_withdrawals,
     unexplained_decisions,
     moved_settlements,
     settlement_summary,
@@ -371,7 +372,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  unexplained_stale: int = 0,
                  unexplained_days: Optional[float] = None,
                  restaled: int = 0, max_restaled: Optional[int] = None,
-                 per_file_restaled: int = 0, max_restaled_per_file: Optional[int] = None) -> int:
+                 per_file_restaled: int = 0, max_restaled_per_file: Optional[int] = None,
+                 unanswered: int = 0, unanswered_days: Optional[float] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -464,6 +466,15 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("  afternoons, and eleven on one file is one. Re-take that file's decisions with")
         _print("  `brian evolve --settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT`, which `brian evolve")
         _print("  --campaign` lists one command per pair (boundary 279).")
+    if unanswered:
+        # Round 127: unlike the unexplained decisions, this one has a command that clears it, so it is charged
+        # (boundary 266's condition) -- and the pair is a standing contradiction while it waits (boundary 294).
+        _print("%d decision(s) have been withdrawn for longer than the %d day(s) asked for:" % (unanswered,
+                                                                                             int(unanswered_days or 0)))
+        _print("  each of those pairs is a contradiction nobody has ruled on: the withdrawal says the decision no")
+        _print("  longer stands, and nothing has taken its place, so `--audit` charges it and")
+        _print("  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` is the command that pays it:")
+        _print("  the pair is decided again, and the withdrawal stays on the record (boundary 297).")
     if broken_links:
         return 2
     if unreconstructable:
@@ -629,7 +640,7 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
                  or ceiling_capped or in_force_stale or unexplained_stale or restaled
-                 or per_file_restaled) else 0
+                 or per_file_restaled or unanswered) else 0
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -1671,6 +1682,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     unexplained_stale = ([row for row in unexplained_rows
                           if float(row.get("age_days") or 0.0) >= float(_unexplained_cap)]
                          if _unexplained_cap is not None else [])
+    # Round 127: a pair withdrawn and never taken up again is a contradiction nobody has ruled on, and round 126
+    # built the command that rules on it -- which is what makes it chargeable (boundaries 266/271).
+    try:
+        _withdrawn_rows = unanswered_withdrawals(load_settlements(root))
+    except OSError:
+        _withdrawn_rows = []
+    _withdrawn_cap = getattr(args, "max_withdrawn_days", None)
+    _unanswered = ([row for row in _withdrawn_rows
+                    if float(row.get("age_days") or 0.0) >= float(_withdrawn_cap)]
+                   if _withdrawn_cap is not None else [])
     try:
         deployed = load_promotions(root)
     except OSError:
@@ -1732,6 +1753,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     if getattr(args, "max_unexplained_days", None) is not None and not getattr(args, "strict", False):
         # Round 117: same shape as --max-ceiling-debt. The page prints the ages either way; only the gate fails.
         _print("--max-unexplained-days caps a --strict charge; without --strict nothing reads it")
+        return 2
+    if getattr(args, "max_withdrawn_days", None) is not None and not getattr(args, "strict", False):
+        # Round 127: same rule again -- a cap the gate never reads is a flag that looks armed.
+        _print("--max-withdrawn-days caps a --strict charge; without --strict nothing reads it")
         return 2
 
     if getattr(args, "from_queue", None) is not None and not getattr(args, "verify", False):
@@ -1829,6 +1854,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     if args.history:
+        # Round 127: a withdrawal with no answer is the debt the gate charges, so the page that shows the ledger
+        # must show it -- with the age, and with the command, because "somebody withdrew this" alone is a rumour.
+        if _withdrawn_rows:
+            _print("withdrawn       %d decision(s) were withdrawn and nobody has taken them up again:"
+                   % len(_withdrawn_rows))
+            for row in _withdrawn_rows:
+                age = row.get("age_days")
+                past = (_withdrawn_cap is not None and age is not None
+                        and float(age) >= float(_withdrawn_cap))
+                _print("  %s -> %s  (withdrawn %s, %s day(s) ago)%s"
+                       % (row.get("record"), row.get("successor"), row.get("at"),
+                          "?" if age is None else "%.1f" % float(age),
+                          "  [past the cap: --strict exits 1]" if past else ""))
+            _print("  take one up again with `brian evolve --settle-restore RECORD=SUCCESSOR --settle-why TEXT`:")
+            _print("  the pair is decided again, and the withdrawal stays on the record (boundary 297).")
         # Round 118: the same rows the audit page prints, so a reader who opens the ledger never reads a decision
         # as settled while the books it settled have moved (boundary 264).
         try:
@@ -2652,7 +2692,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unexplained_stale=len(unexplained_stale),
                             unexplained_days=_unexplained_cap,
                             restaled=_restaled, max_restaled=_moved_cap,
-                            per_file_restaled=_per_file_restaled, max_restaled_per_file=_per_file_cap)
+                            per_file_restaled=_per_file_restaled, max_restaled_per_file=_per_file_cap,
+                            unanswered=len(_unanswered), unanswered_days=_withdrawn_cap)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -2690,7 +2731,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
         try:
             result = audit(root, rules, in_force=in_force_rows,
-                           in_force_cleared=in_force_cleared, in_force_stale=in_force_stale_rows)
+                           in_force_cleared=in_force_cleared, in_force_stale=in_force_stale_rows,
+                           unanswered=_withdrawn_rows)
         except OSError as error:
             _print("cannot audit %s: %s" % (root / EVOLVE_DIR, error))
             return 2
@@ -2795,7 +2837,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unexplained_stale=len(unexplained_stale),
                             unexplained_days=_unexplained_cap,
                             restaled=_restaled, max_restaled=_moved_cap,
-                            per_file_restaled=_per_file_restaled, max_restaled_per_file=_per_file_cap)
+                            per_file_restaled=_per_file_restaled, max_restaled_per_file=_per_file_cap,
+                            unanswered=len(_unanswered), unanswered_days=_withdrawn_cap)
 
     if args.grade:
         try:
@@ -5090,6 +5133,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --audit --strict: fail when more than this many recorded rounds were "
                              "judged under wait ceilings that differ from today's (a ceiling is not in the "
                              "rulebook, so a rules audit cannot otherwise see it move)")
+    evolve.add_argument("--max-withdrawn-days", type=float, default=None, metavar="DAYS",
+                        help="with --strict: charge decisions withdrawn for longer than DAYS with no new decision")
     evolve.add_argument("--max-unexplained-days", type=float, default=None, metavar="DAYS",
                         help="with --strict: fail when a decision has had no reason and no note for longer "
                              "than DAYS (default off)")

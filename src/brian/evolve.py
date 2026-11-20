@@ -3162,6 +3162,39 @@ def withdraw_settlement(root: Path, record: str, successor: str, why: str = "", 
             "changed": True}
 
 
+def unanswered_withdrawals(settlements: Sequence[Mapping[str, Any]],
+                           now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Decisions standing withdrawn, nobody having taken them up again, oldest first (round 127).
+
+    Round 125 made the pair a contradiction again, which means the debt is real and *reported*; nothing charged it,
+    because at the time no command could clear it (boundary 271). Round 126 built that command, so the condition for
+    charging has arrived: `--settle-restore` is the one action that answers this debt, and a debt with a command
+    behind it that no gate reads is a debt only a careful reader pays (boundary 154's rule, applied to decisions).
+    """
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    rows: List[Dict[str, Any]] = []
+    for item in settlements or []:
+        if not isinstance(item, Mapping) or not is_withdrawn(item):
+            continue
+        taken = _latest_moment(item.get("withdrawn"))
+        age: Optional[float] = None
+        if taken:
+            try:
+                age = max(0.0, (moment - datetime.fromisoformat(taken)).total_seconds() / 86400.0)
+            except ValueError:
+                age = None
+        latest = [entry for entry in item.get("withdrawn") or [] if isinstance(entry, Mapping) and
+                  str(entry.get("at") or "") == taken]
+        rows.append({"record": str(item.get("record") or ""), "successor": str(item.get("successor") or ""),
+                     "at": taken, "age_days": age,
+                     "why": str((latest[-1] if latest else {}).get("why") or ""),
+                     "by": str((latest[-1] if latest else {}).get("by") or "")})
+    # Oldest first: the pair nobody has looked at longest is the one a reader should open first, and an age that
+    # cannot be read sorts ahead of everything rather than quietly behind it.
+    rows.sort(key=lambda row: (row["at"] or "", row["record"]))
+    return rows
+
+
 def restore_settlement(root: Path, record: str, successor: str, why: str = "", by: str = "",
                        now: Optional[datetime] = None) -> Dict[str, Any]:
     """Take a withdrawn decision up again, as a new decision with its own date and reason (round 126).
@@ -3971,6 +4004,9 @@ class Audit:
     # Round 126: decisions a later decision took up again. Printed apart from both `settled` and `withdrawn`,
     # because a pair decided twice with a withdrawal in between is a different history from one decided once.
     redecided: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 127: withdrawals nobody has answered, with their age. Printed on the audit page whether or not a cap
+    # was asked for, because the age is the fact and the cap only decides whether the gate fails (boundary 267).
+    unanswered: List[Dict[str, Any]] = field(default_factory=list)
     # Round 85: versions the deployment states say are running whose producing record the books dispute or
     # that a repair copied. Round 84 refused to *stack* a promise there; once a version is applied that refusal
     # is not available, so the fact is reported here instead -- and charged when the two books contradict.
@@ -4061,7 +4097,8 @@ class Audit:
 def audit(root: Path, rules: Optional[EvolveRules] = None,
           in_force: Optional[Sequence[Mapping[str, Any]]] = None,
           in_force_cleared: Optional[Sequence[Mapping[str, Any]]] = None,
-          in_force_stale: Optional[Sequence[Mapping[str, Any]]] = None) -> Audit:
+          in_force_stale: Optional[Sequence[Mapping[str, Any]]] = None,
+          unanswered: Optional[Sequence[Mapping[str, Any]]] = None) -> Audit:
     """Re-decide every stored round under `rules` and report what moves.
 
     No measurement is re-run and no Laya call is made: this answers "do the records still say what this
@@ -4130,7 +4167,8 @@ def audit(root: Path, rules: Optional[EvolveRules] = None,
                  backfilled=backfilled_links(history(root, include_retired=True)),
                  in_force=[dict(item) for item in (in_force or [])],
                  in_force_cleared=[dict(item) for item in (in_force_cleared or [])],
-                 in_force_stale=[dict(item) for item in (in_force_stale or [])])
+                 in_force_stale=[dict(item) for item in (in_force_stale or [])],
+                 unanswered=[dict(item) for item in (unanswered or [])])
 
 
 def _limit_terms(limits: Optional[Mapping[str, Any]]) -> Optional[Tuple[Optional[float],
@@ -4477,6 +4515,18 @@ def _link_lines(result: Audit) -> List[str]:
                             str(taken.get("at") or ""), who or "no one named"))
         lines.append("A withdrawal says the decision no longer stands; it does not settle anything, so the pair "
                      "is charged again until a new decision is recorded (boundary 291).")
+    if result.unanswered:
+        # The age turns "nobody has answered this" into work with a size, and the command is the only thing that
+        # clears it: a page that prints one without the other leaves the reader with a complaint (boundary 297).
+        lines.append("%d withdrawal(s) have no answer yet: %s"
+                     % (len(result.unanswered),
+                        ", ".join("%s -> %s (withdrawn %s, %s day(s) ago)"
+                                  % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                                     str(item.get("at") or ""),
+                                     "?" if item.get("age_days") is None else "%.1f" % float(item["age_days"]))
+                                  for item in result.unanswered)))
+        lines.append("`--settle-restore RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` decides one again: the "
+                     "withdrawal stays on the record, and the pair stops being charged (boundary 297).")
     if result.redecided:
         # Round 126: the other direction. A new decision on a withdrawn pair silences the contradiction again,
         # which is exactly what a decision is for -- but a reader who only saw the withdrawal would read the
