@@ -8858,6 +8858,91 @@ payload——所以它们是那一行的读者，不是第二十二个之后的�
 **边界 396**：只钉在测试里的规则，对需要它的人是隐形的；把清单印在命令旁边，它才同时是约束和说明书。
 
 
+### 3.171 清单自己能被检查：`--check`、补上的那个缺口，以及"两种什么都没有"
+
+第 164 轮把导出清单做成了一页，并且发现 `--backfill-walks` 根本不导出任何东西。这一轮做两件事：让那一页的
+声明**可以被一条命令检查**，以及与它同一件事的另一面——把缺的那个导出补上。
+
+**一、页面的话，命令来验。** 第 163 轮的计数活在一次 `pytest` 里：它只对跑测试的人说话。CI 里的其它检查、
+发布脚本、想先确认再相信页面的读者，都读不到它。现在：
+
+```
+$ brian evolve --payload-writers --check
+checked           the page and the source agree: 24 writer(s), 4 file-level form(s), 0 named gap(s)
+```
+
+不一致时以退出码 2 结束，并逐条说明哪里不一致：
+
+```
+$ brian evolve --payload-writers --check      # 这一轮刚加完代码、表格还没动的那个瞬间
+inconsistent      the page lists 22 payload writer(s) and this source has 24: the table and the calls have to move together
+checked           1 problem(s): the page does not describe this source (boundary 392)
+```
+
+**规则第一次运行就拒绝了加它的那次改动**——因为这次改动新增了两个 `_write_payload(` 调用（干跑一份、真跑
+一份）。这不是意外，这就是这条规则存在的意思：表格要么跟着调用走，要么页面上写的就是假话。于是表格变成
+24 行，`EXPECTED_PAYLOAD_WRITERS` 也变成 24，三处（表格、测试常量、调用点）再次同数——而第四处（`--check`）
+是**推导出来的**，不需要任何人记着去改。
+
+`--check` 单独出现时被拒绝：`--check reads the --payload-writers page; without it there is nothing to check`。
+检查只读源码，不碰账本（实测：在空目录里跑完，连 `var/` 都没被创建）。
+
+**二、缺口补上，而且两边写的是同一个答案。** `--backfill-walks` 现在导出它自己的结果：
+
+```
+$ brian evolve --backfill-walks --dry-run --json-out dry.json     # 预览
+{"backfilled": [], "would_backfill": [{"round": "round-a.json", "successor": "round-x.json", "at": "..."}],
+ "dry_run": true}
+$ brian evolve --backfill-walks --json-out real.json              # 真跑
+{"backfilled": [{... "rounds": ["round-x.json"], "hand": true, "backfilled": true ...}], "would_backfill": [],
+ "dry_run": false}
+```
+
+`dry_run` 是 payload 自己的一栏，因为它决定读者该看哪个列表；而"什么都没找到"时不写文件、并明说
+`no payload        nothing was backfilled, so there is no walk to hand over (boundary 339).`——第 142 轮
+"记录了什么都不算记录"的规则，在这里是同一个意思。
+
+**三、真跑一次，预览在撒谎。** 到真实账本上跑预览：
+
+```
+$ brian evolve --backfill-walks --dry-run --json-out var\dry165.json
+would backfill    round-20261117T201046Z.json -> round-20261118T042134Z.json (the payment is dated 2026-11-18T04:21:37Z)
+... 一共 27 行
+```
+
+但真跑会写 **0** 条：那 27 笔支付第 147 轮就已经补进 store 了。预览回答的是"账本一共提名过多少笔"，真跑
+回答的是"这次还会写几笔"——**两个不同的问题，一个界面**。这和"能付几轮"（第 150 轮）、"付不动的两半"
+（第 151 轮）是同一类错误：计数口径必须和动作口径一样。
+
+修法不是给预览加一个过滤器，而是让两边**问同一个函数**：`src/brian/promote.py` 新增
+
+```python
+def pending_walk_backfill(root: Path, pairs: Sequence[Any]) -> List[Any]:
+    """The pairs `backfill_walks` would write: successors the store does not hold yet, one per successor."""
+```
+
+`backfill_walks` 改成遍历 `pending_walk_backfill(root, pairs)`，`--backfill-walks` 的预览也用它。于是预览与
+真跑不可能再给出两个答案——它们没有各自的答案了。
+
+**四、两种"什么都没有"要分两句。** 上面的修改一落地，真实账本上的预览立刻改口成
+`nothing to backfill: no round in the ledger names the re-run that replaced it`——**这是错的**：账本明确地
+提名了 27 笔，只是它们都已经在 store 里了。两种状态，两个下一步：
+
+```
+账本没提名任何支付        nothing to backfill: no round in the ledger names the re-run that replaced it
+账本提名了、store 里都有了 nothing to backfill: every payment the ledger names already has a walk in the store
+                          no payload        nothing was backfilled, so there is no walk to hand over (boundary 339).
+```
+
+一句"没东西可补"会同时是"没有历史"和"历史已经写完了"，而后者是好消息、前者是坏消息（第 367 轮：一张表混
+了两种下一步，就得按下一步拆开）。
+
+**边界 397**：一个页面上的声明，必须能被一条不依赖测试套件的命令检查并给出退出码；只活在 `pytest` 里的
+一致性，等于对 CI 的其它检查说"这里没问题"。
+**边界 398**：预览与真跑必须回答同一个问题——过滤器只加在真跑上，预览就是另一条命令。
+**边界 399**：两种"没有"（没有提名 / 提名了且已完成）要两句不同的话，否则好消息和一个缺陷读起来一样。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9482,6 +9567,12 @@ missing for the next level
      第 164 轮完成（§3.170）：`PAYLOAD_WRITERS` 22 行 + `format_payload_writers()`，与测试里的计数、源码里的
      调用点三处同数；顺带修正 `--claim-round-file`/`--backfill-claims` 在 `--dry-run` 下的 `recorded=`，
      并把"`--backfill-walks` 根本没有 `--json-out`"这个缺口印在页面上。
-151. 给 `--backfill-walks` 补上姊妹命令已有的导出（`--json-out` 一份 `{"backfilled": [...]}`），并让
-     `brian evolve --payload-writers --check` 在表格与源码不一致时以退出码 2 结束——今天这份一致性只有
-     `pytest` 读得到，CI 里其它检查读不到（边界 392/396）。
+151. ~~给 `--backfill-walks` 补上导出，并让 `--payload-writers --check` 在表格与源码不一致时退出 2。~~
+     第 165 轮完成（§3.171）：`--check` 第一次运行就拒绝了加它的那次改动（22 行表 vs 24 个调用），缺口补上后
+     表格 24 行、`EXPECTED_PAYLOAD_WRITERS` 24、`--check` 推导验证；顺带发现预览在真实账本上承诺 27 笔、
+     真跑写 0 笔（补进去的都已存在），改成两边共用 `pending_walk_backfill()`，并把"没有提名"与"提名了且
+     已完成"分成两句。
+152. 让闸门自己读这一页：`--audit --strict` / `--campaign --strict` 在 `payload_writer_problems()` 非空时
+     以退出码 2 结束——今天 `--check` 是一条要人记得去跑的命令，闸门（第 33/56/58/72/101/108/135/147 轮的
+     `--strict` 家族）并不看它，所以"表格和源码不一致"仍然可以随一次 `--strict` 全绿的提交进主干
+     （边界 397 的直接后果）。

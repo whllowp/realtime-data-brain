@@ -1914,6 +1914,24 @@ def finish_rerun_run(root: Path, walk: int, run: Mapping[str, Any],
 
 
 
+def pending_walk_backfill(root: Path, pairs: Sequence[Any]) -> List[Any]:
+    """The pairs `backfill_walks` would write: successors the store does not hold yet, one per successor.
+
+    Round 165: the preview counted every retirement in the ledger, so on this machine it promised 27 payments for
+    a run that would write none -- they had all been backfilled in round 147. A preview that answers a different
+    question from the run is worse than no preview (boundary 364), so both ask this function.
+    """
+    known = {str(item) for run in rerun_runs(root)["runs"] for item in (run.get("rounds") or [])}
+    pending: List[Any] = []
+    for pair in pairs:
+        successor = str(pair[1] if len(pair) > 1 else "")
+        if not successor or successor in known:
+            continue
+        known.add(successor)
+        pending.append(pair)
+    return pending
+
+
 def backfill_walks(root: Path, pairs: Sequence[Any], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """Write the payments the ledger records but the store never saw (round 147).
 
@@ -1935,10 +1953,8 @@ def backfill_walks(root: Path, pairs: Sequence[Any], now: Optional[datetime] = N
     known = {str(item) for run in runs for item in (run.get("rounds") or [])}
     written: List[Dict[str, Any]] = []
     fallback = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
-    for pair in pairs:
+    for pair in pending_walk_backfill(root, pairs):
         successor = str(pair[1] if len(pair) > 1 else "")
-        if not successor or successor in known:
-            continue
         moment = _parse_moment(pair[2] if len(pair) > 2 else None) or fallback
         ordinal = trimmed + len(runs) + 1
         entry = {

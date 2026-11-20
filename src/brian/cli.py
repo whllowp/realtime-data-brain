@@ -133,6 +133,7 @@ from .promote import (
     in_force_overrides,
     legacy_state_note,
     load_promotions,
+    pending_walk_backfill,
     queue_runs,
     observe_in_force_disputes,
     stale_in_force_disputes,
@@ -503,6 +504,8 @@ PAYLOAD_WRITERS: Tuple[Tuple[str, str, str], ...] = (
      '{"rounds", "links", "in_force_clearings", "stream_path_moves", "ceilings", "claim_counts"}', "reports"),
     ("--claim-round-file", '{"claimed", "claim_refused"}', "records, unless --dry-run"),
     ("--backfill-claims", '{"filled", "dry_run"}', "records, unless --dry-run"),
+    ("--backfill-walks", '{"backfilled", "would_backfill", "dry_run"}', "records"),
+    ("--backfill-walks (a dry run)", '{"backfilled": [], "would_backfill", "dry_run"}', "reports"),
     ("--unrecorded", '{"rounds", "unattributed", "matters", "payable", "out_of_reach", "ceilings"}', "reports"),
     ("--campaign", "the campaign report (drift, debt, queue, claims, offer)", "reports"),
     ("--sensitivity", "the sensitivity ladder", "reports"),
@@ -529,10 +532,10 @@ PAYLOAD_BATCH_FORMS: Tuple[str, ...] = (
     "--settle-reaffirm-file", "--settle-restore-file", "--settle-drop-file", "--settle-reanchor-file",
 )
 
-# Found by writing the table (round 164): `--backfill-walks` takes `--dry-run` and prints what it did, but has no
-# `--json-out` at all -- so its sibling `--backfill-claims` can be scripted and it cannot. The inventory names the
-# gap instead of quietly leaving it out, and --history/--campaign/--audit stay the only pages a caller can read.
-PAYLOAD_NONE: Tuple[str, ...] = ("--backfill-walks",)
+# Round 164 found, by writing the table, that `--backfill-walks` had no `--json-out` at all while its sibling
+# `--backfill-claims` did. Round 165 closed the gap and this tuple is now empty -- it stays as the place a gap is
+# named, so the next one is printed rather than left out (an empty tuple is a claim the page can make out loud).
+PAYLOAD_NONE: Tuple[str, ...] = ()
 
 
 def format_payload_writers() -> str:
@@ -545,9 +548,14 @@ def format_payload_writers() -> str:
     lines.append("the file-level forms %s write" % ", ".join(PAYLOAD_BATCH_FORMS))
     lines.append("the record list of their single form: one writer, because the single form is the one that writes it.")
     lines.append("")
-    lines.append("%s takes --dry-run and exports nothing: it writes no payload at all, so a caller cannot" %
-                 " ".join(PAYLOAD_NONE))
-    lines.append("script it the way it can script --backfill-claims (round 164 found this by writing the table).")
+    if PAYLOAD_NONE:
+        lines.append("%s takes --dry-run and exports nothing: it writes no payload at all, so a caller cannot"
+                     % " ".join(PAYLOAD_NONE))
+        lines.append("script it the way it can script its siblings (round 164 found the first one this way).")
+    else:
+        lines.append("every batch command that takes --dry-run exports a payload: round 164 found that "
+                     "`--backfill-walks` did not,")
+        lines.append("round 165 gave it one -- `{\"backfilled\": [...], \"would_backfill\": [], \"dry_run\": false}`.")
     lines.append("")
     lines.append("Every one of them goes through _write_payload: the parent directory is created, the file is renamed")
     lines.append("into place, and the page says `wrote <path>` (boundary 336). A write that fails exits 2 and says which")
@@ -559,6 +567,33 @@ def format_payload_writers() -> str:
     lines.append("A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this")
     lines.append("table and its count move together (boundary 392).")
     return "\n".join(lines)
+
+
+def payload_writer_problems(source: Optional[str] = None) -> List[str]:
+    """Round 165: the table says "N command(s), one writer" -- this evaluates that claim from the source.
+
+    `tests/test_payload_inventory.py` compares the table with the calls, but a test only speaks to whoever runs the
+    suite. A command that exits 2 says the same thing to CI, to a release script, and to a reader who wants to know
+    before trusting the page (boundaries 392/396).
+    """
+    problems: List[str] = []
+    text = source
+    if text is None:
+        try:
+            text = Path(__file__).read_bytes().decode("utf-8")
+        except OSError as error:  # pragma: no cover - the file is this module
+            return ["cannot read my own source to check the inventory: %s" % error]
+    calls = [line for line in text.splitlines()
+             if "_write_payload(" in line and "def _write_payload" not in line]
+    if len(calls) != len(PAYLOAD_WRITERS):
+        problems.append("the page lists %d payload writer(s) and this source has %d: the table and the calls have to "
+                        "move together" % (len(PAYLOAD_WRITERS), len(calls)))
+    named = " ".join(command for command, _payload, _kind in PAYLOAD_WRITERS)
+    named += " " + " ".join(PAYLOAD_BATCH_FORMS) + " " + " ".join(PAYLOAD_NONE)
+    missing = [flag for flag, _attribute in BATCH_PREVIEWS if flag not in named]
+    if missing:
+        problems.append("the page does not name %s, which --dry-run accepts" % ", ".join(missing))
+    return problems
 
 
 def previewing_flags(args: argparse.Namespace) -> List[str]:
@@ -2444,9 +2479,25 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 return 2
         return 0
 
+    if getattr(args, "check", False) and not getattr(args, "payload_writers", False):
+        _print("--check reads the --payload-writers page; without it there is nothing to check")
+        return 2
+
     if getattr(args, "payload_writers", False):
         # Round 164 (item 150): the inventory round 163 pinned in a test, on a page -- so the rule lives where a
-        # reader looks for it, not only where the suite runs (boundary 392).
+        # reader looks for it, not only where the suite runs (boundary 392). Round 165 makes that page checkable by
+        # the command itself, so CI can read the claim without running the suite (boundary 396).
+        if getattr(args, "check", False):
+            problems = payload_writer_problems()
+            if problems:
+                for problem in problems:
+                    _print("inconsistent      %s" % problem)
+                _print("checked           %d problem(s): the page does not describe this source (boundary 392)"
+                       % len(problems))
+                return 2
+            _print("checked           the page and the source agree: %d writer(s), %d file-level form(s), "
+                   "%d named gap(s)" % (len(PAYLOAD_WRITERS), len(PAYLOAD_BATCH_FORMS), len(PAYLOAD_NONE)))
+            return 0
         _print(format_payload_writers())
         return 0
 
@@ -3291,11 +3342,25 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if not pairs:
             _print("nothing to backfill: no round in the ledger names the re-run that replaced it")
             return 0
+        # Round 165: what this run would write, not everything the ledger ever named -- the same list the run uses.
+        # Two different nothings (boundary 367): a ledger that names no payment, and a store that already holds
+        # every payment the ledger names. The first is `if not pairs` above; this is the second.
+        pairs = pending_walk_backfill(root, pairs)
+        if not pairs:
+            _print("nothing to backfill: every payment the ledger names already has a walk in the store")
+            if getattr(args, "json_out", None):
+                _print("no payload        nothing was backfilled, so there is no walk to hand over (boundary 339).")
+            return 0
         if getattr(args, "dry_run", False):
-            for record, successor, at in pairs:
+            would = [{"round": record, "successor": successor, "at": at or ""}
+                     for record, successor, at in pairs]
+            for row in would:
                 _print("would backfill    %s -> %s (the payment is dated %s)"
-                       % (record, successor, at or "unknown"))
+                       % (row["round"], row["successor"], row["at"] or "unknown"))
             _print("nothing was written; drop --dry-run to write the walks the ledger already names (boundary 304).")
+            if getattr(args, "json_out", None) and not _write_payload(
+                    args.json_out, {"backfilled": [], "would_backfill": would, "dry_run": True}, recorded=False):
+                return 2
             return 0
         try:
             written = backfill_walks(root, pairs)
@@ -3304,12 +3369,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             return 2
         if not written:
             _print("nothing to backfill: every payment the ledger names already has a walk in the store")
+            if getattr(args, "json_out", None):
+                _print("no payload        nothing was backfilled, so there is no walk to hand over (boundary 339).")
             return 0
         for entry in written:
             _print("backfilled        %s -> walk %d, dated %s"
                    % (entry["rounds"][0], entry["walk"], entry["at"]))
         _print("backfilled        %d payment(s) the ledger recorded and the store never saw; each entry says so, "
                "and each keeps the moment of the payment (boundary 354)" % len(written))
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"backfilled": written, "would_backfill": [], "dry_run": False}):
+            return 2
         return 0
 
     if args.retire:
@@ -6448,6 +6518,8 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--strict", action="store_true",
                         help="with --audit or --campaign: exit 1 when a recorded verdict would be decided "
                              "differently today, 2 when part of the ledger cannot be replayed at all")
+    evolve.add_argument("--check", action="store_true",
+                        help="with --payload-writers: exit 2 when the page and the source disagree")
     evolve.add_argument("--payload-writers", dest="payload_writers", action="store_true",
                         help="list the commands that export a payload, and what the writer says when it cannot")
     evolve.add_argument("--json-out", help="write the round to this file as well")

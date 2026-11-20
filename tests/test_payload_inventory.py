@@ -17,7 +17,7 @@ SOURCE = Path(cli.__file__).read_bytes().decode("utf-8")
 
 # Every place a command hands a payload to the caller. Adding a command with `--json-out` means adding a call here,
 # so bump it in the same change -- the point of the constant is that forgetting is a test failure, not a review note.
-EXPECTED_PAYLOAD_WRITERS = 22
+EXPECTED_PAYLOAD_WRITERS = 24
 
 
 def test_no_command_writes_a_payload_by_hand():
@@ -83,16 +83,16 @@ def test_the_page_names_the_batch_command_that_exports_nothing():
     """Writing the table is what found it: `--backfill-walks` has no `--json-out`, unlike `--backfill-claims`."""
     printed = cli.format_payload_writers()
 
-    assert cli.PAYLOAD_NONE == ("--backfill-walks",)
-    assert "--backfill-walks takes --dry-run and exports nothing" in printed
-    assert "script it the way it can script --backfill-claims" in printed
+    assert cli.PAYLOAD_NONE == ()  # round 165 closed the gap the table found
+    assert "every batch command that takes --dry-run exports a payload" in printed
+    assert "round 165 gave it one" in printed
 
 
 def test_every_row_says_whether_the_command_records_something():
     """`recorded=` decides which of the two failure sentences is true (boundaries 390/393)."""
     kinds = {kind for _command, _payload, kind in cli.PAYLOAD_WRITERS}
     assert kinds == {"records", "reports", "records, unless --dry-run"}
-    assert sum(1 for _c, _p, kind in cli.PAYLOAD_WRITERS if kind == "reports") == 7
+    assert sum(1 for _c, _p, kind in cli.PAYLOAD_WRITERS if kind == "reports") == 8
 
 
 def test_the_page_says_what_the_writer_says_when_it_cannot_write():
@@ -112,7 +112,7 @@ def test_the_page_needs_no_ledger(tmp_path, monkeypatch, capsys):
     assert cli.main(["evolve", "--payload-writers"]) == 0
 
     printed = capsys.readouterr().out
-    assert "brian payload writers: 22 command(s), one writer" in printed
+    assert ("brian payload writers: %d command(s), one writer" % EXPECTED_PAYLOAD_WRITERS) in printed
     assert "--settle-reaffirm" in printed
     assert not (tmp_path / "var").exists(), "the page is a report: it must not create a book"
 
