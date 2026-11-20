@@ -9170,6 +9170,64 @@ next check        would charge 1 item(s): moved verdict (6)
 知道"会失败"却不知道"怎么看到失败"。
 
 
+### 3.177 不收费的那几页，也得说自己没收费
+
+第 170 轮让报告末尾印出"下一次检查会收几项"。第 171 轮要问的是：**谁在收费**。清单写的是
+"`--audit` / `--campaign` 末尾带着它"，我一开始以为 `--sensitivity` 也带着——因为它附近就有一行
+`_strict_exit(...)`。读到分支本身才发现：那一行属于紧随其后的 `--audit` 分支，`--sensitivity` 打印完
+表格就 `return 0`，**从未走到闸门**。
+
+这是一次很典型的误读：**按行号猜分支，不等于读分支**。那次误读还差点让我做错一件更糟的事——我先把
+`--history --strict` 改成直接拒绝（`--strict` 在这页上确实什么都不收），结果一个既有测试立刻变红：
+`--history --strict --max-unexplained-days 3` 是**有人用的**，那页要靠 cap 在行上标
+`[past the cap: --strict exits 1]`。拒绝它等于砸掉这页存在的理由。
+
+所以这一轮做的是：
+
+**1. 四张"只读账本"的页都印一行、都带一个键。**
+
+```
+gate              this page reads the ledger and charges nothing; `brian evolve --campaign --strict` is the page that does
+```
+
+`--history`、`--sensitivity`、`--withheld`、`--unrecorded` 四页都印这一行，payload 里都多一个
+
+```json
+"gate": {"asked": false, "checked": false, "command": "brian evolve --campaign --strict"}
+```
+
+而 `--audit` / `--campaign` 的 payload 现在是 `{"asked": …, "checked": true, "would_charge": […], "charges": […], "exit": …}`。
+`checked` 由 `_strict_exit` 里的 `_done()` 统一写入，所以"这页跑没跑闸门"是算出来的，不是各页手写的。
+
+三张页面在这里的区别，正好是三种事实：
+
+| payload | 含义 |
+| --- | --- |
+| `checked: true`、`would_charge: []` | 查了，没查出要收的 |
+| `checked: false`、`command: …` | 没查（这页不查），该去那儿查 |
+| 没有 `gate` 键 | 这个构建不认识"闸门"这件事 |
+
+第三种最危险：它和第一种在脚本眼里一模一样，`payload.get("gate", {})` 两头都是空。
+
+**2. `--history --strict` 不再沉默，但也不拒绝。**
+
+```
+--strict          this page reads the ledger and charges nothing; `brian evolve --audit --strict` turns the marks above into an exit
+```
+
+同一个 `report_footer(checked=False, asked=True)`，只换一句：读者带着 `--strict` 来这页，说明他要的是判决，
+那就告诉他判决在哪一页；带上 `asked: true`，脚本能看出"他要过，这页没给"。
+
+**3. 清单页跟着改。** `PAYLOAD_WRITERS` 里那四行本来写着"这页写出哪些键"——加了 `gate` 却不改，下一轮读
+这张表的人就会以为没有它（第 170 轮刚吃过"表与源不一致"的亏）。
+
+**边界 410**：一页没查，就必须说它没查。"没有收费"、"没查"、以及"这个构建没有这一栏"，是三件不同的事；
+把它们合成一个空值，脚本与人都只能靠猜。
+**边界 411**：一个开关落到一页"永远不会收费"的页面上，必须在那页上被**承认**（并指出真正判决的那条命令），
+而不是被静默吞掉；只有在那一页确实什么都不读它的时候，拒绝才是对的——`--history` 上的 cap 会标行，
+所以那里不能拒绝。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9815,6 +9873,11 @@ missing for the next level
 156. ~~让页面也说出"下一次检查会收 N 项"。~~ 第 170 轮完成（§3.176）：报告末尾印
      `next check        would charge N item(s): <rule (count)>` 与具名命令，`--strict` 时不印（那一段段落
      已经说过），规则名与计数取自同一份 `charges` 清单（边界 408/409）。
-157. 让这条摘要也出现在 `--history` 与 `--sensitivity` 上：它们是同一类"报告"，今天只有 `--audit` /
-     `--campaign` 末尾带着它。把"报告页的收尾"收成一处函数（打印 + 进入 payload），三张报告都用它，
-     免得下一张新报告又漏掉这一行（第 160 轮的规矩用在报告收尾上）。
+157. ~~让这条摘要也出现在 `--history` 与 `--sensitivity` 上，并把"报告收尾"收成一处。~~ 第 171 轮完成
+     （§3.177）：清单页说的范围本来是对的，我先猜错了（把 `--audit` 分支的 `_strict_exit` 读成了
+     `--sensitivity` 的）。现在四张只读账本的页（`--history`、`--sensitivity`、`--withheld`、
+     `--unrecorded`）都印同一行、payload 都带 `gate`，`checked` 由 `_done()` 统一写；`--history --strict`
+     被承认（`asked: true`）而不是拒绝——那页的 cap 要标行，拒绝会砸掉它（边界 410/411）。
+158. `--unrecorded` 在"没有欠账"的时候**不写 payload 就返回**，于是脚本拿不到 `gate`，也分不清"没有欠账"
+     与"这条命令没跑成"（第 162 轮"缺文件与写失败不可区分"的形状换了个地方）。让它在空表时也写 payload
+     （`matters: []`），并把空表的三种情形（本来就没有、刚被清空、无法归因）各自说清楚。

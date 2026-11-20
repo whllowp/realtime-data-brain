@@ -501,15 +501,18 @@ BATCH_PREVIEWS: Tuple[Tuple[str, str], ...] = (
 PAYLOAD_WRITERS: Tuple[Tuple[str, str, str], ...] = (
     ("--set-domain-limit / --set-domain-drain", '{"recorded", "cleared", "in_force", "files"}', "records"),
     ("--history",
-     '{"rounds", "links", "in_force_clearings", "stream_path_moves", "ceilings", "claim_counts"}', "reports"),
+     '{"rounds", "links", "in_force_clearings", "stream_path_moves", "ceilings", "claim_counts", "gate"}',
+     "reports"),
     ("--claim-round-file", '{"claimed", "claim_refused"}', "records, unless --dry-run"),
     ("--backfill-claims", '{"filled", "dry_run"}', "records, unless --dry-run"),
     ("--backfill-walks", '{"backfilled", "would_backfill", "dry_run"}', "records"),
     ("--backfill-walks (a dry run)", '{"backfilled": [], "would_backfill", "dry_run"}', "reports"),
-    ("--unrecorded", '{"rounds", "unattributed", "matters", "payable", "out_of_reach", "ceilings"}', "reports"),
+    ("--unrecorded", '{"rounds", "unattributed", "matters", "payable", "out_of_reach", "ceilings", "gate"}',
+     "reports"),
     ("--campaign", "the campaign report (drift, debt, queue, claims, offer)", "reports"),
-    ("--sensitivity", "the sensitivity ladder", "reports"),
-    ("--withheld", '{"bar", "withheld"}', "reports"),
+    ("--sensitivity", '{"bar", "bars", "rounds", "refused", "recorded", "unreadable", "rows", "gate"}',
+     "reports"),
+    ("--withheld", '{"bar", "withheld", "gate"}', "reports"),
     ("--audit", '{"limits", "ceiling_drift", "rules_hash", "moved", "entries", ...}', "reports"),
     ("--set-stream-path", '{"stream_path"}', "records"),
     ("--settle-link", '{"settled"}', "records"),
@@ -879,6 +882,10 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         if into is not None:
             into["would_charge"] = list(charges)
             into["charges"] = [] if not strict else list(charges)
+            # Round 171 (item 157): "the gate charged nothing" and "this page never ran the gate" are
+            # two facts, and a payload with no gate key at all is a third. Every report that runs the
+            # checks says so in its payload; the pages that only read the ledger say that instead.
+            into["checked"] = True
         if not strict:
             # Round 170 (item 156): a reader at a terminal has no JSON to read. One line, from the same list
             # the payload carries, so the page and `would_charge` cannot disagree (boundaries 406/407).
@@ -1183,6 +1190,30 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         if count:
             _charge(rule, count, code)
     return _done()
+
+def report_footer(checked: bool, *, asked: bool = False,
+                  command: str = "brian evolve --campaign --strict",
+                  strict_command: str = "brian evolve --audit --strict") -> Dict[str, Any]:
+    """Round 171 (item 157): the gate's line on a report page, and the payload entry that goes with it.
+
+    `--audit`, `--campaign` and `--sensitivity` compute the charges (through `_strict_exit`, which marks the
+    dict `checked`); a page that only reads the ledger cannot, and the caps it *does* know only mark rows
+    (`--history` prints `[past the cap: --strict exits 1]`). Silence there would read as "everything is fine",
+    so the page says what it did -- charges nothing -- and names the command that turns its marks into an
+    exit. `asked` records that the reader passed `--strict`: a flag that lands on a page which never charges
+    must be acknowledged, not ignored (boundary 411), and refusing it would break the marks this page exists
+    to show.
+    """
+    if checked:
+        return {"asked": bool(asked), "checked": True}
+    _print("%-17s %s" % ("--strict" if asked else "gate",
+                         "this page reads the ledger and charges nothing; `%s` turns the marks above into an "
+                         "exit" % strict_command if asked
+                         else "this page reads the ledger and charges nothing; `%s` is the page that does"
+                              % command))
+    return {"asked": bool(asked), "checked": False,
+            "command": strict_command if asked else command}
+
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -3002,6 +3033,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # family ever paid" should not have to parse this page's marks.
                 "queue": record.get("queue") or None,
             })
+        # Round 171 (item 157): the row counts are printed above; this line says what the page did about the
+        # checks, and the payload carries it so a script can tell "nothing charged" from "nothing checked".
+        history_gate = report_footer(False, asked=bool(getattr(args, "strict", False)))
         if getattr(args, "json_out", None) and not _write_payload(args.json_out, recorded=False, payload={
                 "rounds": history_rows,
                 "links": link_rows,
@@ -3013,6 +3047,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # but not their counts, so a script had to recount them -- and a recount is a second
                 # computation that can disagree with the sentence printed beside it (boundary 385).
                 "claim_counts": history_counts.to_dict(),
+                "gate": history_gate,
             }):
                 # Round 161 (item 148): this page wrote its payload with a bare Path.write_text and printed the
                 # line itself, so a missing directory raised FileNotFoundError -- the exact shape round 141
@@ -3601,6 +3636,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("The likely-file column is matched by geometry, not written anywhere: a file whose")
         _print("summary disagrees with the round's is never proposed, and a round that matches none is shown")
         _print("as such rather than given the nearest name (boundary 102).")
+        # Round 171 (item 157): a list of work, not a verdict -- the row reader still needs to know that
+        # nothing on this page charged anything (boundary 410).
+        unrecorded_gate = report_footer(False)
         if args.json_out and not _write_payload(
                 args.json_out, payload={"rounds": len(rounds), "unattributed": unknown,
                        "matters": [{"domain": d, "round": n, "why": w, "files": f}
@@ -3620,7 +3658,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                     "named": ceiling_named,
                                     "unpayable": ceiling_unpayable,
                                     "after": max(0, ceiling_missing - ceiling_payable),
-                                    "by_domain": ceiling_rows}}, recorded=False):
+                                    "by_domain": ceiling_rows},
+                       "gate": unrecorded_gate}, recorded=False):
                 return 2
         return 0
 
@@ -3764,7 +3803,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         _print(format_sensitivity(result))
-        if args.json_out and not _write_payload(args.json_out, result.to_dict(), recorded=False):
+        # Round 171 (item 157): this page re-decides stored refusals under a ladder of bars; it records
+        # nothing and charges nothing, so it says which page would (boundary 410).
+        sensitivity_gate = report_footer(False)
+        if args.json_out and not _write_payload(
+                args.json_out, dict(result.to_dict(), gate=sensitivity_gate), recorded=False):
             return 2
         return 0
 
@@ -3776,9 +3819,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
         _print(format_withheld(records, rules))
+        # Round 171 (item 157): the same page family as --sensitivity -- it reads the refusals and
+        # charges nothing, so it names the page that does (boundary 410).
+        withheld_gate = report_footer(False)
         if args.json_out:
             payload = {"bar": rules.replication_bar,
-                       "withheld": [record.to_dict() for record in records]}
+                       "withheld": [record.to_dict() for record in records],
+                       "gate": withheld_gate}
             if not _write_payload(args.json_out, payload, recorded=False):
                 return 2
         return 0
