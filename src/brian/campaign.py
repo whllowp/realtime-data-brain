@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from .evolve import (
     frequent_retakes, retake_timeline, moved_settlements, reaffirm_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
                      is_withdrawn, load_settlements, rejection_provenance,
-                     settlement_summary, withdrawn_settlements, withheld_due,
+                     restored_settlements, settlement_summary, withdrawn_settlements, withheld_due,
                      withheld_evidence_age,
                      withheld_records, withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
@@ -191,6 +191,9 @@ class Campaign:
     #: Round 125: the decisions a person took back. They stop applying, so the contradiction each one settled is
     #: charged again -- kept here so the page can name them and say what the withdrawal was for.
     settlements_withdrawn: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 126: decisions a later decision took up again, after the withdrawal. A pair decided twice with a
+    # withdrawal in between is a different history from one decided once (boundary 295).
+    settlements_restored: List[Dict[str, Any]] = field(default_factory=list)
     # Round 116: the counts a script needs are computed once, beside the copies the page prints, so "how many
     # decisions still have no explanation" is a number in the JSON rather than a sentence to be parsed.
     settlement_summary: Dict[str, Any] = field(default_factory=dict)
@@ -313,6 +316,7 @@ class Campaign:
             "settlement_summary": dict(self.settlement_summary),
             "settlements_moved": [dict(item) for item in self.settlement_moved],
             "settlements_withdrawn": [dict(item) for item in self.settlements_withdrawn],
+            "settlements_restored": [dict(item) for item in self.settlements_restored],
             "reaffirm_plan": [dict(item) for item in self.reaffirm_plan],
             "retake_timeline": {key: [dict(entry) for entry in value]
                                 for key, value in self.retake_timeline.items()},
@@ -581,6 +585,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.repair_history = repair_history(root)
     result.settlements = load_settlements(root)
     result.settlements_withdrawn = withdrawn_settlements(result.settlements)
+    result.settlements_restored = restored_settlements(result.settlements)
     result.settlement_summary = settlement_summary(result.settlements)
     # Round 118: the same reading the audit page prints, from the same two files.
     result.settlement_moved = moved_settlements(everything, result.settlements)
@@ -1291,6 +1296,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                                   % (str(item.get("record") or ""), str(item.get("successor") or ""),
                                      str((item.get("withdrawn") or [{}])[-1].get("at") or ""))
                                   for item in result.settlements_withdrawn)))
+    # Round 126: the answer to a withdrawal. Printed next to it, because the reader who saw the pair come back
+    # among the charges needs to see the command that takes it out again -- and needs to know that doing so is a
+    # decision, not a repair (boundary 294).
+    if result.settlements_restored:
+        lines.append("links             %d decision(s) were taken up again by a new decision: %s"
+                     % (len(result.settlements_restored),
+                        ", ".join("%s -> %s (withdrawn %s, taken up again %s)"
+                                  % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                                     str((item.get("withdrawn") or [{}])[-1].get("at") or ""),
+                                     str((item.get("redecisions") or [{}])[-1].get("at") or ""))
+                                  for item in result.settlements_restored)))
     for item in result.reaffirm_plan[:1]:
         commands = [str(command) for command in item.get("commands") or [] if str(command)]
         walks = item.get("walks_since")

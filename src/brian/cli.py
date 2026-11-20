@@ -88,6 +88,7 @@ from .evolve import (
     is_withdrawn,
     settle_link,
     settle_note,
+    restore_settlement,
     withdraw_settlement,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
@@ -2116,6 +2117,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     if sentence not in mark:
                         mark += sentence
                     continue
+                # Round 126: the pair is decided again by a person. Both moments go on the row, because "decided"
+                # and "decided after somebody took the first decision back" are different histories (boundary 295).
+                if entry.get("redecisions") and own_name == pair[0]:
+                    taken = (entry.get("withdrawn") or [{}])[-1]
+                    back = (entry.get("redecisions") or [{}])[-1]
+                    sentence = ("  [withdrawn on %s, taken up again on %s]"
+                                % (str(taken.get("at") or ""), str(back.get("at") or "")))
+                    if sentence not in mark:
+                        mark += sentence
                 # Round 116: the row says whether the decision was ever explained, so "no reason" stops being a
                 # sentence somewhere above the list and becomes a state a reader can find on the row itself.
                 explained_here = ("and no reason was recorded" if not str(entry.get("why") or "").strip()
@@ -3038,6 +3048,47 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
                 json.dump({"withdrawn": decision}, handle, indent=2, sort_keys=False)
+                handle.write("\n")
+        return 0
+
+    if getattr(args, "settle_restore", None):
+        # Round 126: round 125 made "this decision is wrong" recordable and left the operator one command short.
+        # `--settle-link` refuses a withdrawn pair and `--settle-reaffirm` refuses it too, so the contradiction a
+        # person had correctly withdrawn could only be settled by editing the store by hand. This records the new
+        # decision: the withdrawal stays, the re-decision says what is different, and the pair is decided again.
+        raw = str(args.settle_restore or "").strip()
+        if not raw or "=" not in raw:
+            _print("--settle-restore takes RECORD=SUCCESSOR, for example "
+                   "`--settle-restore round-old.json=round-new.json`")
+            return 2
+        record, successor = raw.split("=", 1)
+        record, successor = record.strip(), successor.strip()
+        plan_before = repair_plan(root)
+        try:
+            decision = restore_settlement(root, record, successor, why=str(args.settle_why or ""),
+                                          by=str(getattr(args, "settle_by", "") or ""))
+        except (OSError, ValueError) as error:
+            _print("cannot take that decision up again: %s" % error)
+            return 2
+        if not decision["changed"]:
+            _print("taken up again  %s -> %s was already taken up again on %s; nothing to change"
+                   % (record, successor, decision["at"]))
+            return 0
+        _print("taken up again  %s -> %s" % (record, successor))
+        _print("                the decision stands again from %s, and the withdrawal stays on record"
+               % decision["at"])
+        _print("                because: %s" % str(args.settle_why or "").strip())
+        _print("                restored by: %s"
+               % (str(getattr(args, "settle_by", "") or "").strip()
+                  or "(not recorded -- pass --settle-by NAME)"))
+        # Round 126: a decision is exactly the thing allowed to silence a contradiction, so the page must say that
+        # this one does -- and name the command that would undo it again if the decision turns out wrong (294).
+        _print("                the contradiction it settles is muted while it stands: `--audit` stops charging "
+               "that pair, and `--settle-drop` takes it back if this decision turns out wrong too (boundary 294)")
+        _print_repair_delta(record_repair(root, "settle-restore", plan_before, repair_plan(root)))
+        if getattr(args, "json_out", None):
+            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump({"restored": decision}, handle, indent=2, sort_keys=False)
                 handle.write("\n")
         return 0
 
@@ -5108,6 +5159,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-drop", default=None, metavar="RECORD=SUCCESSOR",
                         help="withdraw a recorded decision: it keeps its date and gains the reason it stopped "
                              "standing, and the contradiction it settled is charged again; needs --settle-why")
+    evolve.add_argument("--settle-restore", default=None, metavar="RECORD=SUCCESSOR",
+                        help="take a withdrawn decision up again as a new decision: the withdrawal stays on record, "
+                             "and the pair is decided again from this moment; needs --settle-why")
     evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="re-take decisions against today's books: keeps each first date, records the claims "
                              "it covered; takes one or more RECORD=SUCCESSOR pairs; needs --settle-why")

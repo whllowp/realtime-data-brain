@@ -2174,18 +2174,26 @@ def _settle_command(pairs: Sequence[Mapping[str, Any]]) -> str:
 
     Round 125: a pair whose decision was withdrawn cannot be settled again -- `--settle-link` refuses it, because
     recording it a second time is a new decision. Naming that refused command would hand the reader an action that
-    cannot run (boundary 261), so the remedy says what is actually missing.
+    cannot run (boundary 261), so round 125's remedy said the command for a new decision did not exist.
+
+    Round 126 built it (`--settle-restore`), so the remedy names it: the same rule that stopped the plan from
+    printing a command which refuses now stops it from printing "there is no command" about one that exists. A
+    withdrawn pair still names the restore command even if another pair on the same file could be settled, because
+    the restore is the only route for that pair and the settle commond would leave it behind.
     """
+    withdrawn = [pair for pair in pairs if isinstance(pair, Mapping) and pair.get("withdrawn")]
+    for pair in withdrawn:
+        record = str(pair.get("record") or "")
+        successor = str(pair.get("successor") or "")
+        if record and successor:
+            return "brian evolve --settle-restore %s=%s --settle-why TEXT --settle-by NAME" % (record, successor)
     for pair in pairs:
-        if not isinstance(pair, Mapping) or pair.get("withdrawn"):
+        if not isinstance(pair, Mapping):
             continue
         record = str(pair.get("record") or "")
         successor = str(pair.get("successor") or "")
         if record and successor:
             return "brian evolve --settle-link %s=%s" % (record, successor)
-    if [pair for pair in pairs if isinstance(pair, Mapping)]:
-        return ("brian evolve --history  (the decision on this pair was withdrawn: this build has no command for a "
-                "new one)")
     return "brian evolve --audit"
 
 

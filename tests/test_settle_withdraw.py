@@ -157,10 +157,12 @@ def test_the_plan_stops_naming_the_command_the_withdrawal_makes_impossible(tmp_p
     settle_link(tmp_path, RETIRED, SUCCESSOR, why="the retirement mark is the surviving claim", by="alice", now=NOW)
     withdraw_settlement(tmp_path, RETIRED, SUCCESSOR, why="wrong decision", by="alice", now=NOW)
     after = repair_plan(tmp_path)
-    # `--settle-link` refuses a withdrawn pair, so the plan must not hand the reader that command (boundary 261).
+    # `--settle-link` refuses a withdrawn pair, so the plan must not hand the reader that command (boundary 261) --
+    # and since round 126 built the command for a new decision, the plan names that one instead of saying none
+    # exists (round 125 could only print the diagnostic).
     assert after and after[0]["pairs"][0]["withdrawn"] is True
     assert "--settle-link" not in after[0]["remedy"]
-    assert "was withdrawn" in after[0]["remedy"]
+    assert "--settle-restore" in after[0]["remedy"]
 
 
 def test_a_withdrawn_decision_cannot_be_re_taken_or_re_recorded(tmp_path):
@@ -168,8 +170,9 @@ def test_a_withdrawn_decision_cannot_be_re_taken_or_re_recorded(tmp_path):
     withdraw_settlement(tmp_path, RETIRED, SUCCESSOR, why="wrong decision", by="alice", now=NOW)
     with pytest.raises(ValueError, match="withdrawn on"):
         reaffirm_link(tmp_path, RETIRED, SUCCESSOR, why="still standing", by="alice", now=NOW)
-    # Re-recording it would be a new decision, and this build has no command for one yet (item 112).
-    with pytest.raises(ValueError, match="new decision and this build has no command"):
+    # Round 126: re-recording it is a new decision, and the refusal now names the command that takes it up again
+    # (a refusal must name the remedy, boundary 261 -- round 125 could only say the command did not exist).
+    with pytest.raises(ValueError, match="--settle-restore"):
         settle_link(tmp_path, RETIRED, SUCCESSOR, why="decided again", by="alice", now=NOW)
 
 
