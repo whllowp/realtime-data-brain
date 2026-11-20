@@ -6922,6 +6922,60 @@ links    1 withdrawal(s) have no answer: round-old.json -> round-new.json was ta
 **边界 297**：一项债的页面必须同时印出它的年龄与能清掉它的那一条命令——只写「有 N 条在等」，读者拿到的是一句抱怨，不是一件工作。
 **边界 298**：同一条缺陷只能收一笔钱：撤销让矛盾回来了，链规则已经在 exit 2 上收费，年龄不得再收一次；年龄收费属于「账已经和好、却没人裁定」的那个状态，页面必须让这两种状态分得开。
 
+### 3.134 同一笔欠账，按条算和按文件算不是一件事
+
+第 127 轮让「被撤销、没人接手」这件事有了年龄，并进了闸门。但它的上限是按**条数**说的：`--max-withdrawn-days`
+量的是「多久没人管」，`--max-withdrawn-per-file` 量的是「一个文件上堆了几条」。这两件事看起来是一件事，
+其实不是。同一笔债放在十一个文件上，是十一个下午；十一条债堆在同一个文件上，是一个下午——同样的钱，
+两种活法。第 121 轮已经在「移动过的决定」上吃过这个亏（边界 279），这里只是把同一条规矩用到撤销上。
+
+`src/brian/evolve.py` 的 `withdrawal_plan(rounds, settlements, now=None)` 把 `unanswered_withdrawals` 的行
+按**记录自己的 `stream_path`** 分桶（不是按它现在指向哪儿），每桶给三件事：几条、最老一条多大，以及
+`brian evolve --settle-restore <record>=<successor> --settle-why TEXT` 这条命令。桶按「条数降序、文件名字典序」
+排——一个每次跑都换顺序的页面教人别信它（边界 246）。分桶要读 `rounds`，所以 `unanswered_withdrawals` 多了
+一个可选参数 `rounds`：不给就没有 origin，给了才填。
+
+演练账本：`data/smd/stream-real.json` 上一条（老 3 天），`data/smd/stream-two.json` 上两条（老 2 天）。
+
+```
+$ brian evolve --campaign
+links             withdrawn and waiting, by stream file: data/smd/stream-two.json 2 decision(s); data/smd/stream-real.json 1 decision(s)
+```
+
+闸门只在一个文件的条数超出上限时才收费，并把文件名说出来：
+
+```
+$ brian evolve --audit --strict                              # exit 0
+$ brian evolve --audit --strict --max-withdrawn-days 5       # exit 0，没有超过 5 天的
+$ brian evolve --audit --strict --max-withdrawn-per-file 2   # exit 0
+$ brian evolve --audit --strict --max-withdrawn-per-file 1   # exit 1
+2 withdrawal(s) sit on one stream file, above the 1 asked for for a single file:
+  the file is data/smd/stream-two.json, and each of those pairs is one nobody has ruled on since it was taken back.
+  A cap in decisions says the debt is large; a reader pays in afternoons, and eleven withdrawals on
+  eleven files is eleven of them while eleven on one file is one (boundary 279, applied here).
+  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT` decides one again, and the withdrawal stays
+  on the record: --strict exits 1 until this file's count is back inside the cap (boundary 299).
+```
+
+同一份账本上，`--max-withdrawn-days 5` 判 0、`--max-withdrawn-per-file 1` 判 1——两个上限回答的是两个问题，
+所以各自打各自的判决（边界 281 的第三次应用）。年龄上限说「这些债放了多久」，文件上限说「今天下午够不够」；
+一个读者手里只有下午，问的是后者。
+
+两处实现细节值得写下来：
+
+- `_strict_exit` 是模块级函数，看不到 `cmd_evolve` 的局部变量，所以文件名以 `unanswered_file` 参数传进去——
+  第一版直接把 `_worst_withdrawn` 写在函数体里，`pyflakes` 报 `undefined name`。
+- `unanswered_withdrawals` 的 `origin` 来自**账本行**（第 34 轮：账本行覆盖轮记录文件）。演练里把轮文件的
+  `stream_path` 改成 `stream-real.json` 时，账本行还写着 `stream-one.json`，于是分桶落到了记录从未命名过的文件名下
+  ——两本书都要改，或者干脆用 `retire()`（第 120 轮同一个坑）。
+
+边界：
+
+- **299** 同一笔债换一个计量单位，就得分一个新的上限：按条收的是「债大不大」，按文件收的是「一个下午够不够」；
+  两个都收，才不会出现「条数没超、文件全堆在一处」的假安全。
+- **300** 计划里每一桶都必须带一条能付掉**整桶**的命令：读者不会照着 N 条记录敲 N 次理由，而理由敲两次就开始
+  走样（第 120 轮）。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7422,4 +7476,12 @@ missing for the next level
      以及 CLI 夹具的时钟。
 113. ✅ 给「撤了、一直没人重新决定」的一对收费（本轮）：`unanswered_withdrawals()`、`--max-withdrawn-days N`（默认关，`--strict` 才读）、`--audit` / `--history` / `--campaign` 各印年龄，`--settle-restore` 清账。演练发现「年龄收费只在矛盾已经和好时才有意义」，写进边界 298。
 
-114. 撤销欠账按流文件拆开：`--campaign` 像 `reaffirm_plan` 那样按 origin 分桶，`--audit --strict` 加 `--max-withdrawn-per-file N`——十一条撤销散在十一个文件上是十一个下午，堆在一个文件上是一个（边界 279 用在这一类债上）；同时把 `--history` 的撤销块与 `--campaign --json-out` 的键对齐。
+114. **已完成**（第 128 轮）：`withdrawal_plan(rounds, settlements, now)` 按记录自己的 `stream_path` 分桶，
+     每桶给出条数、最老一条的年龄与 `--settle-restore RECORD=SUCCESSOR --settle-why TEXT` 这条命令，桶按
+     「条数降序、文件名」排；`--campaign` 打印 `withdrawn and waiting, by stream file: …`；`--audit --strict` 加
+     `--max-withdrawn-per-file N`，只在一个文件的条数超限时收费，并把文件名与边界 279/299 说出来；`--history` 的
+     撤销块与 `--campaign --json-out`（`withdrawal_plan`）读同一个函数。边界 299、300。
+
+115. 让 `--settle-restore` 也能一次付掉一整个文件（`--settle-restore-file STREAM`，与 `--settle-reaffirm-file`
+     对称）：现在计划里的 `batch` 只写出第一对，剩下的还得一条条敲，而一份按文件分组、却要逐条执行的计划等于
+     没分组（边界 283 的反面）。

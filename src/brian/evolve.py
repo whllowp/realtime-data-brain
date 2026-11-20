@@ -3163,7 +3163,8 @@ def withdraw_settlement(root: Path, record: str, successor: str, why: str = "", 
 
 
 def unanswered_withdrawals(settlements: Sequence[Mapping[str, Any]],
-                           now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+                           now: Optional[datetime] = None,
+                           rounds: Sequence[Mapping[str, Any]] = ()) -> List[Dict[str, Any]]:
     """Decisions standing withdrawn, nobody having taken them up again, oldest first (round 127).
 
     Round 125 made the pair a contradiction again, which means the debt is real and *reported*; nothing charged it,
@@ -3172,6 +3173,7 @@ def unanswered_withdrawals(settlements: Sequence[Mapping[str, Any]],
     behind it that no gate reads is a debt only a careful reader pays (boundary 154's rule, applied to decisions).
     """
     moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    by_name = {str(record.get("round") or ""): record for record in rounds or [] if isinstance(record, Mapping)}
     rows: List[Dict[str, Any]] = []
     for item in settlements or []:
         if not isinstance(item, Mapping) or not is_withdrawn(item):
@@ -3185,13 +3187,47 @@ def unanswered_withdrawals(settlements: Sequence[Mapping[str, Any]],
                 age = None
         latest = [entry for entry in item.get("withdrawn") or [] if isinstance(entry, Mapping) and
                   str(entry.get("at") or "") == taken]
-        rows.append({"record": str(item.get("record") or ""), "successor": str(item.get("successor") or ""),
+        record = str(item.get("record") or "")
+        rows.append({"record": record, "successor": str(item.get("successor") or ""),
                      "at": taken, "age_days": age,
+                     "origin": str((by_name.get(record) or {}).get("stream_path") or "") if rounds else "",
                      "why": str((latest[-1] if latest else {}).get("why") or ""),
                      "by": str((latest[-1] if latest else {}).get("by") or "")})
     # Oldest first: the pair nobody has looked at longest is the one a reader should open first, and an age that
     # cannot be read sorts ahead of everything rather than quietly behind it.
     rows.sort(key=lambda row: (row["at"] or "", row["record"]))
+    return rows
+
+
+def withdrawal_plan(rounds: Sequence[Mapping[str, Any]], settlements: Sequence[Mapping[str, Any]],
+                    now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """The unansered withdrawals grouped by the stream file they belong to, heaviest first (round 128).
+
+    A cap counted in decisions answers "are there too many", which is not the question a reader with three
+    afternoons can act on: eleven withdrawals on eleven files is eleven afternoons and eleven on one file is one
+    (boundary 279, applied to the withdrawal debt). The row carries the command that pays the whole file, because the
+    alternative is the reader retyping the reason once per pair -- and a reason retyped is a reason that drifts
+    (round 120's rule).
+    """
+    files: Dict[str, Dict[str, Any]] = {}
+    for row in unanswered_withdrawals(settlements, now, rounds):
+        origin = str(row.get("origin") or "")
+        bucket = files.setdefault(origin, {"origin": origin, "records": [], "oldest_at": "", "oldest_age": None})
+        bucket["records"].append({"record": row["record"], "successor": row["successor"], "at": row["at"],
+                                  "age_days": row["age_days"]})
+        if not bucket["oldest_at"] or str(row.get("at") or "") < str(bucket["oldest_at"]):
+            bucket["oldest_at"] = str(row.get("at") or "")
+            bucket["oldest_age"] = row.get("age_days")
+    rows: List[Dict[str, Any]] = []
+    for bucket in files.values():
+        bucket["decisions"] = len(bucket["records"])
+        bucket["batch"] = ("brian evolve --settle-restore %s=%s --settle-why TEXT --settle-by NAME"
+                           % (bucket["records"][0]["record"], bucket["records"][0]["successor"]))
+        # The one-command form is `--settle-reaffirm-file`'s sibling still to come: until it exists the plan names
+        # the first pair's command and says how many more there are, rather than inventing a flag.
+        bucket["more"] = bucket["decisions"] - 1
+        rows.append(bucket)
+    rows.sort(key=lambda row: (-row["decisions"], row["origin"]))
     return rows
 
 

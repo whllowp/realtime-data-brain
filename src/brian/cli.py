@@ -78,6 +78,7 @@ from .evolve import (
     format_repairs,
     load_settlements,
     unanswered_withdrawals,
+    withdrawal_plan,
     unexplained_decisions,
     moved_settlements,
     settlement_summary,
@@ -373,7 +374,10 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  unexplained_days: Optional[float] = None,
                  restaled: int = 0, max_restaled: Optional[int] = None,
                  per_file_restaled: int = 0, max_restaled_per_file: Optional[int] = None,
-                 unanswered: int = 0, unanswered_days: Optional[float] = None) -> int:
+                 unanswered: int = 0, unanswered_days: Optional[float] = None,
+                 per_file_unanswered: int = 0,
+                 max_unanswered_per_file: Optional[int] = None,
+                 unanswered_file: str = "") -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -466,6 +470,15 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("  afternoons, and eleven on one file is one. Re-take that file's decisions with")
         _print("  `brian evolve --settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT`, which `brian evolve")
         _print("  --campaign` lists one command per pair (boundary 279).")
+    if per_file_unanswered:
+        _print("%d withdrawal(s) sit on one stream file, above the %d asked for for a single file:"
+               % (per_file_unanswered, max_unanswered_per_file if max_unanswered_per_file is not None else 0))
+        _print("  the file is %s, and each of those pairs is one nobody has ruled on since it was taken back."
+               % (unanswered_file or "(unattributed)"))
+        _print("  A cap in decisions says the debt is large; a reader pays in afternoons, and eleven withdrawals on")
+        _print("  eleven files is eleven of them while eleven on one file is one (boundary 279, applied here).")
+        _print("  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT` decides one again, and the withdrawal stays")
+        _print("  on the record: --strict exits 1 until this file's count is back inside the cap (boundary 299).")
     if unanswered:
         # Round 127: unlike the unexplained decisions, this one has a command that clears it, so it is charged
         # (boundary 266's condition) -- and the pair is a standing contradiction while it waits (boundary 294).
@@ -640,7 +653,7 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
                  or ceiling_capped or in_force_stale or unexplained_stale or restaled
-                 or per_file_restaled or unanswered) else 0
+                 or per_file_restaled or unanswered or per_file_unanswered) else 0
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -1692,6 +1705,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     _unanswered = ([row for row in _withdrawn_rows
                     if float(row.get("age_days") or 0.0) >= float(_withdrawn_cap)]
                    if _withdrawn_cap is not None else [])
+    # Round 128: the same debt in the unit a reader pays in -- the stream file (boundary 279, applied here).
+    try:
+        _withdrawn_plan = withdrawal_plan(history(root, include_retired=True), load_settlements(root))
+    except (OSError, ValueError):
+        _withdrawn_plan = []
+    _withdrawn_per_file = getattr(args, "max_withdrawn_per_file", None)
+    _worst_withdrawn = max(_withdrawn_plan,
+                           key=lambda row: (int(row.get("decisions") or 0), str(row.get("origin") or "")),
+                           default={})
+    _per_file_unanswered = len(_worst_withdrawn.get("records") or [])
+    _per_file_charged = (_per_file_unanswered if (_withdrawn_per_file is not None and
+                                                 _per_file_unanswered > int(_withdrawn_per_file)) else 0)
     try:
         deployed = load_promotions(root)
     except OSError:
@@ -1753,6 +1778,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     if getattr(args, "max_unexplained_days", None) is not None and not getattr(args, "strict", False):
         # Round 117: same shape as --max-ceiling-debt. The page prints the ages either way; only the gate fails.
         _print("--max-unexplained-days caps a --strict charge; without --strict nothing reads it")
+        return 2
+    if getattr(args, "max_withdrawn_per_file", None) is not None and not getattr(args, "strict", False):
+        # Round 128: the per-file cap is armed the same way the per-decision one is, or it looks armed and is not.
+        _print("--max-withdrawn-per-file caps a --strict charge; without --strict nothing reads it")
         return 2
     if getattr(args, "max_withdrawn_days", None) is not None and not getattr(args, "strict", False):
         # Round 127: same rule again -- a cap the gate never reads is a flag that looks armed.
@@ -2693,7 +2722,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unexplained_days=_unexplained_cap,
                             restaled=_restaled, max_restaled=_moved_cap,
                             per_file_restaled=_per_file_restaled, max_restaled_per_file=_per_file_cap,
-                            unanswered=len(_unanswered), unanswered_days=_withdrawn_cap)
+                            unanswered=len(_unanswered), unanswered_days=_withdrawn_cap,
+                            per_file_unanswered=_per_file_charged,
+                            max_unanswered_per_file=_withdrawn_per_file,
+                            unanswered_file=str(_worst_withdrawn.get("origin") or ""))
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -2838,7 +2870,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unexplained_days=_unexplained_cap,
                             restaled=_restaled, max_restaled=_moved_cap,
                             per_file_restaled=_per_file_restaled, max_restaled_per_file=_per_file_cap,
-                            unanswered=len(_unanswered), unanswered_days=_withdrawn_cap)
+                            unanswered=len(_unanswered), unanswered_days=_withdrawn_cap,
+                            per_file_unanswered=_per_file_charged,
+                            max_unanswered_per_file=_withdrawn_per_file,
+                            unanswered_file=str(_worst_withdrawn.get("origin") or ""))
 
     if args.grade:
         try:
@@ -5135,6 +5170,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "rulebook, so a rules audit cannot otherwise see it move)")
     evolve.add_argument("--max-withdrawn-days", type=float, default=None, metavar="DAYS",
                         help="with --strict: charge decisions withdrawn for longer than DAYS with no new decision")
+    evolve.add_argument("--max-withdrawn-per-file", type=int, default=None, metavar="N",
+                        help="with --strict: charge when one stream file holds more than N unanswered withdrawals")
     evolve.add_argument("--max-unexplained-days", type=float, default=None, metavar="DAYS",
                         help="with --strict: fail when a decision has had no reason and no note for longer "
                              "than DAYS (default off)")
