@@ -113,3 +113,33 @@ def test_each_page_names_the_population_where_they_differ(tmp_path, monkeypatch,
     # questions, two totals -- and each line says which one it answered (boundary 386).
     assert history_line.startswith("claims            2 of 3 row(s)")
     assert campaign_line.startswith("claims            1 of 2 live round(s)")
+
+
+def test_the_payload_carries_the_counts_the_page_printed(tmp_path, monkeypatch, capsys):
+    """Round 161 (item 147): a script should not have to recount what the page already counted."""
+    _retirement_ledger(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["evolve", "--campaign", "--json-out", "campaign.json"]) == 0
+    printed = _claims_lines(capsys)[0]
+    payload = json.loads((tmp_path / "campaign.json").read_text(encoding="utf-8"))["claim_counts"]
+
+    assert payload["population"] == "live round(s)"
+    assert (payload["rows"], payload["total"], payload["retired"]) == (1, 2, 0)
+    # The payload's counts rebuild the printed sentence exactly: one computation, two readers (boundary 385).
+    assert ClaimCounts(**payload).sentence() == printed.split("claims            ", 1)[1]
+
+
+def test_the_history_payload_carries_the_counts_its_header_printed(tmp_path, monkeypatch, capsys):
+    _retirement_ledger(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["evolve", "--history", "--json-out", "history.json"]) == 0
+    printed = _claims_lines(capsys)
+    payload = json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))["claim_counts"]
+
+    assert payload["population"] == "row(s)"
+    assert ClaimCounts(**payload).sentence() == printed[0].split("claims            ", 1)[1]
+    # The retired sentence is the header's second line, and the payload says how many rows it is about.
+    assert payload["retired"] == 1
+    assert ClaimCounts(**payload).retired_sentence() == printed[1].split("claims            ", 1)[1]

@@ -8667,6 +8667,43 @@ claims            2 of them were retired into a successor, which carries the ass
 **边界 385**：同一个量印在两页上时，只能由一处算；两处各写一次总会向"最近一轮需要的那半句"漂移。
 **边界 386**：两页用同一句话数不同总体时，每页都要在句子里报出它的总体名；否则读者看到的是矛盾，而不是两个问题。
 
+### 3.167 页面印了计数，payload 就要带上计数：让测试用 payload 重建那句话
+
+第 160 轮把计数收进 `ClaimCounts`，两张页面印同一句话。但 `--campaign --json-out` 里只有行列表
+（`claims` 是 `[{round, stream_path, geometry, …}]`），没有计数、没有总体名——机器读者想拿"几行"这个数，
+只能自己再数一遍。**再数一遍就是第二个实现**，而第二个实现迟早会和它旁边那句话不一致。
+
+这一轮让两份 payload 都带上页面印的那个对象：
+
+```
+# --campaign --json-out c161.json
+campaign: {'rows': 1, 'total': 3, 'inherited': 1, 'repaired_columns': 1, 'retired': 0,
+           'population': 'live round(s)'}
+# --history --json-out h161.json
+history : {'rows': 3, 'total': 6, 'inherited': 2, 'repaired_columns': 3, 'retired': 2,
+           'population': 'row(s)'}
+```
+
+**测试的判据不是"字段存在"，而是"payload 能把它旁边那句话重建出来"。**
+
+```python
+assert ClaimCounts(**payload).sentence() == printed.split("claims            ", 1)[1]
+assert ClaimCounts(**payload).retired_sentence() == printed[1].split("claims            ", 1)[1]
+```
+
+`ClaimCounts(**payload)` 能直接接回来，是因为 `to_dict()` 的键和 dataclass 的字段一一对应——这本身就是一条约束：
+**payload 的键名不许和字段名分叉**，否则"把 payload 喂回去"这件事做不到，而做不到就没人会发现它们已经不同。
+
+**一处算，三个读者。** 战报页现在是 `campaign_counts = claim_counts(live_records, population="live round(s)")`
+算一次，页面印它、payload 取 `to_dict()`、测试比对共享的那句；历史页同理用 `history_counts`。第 160 轮的经验在这里
+变成机制：不是"记得用同一个函数"，而是**同一份对象在三个地方被读**。
+
+**顺手补上的那一栏**：行列表仍然留着（`claims`），因为"哪几行、各自几何判决是什么"是 payload 里唯一的逐行事实，
+计数不能替代它；反过来，计数也不能从行列表里现数——行列表只列"有断言的"，而总体的分母（`total`）在它之外。
+
+**边界 387**：页面印了某个计数，它对应的 payload 就必须带同一个对象；只带底层行，等于把计数交给每个调用方各写一遍。
+**边界 388**：payload 的数字要能原样重建页面上那句话——"同一处算"这件事，只有这样才可测试；字段存在不算证据。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9279,5 +9316,9 @@ missing for the next level
 146. **已完成（见 §3.166）** 计数搬进 `campaign.claim_counts(rounds, population=...)`，返回
      `ClaimCounts`；`--campaign` 与 `--history` 都印 `sentence()`，各自用 `population` 报名（`live round(s)` /
      `row(s)`）。测试钉住"两页那句话只差总体名"。
-147. 让 `ClaimCounts` 也进 `--campaign --json-out`（现在 payload 里的 `claims` 只有行列表，没有计数与总体名，
-     机器读者要自己数）。
+147. **已完成（见 §3.167）** `--campaign --json-out` 与 `--history --json-out` 都带 `claim_counts`
+     （`ClaimCounts.to_dict()`），并且测试用 payload 重建页面那句话：`ClaimCounts(**payload).sentence()` 必须
+     等于印出来的那行。
+148. 让两张页面的 payload 也走 `_write_payload`：现在 `--history`/`--campaign` 还是自己 `Path.write_text`
+     再印一行 `wrote <path>`，所以目录不存在时抛 `FileNotFoundError`，而第 141 轮已经规定 payload 是派生物、
+     写不成要说清楚并以非零退出（边界 336/337），两处页面绕过了那条规定。

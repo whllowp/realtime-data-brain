@@ -2311,6 +2311,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # geometry never confirmed is a fact a reader of the page needs -- the row rests on a person's assertion
     # (boundary 371). Computed with the other pre-branch counts for the same reason.
     claim_rows = claimed_rounds(live_records)
+    # Round 161 (item 147): one computation, three readers -- the page prints it, the payload carries it,
+    # and the test that compares both pages' sentences reads it (boundary 385). The population is named
+    # here because this page counts live rounds, while `--history` counts every row it lists (boundary 386).
+    campaign_counts = claim_counts(live_records, population="live round(s)")
 
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
         written: List[Tuple[str, Optional[float], Optional[float], bool, bool]] = []
@@ -2798,6 +2802,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             "stream_path_moves": path_moves,
                 "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
                              "payable": ceiling_payable, "by_domain": ceiling_rows},
+                # Round 161 (item 147): the header above counts the claim rows; the payload carried the rows
+                # but not their counts, so a script had to recount them -- and a recount is a second
+                # computation that can disagree with the sentence printed beside it (boundary 385).
+                "claim_counts": history_counts.to_dict(),
             }), encoding="utf-8")
         return 0
 
@@ -3439,7 +3447,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                budget=budget, limits=_limits_text(limits_view),
                                ceiling_note=ceiling_note, rerun_offer=rerun_offer,
                                claims=claim_rows,
-                               claim_counts=claim_counts(live_records, population="live round(s)")))
+                               claim_counts=campaign_counts))
         if getattr(args, "what_if_records", None):
             # Round 132: a reader looking at "this file owes two" should not have to conjure the batch commands to
             # ask what paying them would leave. The block is a recomputation, never a write.
@@ -3464,6 +3472,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 153: which rows rest on a person's claim, and what the
             # geometry said about it, travels with the page.
             payload["claims"] = claim_rows
+            # Round 161 (item 147): the same counts the line above printed, in the form a script reads.
+            payload["claim_counts"] = campaign_counts.to_dict()
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)
