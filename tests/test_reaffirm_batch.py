@@ -148,21 +148,31 @@ def test_the_batch_re_takes_every_stale_decision_on_the_file(tmp_path, monkeypat
     assert _plan(root) == []
 
 
-def test_the_batch_still_reports_a_pair_it_cannot_re_take(tmp_path, monkeypatch, capsys):
+def test_the_batch_leaves_out_a_pair_it_cannot_re_take(tmp_path, monkeypatch, capsys):
     root = _two_stale(tmp_path)
     # Retarget the second decision's record, so re-affirming it would assert something the ledger denies.
     from test_provenance_block import _round
 
     _round(root, "round-second.json", retired={"re_measured_as": "round-moved-away.json",
                                                "at": LATER.isoformat()})
+    # Round 133: the plan stops offering it, so the batch never fails pair by pair (boundaries 261/301 at the plan
+    # layer) -- the page counts it apart, with the command that can do something about it.
+    page = " ".join(format_campaign(campaign(root)).split())
+    assert "cannot be re-taken at all" in page
+    assert "round-moved-away.json" in page
+    assert "--settle-drop round-second.json=%s" % SUCCESSOR in page
     monkeypatch.chdir(root)
     code = cli.main(["evolve", "--settle-reaffirm-file", FILE, "--settle-why", "read today's books",
                      "--settle-by", "alice"])
     printed = " ".join(capsys.readouterr().out.split())
-    # One refused pair must not stop the rest (boundary 277), and the walk's exit code must say one was refused.
-    assert code == 2
-    assert "cannot re-affirm that decision:" in printed
-    assert "1 refused" in printed
+    assert code == 0
+    assert "cannot re-affirm that decision:" not in printed
+    assert "0 refused" in printed
+    # Nothing payable is left, but the file still appears: the unpairable pair is debt the page must keep showing
+    # (round 133), and its remedy is `--settle-drop`, not another re-take.
+    left = _plan(root)
+    assert [row["stale"] for row in left] == [0]
+    assert left[0]["unpayable"] == 1
 
 
 def test_a_file_with_no_stale_decision_is_refused(tmp_path, monkeypatch, capsys):

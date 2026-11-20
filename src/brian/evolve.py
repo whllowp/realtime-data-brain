@@ -2895,6 +2895,16 @@ def reaffirm_link(root: Path, record: str, successor: str, *, why: str = "", by:
                      "re-takes one" % (name, target))
 
 
+def _named_successor(record: Optional[Mapping[str, Any]]) -> str:
+    """Which successor a recorded round names today, or "" when it names none (round 133).
+
+    Same question `reaffirm_link` asks before it refuses, asked once, in one place: the plan and the command must
+    agree about which pairs are payable, or the plan is advice the command then declines.
+    """
+    retired = (record or {}).get("retired")
+    return str(retired.get("re_measured_as") or "") if isinstance(retired, Mapping) else ""
+
+
 def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
                   settlements: Sequence[Mapping[str, Any]],
                   runs: Optional[Sequence[Mapping[str, Any]]] = None) -> List[Dict[str, Any]]:
@@ -2918,7 +2928,7 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
         origin = str((by_name.get(record) or {}).get("stream_path") or "")
         bucket = files.setdefault(origin, {"origin": origin, "decisions": 0, "stale": 0, "retaken": 0,
                                            "never": 0, "again": 0, "records": [], "commands": [],
-                                           "pairs": []})
+                                           "pairs": [], "unpayable": 0, "unpayable_pairs": [], "stuck": []})
         bucket["decisions"] += 1
         bucket.setdefault("_retaken", []).extend(
             str(entry.get("at") or "") for entry in item.get("reaffirmations") or []
@@ -2927,6 +2937,17 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
         if item.get("reaffirmations"):
             bucket["retaken"] += 1
         if (record, successor) in moved:
+            # Round 133: a pair whose record now names a different successor cannot be re-taken at all -- the
+            # command refuses it by design (round 119), so a plan that counts it as work hands the reader a
+            # command that fails on the first pair (boundaries 261/301 at the plan layer). It is counted apart,
+            # not dropped: the debt is real, the remedy is `--settle-drop`.
+            named = _named_successor(by_name.get(record))
+            if named != successor:
+                bucket["unpayable"] += 1
+                bucket["unpayable_pairs"].append({"record": record, "successor": successor,
+                                                  "names": named or "(nothing)"})
+                bucket["stuck"].append("brian evolve --settle-drop %s=%s --settle-why TEXT" % (record, successor))
+                continue
             bucket["stale"] += 1
             bucket["records"].append(record)
             # Round 123: the pair carries its kind, because the two kinds are paid as separate commands. A batch
@@ -2942,7 +2963,7 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
                 bucket["again"] += 1
             else:
                 bucket["never"] += 1
-    rows = [bucket for bucket in files.values() if bucket["stale"]]
+    rows = [bucket for bucket in files.values() if bucket["stale"] or bucket["unpayable"]]
     for row in rows:
         moments = row.pop("_retaken", None) or []
         taken = str(row.pop("_taken", "") or "")
@@ -2954,7 +2975,7 @@ def reaffirm_plan(rounds: Sequence[Mapping[str, Any]],
         # One command for the whole file, spelled the way a reader can paste it: eleven pasted pairs is how the
         # reason drifts and how one gets skipped (boundary 277's lesson, one level up).
         row["batch"] = "brian evolve --settle-reaffirm-file %s --settle-why TEXT --settle-by NAME" % row["origin"]
-    rows.sort(key=lambda row: (-row["stale"], row["origin"]))
+    rows.sort(key=lambda row: (-row["stale"], -int(row.get("unpayable") or 0), row["origin"]))
     return rows
 
 
@@ -3007,6 +3028,11 @@ def moved_settlements(rounds: Sequence[Mapping[str, Any]],
     for item in settlements or []:
         name = str(item.get("record") or "")
         successor = str(item.get("successor") or "")
+        # Round 133: a decision a person took back owes no re-take (round 125's boundary 293) and the re-take
+        # command refuses it outright. Counting it here made the plan offer a pair the command declines for a
+        # reason the plan never mentions -- the defect this round is about, one layer up.
+        if is_withdrawn(item):
+            continue
         record = by_name.get(name)
         reasons: List[str] = []
         # The pair the decision describes has to still exist for `reaffirm_link` to have anything to re-take; the

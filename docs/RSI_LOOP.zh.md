@@ -7162,6 +7162,71 @@ $ brian evolve --audit --what-if-records data/smd/stream-one.json
 - **310** 计划里不该出现命令自己会拒绝的对：清单与命令共用一份计划（283），所以计划若收录了跑不通的对，
   页面给出的下一步就成了「照做然后失败」（留作第 119 项）。
 
+### 3.139 清单不能提供命令会拒绝的活
+
+第 132 轮末尾那句「付完还欠 2」用真跑对过一次：`re-taken 1 of 3 decision(s), 0 kept its date (already
+re-taken), 2 refused`。两对被拒不是算错——`round-sixth.json` 已经指向 `round-seventh.json`，
+`reaffirm_link` 拒绝断言账本否认的事（第 119 轮），拒绝得对。错的是**清单**：`reaffirm_plan` 把这两对算
+成 `stale`，页面据此印出数字和命令，命令一对一对拒。清单印什么、命令跑什么（边界 261/301），这一条在计划
+层被违反了。
+
+修法是把「能不能付」变成计划自己的问题：
+
+- `_named_successor(record)` 抽出 `reaffirm_link` 拒绝前问的同一问题（这条记录今天把谁写作后继）；
+- `reaffirm_plan` 的每个 bucket 多出 `unpayable` / `unpayable_pairs` / `stuck`，不可付的对**不进** `stale`
+  / `pairs` / `commands`，而是进 `unpayable`，并带上真能执行的补救命令 `--settle-drop`；
+- 行的过滤条件变成 `stale or unpayable`——只欠不可付的活也必须出现在页面上；
+- 排序变成 `(-stale, -unpayable, origin)`。
+
+后果是自动的：`--settle-reaffirm-file` 的 `pairs` 来自 `row["pairs"]`，于是批量命令的头行数字
+（`X never re-taken, Y re-taken before and moved again`）与它真的要做的完全一致；`--max-moved-per-file`
+读 `stale`，只欠不可付活的文件不再被收费（边界 287 落到计划层）。
+
+```
+$ brian evolve --campaign
+links             2 stale decision(s) on data/smd/stream-two.json cannot be re-taken at all: round-other.json ->
+                  round-new.json (the record now names round-elsewhere.json) --
+                  brian evolve --settle-drop round-other.json=round-new.json --settle-why TEXT
+links             re-take next: data/smd/stream-one.json -- 2 stale of 2 recorded decision(s), ...
+
+$ brian evolve --settle-reaffirm-file data/smd/stream-two.json --settle-why "read today's books" --dry-run
+would re-take  1 decision(s) on data/smd/stream-two.json in one dry run: nothing was recorded (1 never re-taken,
+               0 re-taken before and moved again)
+  round-fifth.json=round-new.json  (never)
+```
+
+第 132 轮真跑那份文件时，头行说 `3 decision(s)`，跑完是 `1 of 3 … 2 refused`；现在头行说 `1 decision(s)`，
+跑完是 `1 of 1`。**页面的数字第一次是承诺，而不是愿望。**
+
+#### 第三个发现（跑出来的）：撤销过的决定不是「欠一次重开」
+
+按页面点名的补救命令走一遍：`--settle-drop round-other.json=round-new.json` 记账成功、无答复撤销数 3 → 4，
+然后页面**仍然**印：
+
+```
+links             2 stale decision(s) on data/smd/stream-two.json cannot be re-taken at all: round-other.json ->
+                  round-new.json (the record now names round-elsewhere.json) -- ...
+```
+
+原因：`moved_settlements` 从没学过「撤销」这件事。第 125 轮把撤销接进了 `replacement_links`、
+`settlement_summary`、`frequent_retakes`、`unexplained_decisions`、`reaffirm_link`、`settle_link`，唯独漏了
+这里。于是一笔已被撤回的决定被算成「欠一次重开」，而重开命令会因为**另一个理由**（决定已经不存在）拒绝
+它——和这一轮开头那类错误同一个形状，只是高了一层。第 125 轮的边界 293 早就说了「被撤回的决定什么都不
+欠」，这一轮让计划同意它：`moved_settlements` 跳过 `is_withdrawn(item)`。
+
+修完之后同一串命令变成 2 → 1 → 消失，剩下的账老老实实转到撤销队列里（无答复撤销 5 笔），而那条队列有自己
+的命令和年龄。
+
+**边界 311**：清单只能数「命令真能做」的活——否则页面的数字是愿望，命令的拒绝看起来像缺陷。
+**边界 312**：命令付不了的活要被报告，不被收费（154/171/266/271 的第六次，这次在计划层）。
+**边界 313**：不可付的活给出的补救必须是一条真能跑的命令；这里是 `--settle-drop`，它把「欠一次重开」变成
+「欠一次决定」，后者有队列、有年龄、有文件分组。
+**边界 314**：撤回来的决定不是待办的活——撤销与「账本变了」是两个事实，混在一起时计划会派发一个必然被拒
+的命令，而页面看不出它为什么被拒。
+
+第 133 轮：1902 tests，pyflakes 0；`var/demo133` 里 2 → 1 → 消失三段实录。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7685,8 +7750,7 @@ missing for the next level
      要重开的决定，各自一行事后账（`would owe N …, and the ledger would go from A to B`），并注明「这里没有写任何东西，
      这是干跑同一份推算」。作用于没有 `--campaign` 的命令行时 exit 2。边界 309、310。
 
-119. 让计划不要印出命令自己会拒绝的对：本轮 what-if 在 `var/demo128` 上显示「付掉这个文件的 3 对重开之后仍欠 2」，
-     真跑果然是 `re-taken 1 of 3 …, 2 refused`——原因是 `round-sixth.json` 已改为指向 `round-seventh.json`，
-     `reaffirm_link` 正确地拒绝了「断言账本否认的事」（第 119 轮），但 `reaffirm_plan` 仍然把它列进清单。
-     要做的是：`reaffirm_plan` 排除这类对（或在行上标 `unpayable` 并给出去处），`--campaign` 单独一行点名它们，
-     并让 `--settle-reaffirm-file` 的头部数字与之一致——清单印什么，命令就跑什么（边界 261/301 在计划层的重演）。
+119. 已做成：`reaffirm_plan` 把不可付的对分离成 `unpayable`/`unpayable_pairs`/`stuck`，带上 `--settle-drop` 补救；`--campaign` 单独一行点名（文件、当前后继、命令）；批量命令的头行数字与之自动一致；`--max-moved-per-file` 只数可付的；顺带修掉 `moved_settlements` 把撤销过的决定算成「欠一次重开」的旧账。1902 tests，pyflakes 0。
+120. 让 `--settle-drop` 也能一次带几对、或按文件带走（`--settle-drop-file STREAM`），并把「不可再
+     确认」的记账从「当前这一对」扩到「这个文件上有几对」，因为 `--campaign` 现在只点第一对；另外让
+     `--history` 的 settled 行按 `unpayable` 打标，读者不必先跑 `--campaign` 才知道自己在看一条付不掉的账。

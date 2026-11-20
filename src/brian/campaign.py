@@ -1338,6 +1338,20 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                      % (len(result.settlements_unanswered), str(oldest.get("record") or ""),
                         str(oldest.get("successor") or ""), str(oldest.get("at") or ""),
                         "?" if age is None else "%.1f" % float(age), _command))
+    # Round 133: the pairs no re-take can pay are named with the command that does something about them.
+    # Round 132's what-if predicted "paying all of these still leaves two" and the real run agreed by refusing two
+    # pairs one at a time: a plan that offers unpairable work hands the reader a command that fails (boundary 311).
+    for row in result.reaffirm_plan:
+        if not int(row.get("unpayable") or 0):
+            continue
+        stuck = row.get("unpayable_pairs") or []
+        lead = stuck[0] if stuck else {}
+        command = (row.get("stuck") or [""])[0]
+        lines.append("links             %d stale decision(s) on %s cannot be re-taken at all: %s -> %s (the record "
+                     "now names %s) -- %s"
+                     % (int(row.get("unpayable") or 0), row.get("origin") or "(unrecorded)",
+                        str(lead.get("record") or ""), str(lead.get("successor") or ""),
+                        str(lead.get("names") or "(nothing)"), command))
     for item in result.reaffirm_plan[:1]:
         commands = [str(command) for command in item.get("commands") or [] if str(command)]
         walks = item.get("walks_since")
