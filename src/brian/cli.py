@@ -78,7 +78,8 @@ from .evolve import (
     format_repairs,
     load_settlements,
     repair_legacy,
-    settle_link,)
+    settle_link,
+    settle_note,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
 from .laya.gate import explain_thresholds
@@ -2717,6 +2718,44 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 handle.write(json.dumps({"settled": decision}, indent=2, sort_keys=False) + "\n")
         return 0
 
+    if getattr(args, "settle_note", None):
+        # Round 114: the decision is already recorded; what is missing is the sentence explaining it. Appending a
+        # note keeps the date and the successor where they are, so the record cannot be rewritten into a decision
+        # that looks like it was explained all along (boundary 257).
+        pair = str(args.settle_note or "")
+        if "=" not in pair:
+            _print("--settle-note takes RECORD=SUCCESSOR, for example "
+                   "`--settle-note round-old.json=round-new.json`")
+            return 2
+        record, successor = pair.split("=", 1)
+        plan_before = repair_plan(root)
+        try:
+            noted = settle_note(root, record.strip(), successor.strip(),
+                                why=str(args.settle_why or ""),
+                                by=str(getattr(args, "settle_by", "") or ""))
+        except (OSError, ValueError) as error:
+            _print("cannot note that decision: %s" % error)
+            return 2
+        if not noted["changed"]:
+            _print("noted           %s -> %s already ends with that explanation; nothing to change"
+                   % (noted["record"], noted["successor"]))
+        else:
+            note = noted["note"]
+            _print("noted           %s -> %s" % (noted["record"], noted["successor"]))
+            _print("                the decision keeps its date (%s) and its successor; the explanation is "
+                   "appended" % noted["at"])
+            _print("                because: %s" % note["why"])
+            _print("                explained by: %s"
+                   % (note["by"] if note.get("by") else "(not recorded -- pass --settle-by NAME)"))
+            _print("                `--audit` prints this apart from a reason the decision came with.")
+            # Round 114: the amendment is a repair too, and the plan's own numbers are how it reports itself
+            # (round 111) -- "nothing changed in the plan" is the honest answer here and must print.
+            _print_repair_delta(record_repair(root, "settle-note", plan_before, repair_plan(root)))
+        if getattr(args, "json_out", None):
+            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps({"noted": noted}, indent=2, sort_keys=False) + "\n")
+        return 0
+
     if getattr(args, "repair_links", False):
         # Round 83: a `legacy` end is repaired by copying the retirement's claim into the successor record.
         # Without `--apply` this only prints what it would write: a command that edits recorded history has
@@ -4691,6 +4730,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --settle-link: why the pair was decided; required for a new settlement")
     # Round 113: who decided. Optional on purpose -- an empty decider is printed as "not recorded" rather than
     # filled with the local account, which is shared by whoever is at the keyboard (boundary 254).
+    evolve.add_argument("--settle-note", metavar="RECORD=SUCCESSOR", default=None,
+                        help="append the explanation a recorded settlement lacked: the decision keeps its date "
+                             "and successor; needs --settle-why")
     evolve.add_argument("--settle-by", default="", metavar="NAME",
                         help="with --settle-link: who made the decision (recorded in settlements.json)")
     evolve.add_argument("--repair-links", action="store_true",

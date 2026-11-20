@@ -1170,6 +1170,12 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         parts = ["%s %d" % (who if who else "and no decider recorded", count)
                  for who, count in sorted(by.items(), key=lambda pair: (-pair[1], pair[0]))]
         lines.append("links             decided by: %s" % ", ".join(parts))
+        # Round 114: an explanation added later is not the explanation the decision came with, so the count is
+        # printed on its own line rather than folded into the decider total (boundary 257).
+        explained = sum(1 for item in result.settlements if item.get("notes"))
+        if explained:
+            lines.append("links             %d of those decisions were explained after the fact: the record keeps "
+                         "its date, and a later note does not make it explained at the time" % explained)
     # Round 111: the ranking said which file to open first; this says whether last time's opening helped.
     last = (result.repair_history or {}).get("last") or {}
     if isinstance(last, Mapping) and last.get("at"):

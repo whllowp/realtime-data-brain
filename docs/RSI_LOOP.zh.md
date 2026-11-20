@@ -6115,6 +6115,69 @@ required, and this build can only report them`——本构建没有"给已存决
 **边界 256：默认值不能拿环境冒充人。** 本机账户是"谁在键盘前"，不是"谁做的决定"；把它填进 `by` 会让一条决定
 看起来有归属，而实际上没有人可以被问。
 
+### 3.120 补上的理由不是当时的理由
+
+第 113 轮把"一条决定要有人、有理由"做成了校验：新的结算不给理由就写不进去。可校验只对未来生效——
+`var/evolve/settlements.json` 里已经躺着第 112 轮写下的决定，它们有日期、有 successor，没有理由，也没有裁定者。
+`--audit` 能做的只是报告它们（`carry no reason at all`）。最容易的修法是打开文件补一个 `why`，而第 83、112
+两轮存在的理由就是：**手改账本会抹掉"谁决定的、什么时候决定的"这层信息**。所以第 114 轮加的是追加，不是改写。
+
+```
+$ brian evolve --settle-note round-old.json=round-new.json \
+      --settle-why "the queue paid round-other, round-old kept the same successor" --settle-by alice
+noted           round-old.json -> round-new.json
+                the decision keeps its date (2026-11-19T20:00:00+00:00) and its successor; the explanation is appended
+                because: the queue paid round-other, round-old kept the same successor
+                explained by: alice
+                `--audit` prints this apart from a reason the decision came with.
+repair plan      nothing left the table: cost 0 -> 0, 0 file(s) still owing
+```
+
+存储形状是在原条目上追加，原有的三个字段一个都不动：
+
+```json
+{"record": "round-old.json", "successor": "round-new.json",
+ "at": "2026-11-19T20:00:00+00:00", "why": "",
+ "notes": [{"at": "2026-11-20T01:56:49.911843+00:00",
+            "why": "the queue paid round-other, round-old kept the same successor",
+            "by": "alice"}]}
+```
+
+`--audit` 因此要同时说两件事，而且不能合成一句：
+
+```
+1 of them carry no reason from the moment they were taken: written before --settle-why was required, and a
+later note does not make the original decision explained
+  round-old.json             -> round-new.json              explained later, on 2026-11-20T01:56:49.911843+00:00, by alice
+1 of them were explained after the fact: the decision keeps its date, and the explanation came later.
+```
+
+`--campaign` 同理，把"事后补写"单独数一行：`1 of those decisions were explained after the fact: the record keeps
+its date, and a later note does not make it explained at the time`。
+
+这一轮真正的结论是**两处措辞随着机制一起改了**：第 113 轮那句 `carry no reason at all` 变成了
+`carry no reason from the moment they were taken`，因为"它现在没有理由"已经不再为真了——它有了一条后补的说明。
+`tests/test_settle_link.py` 里钉住旧句子的断言必须跟着改（边界 190）：机制变了而句子没变，页面就会在一个
+能补写的账簿上继续宣称"nothing to do here"。
+
+补写本身也是一次修复，所以它走 `record_repair(root, "settle-note", before, after)`，并如实打印
+`nothing left the table: cost 0 -> 0`——说明改的是记录，不是计划里的欠账。这条"什么都没动"的输出不是噪音：
+它是这次动作唯一被发现过的地方（边界 259）。
+
+三种边界：
+
+**边界 257：事后补上的说明不是当时的说明。** 一条决定的价值在于"它在当时被这样判断"，所以第 114 轮不覆盖
+`why`，而是新增 `notes`；页面必须把两者分开打印，否则一次改写就能让旧决定看起来一开始就说清楚了——边界
+174（修过的位置不是原来的位置）在"决定"这个对象上的版本。
+
+**边界 258：只对新记录生效的校验，不能拿旧记录当非法。** 第 113 轮要求新结算必须有理由，但旧条目依然合法——
+为它们提供的出路是追加说明，而不是让校验去拒绝一个已经发生的事实。对旧数据来说，正确的动作是补录，不是报错。
+
+**边界 259：任何一次修改都必须至少在一处"自报"。** 补写说明既不动 `at`，也不动 `successor`，也不动计划，
+所以它唯一能被读者看见的地方就是 `repair_history` 里那行"计划没有变化"。如果这次动作不记账，它就成了一次
+看不见的写入——而看不见的写入正是第 83 轮之后所有工作的主题。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6562,4 +6625,11 @@ missing for the next level
     所以每一次可执行的修复都只说"什么也没离开这张表"——账本拒绝只有诊断（`--audit`），没有可执行的修法。98. **已完成（第 112 轮）**。`brian evolve --settle-link RECORD=SUCCESSOR [--settle-why TEXT]` 把"哪一条声称已经过时"记成一条决定：`var/evolve/settlements.json` 存 `{record, successor, at, why}`，重复执行幂等并说出原时间；`replacement_links(rounds, settled)` 只让被裁定的那一个声称退出候选，**不改账本**（`queue.paid_round` 原样保留）；`--audit` 把结算单独打印（"not by agreement…it is not a second witness"），`--strict` 因此从 2 回到 0；`provenance_block` 读同一份结算，`--verify` 不再拒绝叠承诺；`--history` 用同一份结算读（`every replacement link that no decision settled agrees…`、`[settled with … by a recorded decision]`），`--campaign` 页面与 `--json-out` 都带 `settlements`；`repair_plan` 的 `remedy` 改为 `brian evolve --settle-link …`，第 111 轮那句"changed nothing in the plan"第一次能打印出"1 file(s) off the table"。实测：`--audit --strict` 2 → 0，`repair plan      1 file(s) off the table: data/smd/stream-real.json -- cost 1 -> 0`，campaign JSON `settlements` 带理由与时间。测试 1617 → 1652（`tests/test_settle_link.py` 17，新）。
 99. **已完成（第 113 轮）**。`--settle-why` 对新决定必填（`settle_link` 抛 `a settlement needs a reason…`，CLI 退出 2 且不写文件；已成对的重复执行仍幂等）；新增 `--settle-by NAME` 把裁定者写进 `by` 字段，不给就存空、并由 `--audit` 明确说 `and no decider was recorded` / `N of them were recorded without --settle-by`，`--campaign` 则按裁定者计数（`decided by: alice 1` / `decided by: and no decider recorded 1`）；第 112 轮留下的"有理由无裁定者"记录被如实标出；第 112 轮之前允许的"无理由"记录也被点名，但本构建只能报告、不能补写。演示：`--settle-by alice` → `decided by: alice` + `repair plan 1 file(s) off the table … cost 1 -> 0`；新对不给理由 → 退出 2 且 store 不变；`--audit` 对旧记录打印 `and no decider was recorded`。测试 1653 → 1664（`tests/test_settle_link.py` 28）。
 
-100. 给已经有记录的决定补上理由与裁定者：新增 `--settle-note RECORD=SUCCESSOR --settle-why … --settle-by …`，它**只追加**一条 note（`notes: [{at, why, by}]`），不改原有的 `at`/`successor`，并把"补写"这件事本身也记进 `repair_history`；同时让 `--campaign` 把"补写过理由的决定"与"一开始就有理由的决定"分开数——否则补写会把一条旧记录洗成看起来当时就说清楚了的样子（边界 174 在裁定上的版本）。
+100. 给已经有记录的决定补上理由与裁定者：`--settle-note RECORD=SUCCESSOR --settle-why … --settle-by …`
+      只追加一条 note（`notes: [{at, why, by}]`），不改原有的 `at`/`successor`/`why`；补写这件事本身记进
+      `repair_history`（action 为 `settle-note`，计划没动也照实打印）；`--audit` 把"补写的说明"排在
+      "决定自带的理由"之后并单独成段，`--campaign` 单独数"事后才补上理由的决定"。第 114 轮做完了这件事
+      （1664 → 1677 个测试）。留下的问题见第 101 项。
+101. 让 `--campaign` 把"事后补写的说明"按人拆开，并且在 `--settle-link` 被拒时（没有 `--settle-why`）直接
+      指向 `--settle-note`：现在一次失败的结算只会说"需要理由"，不会说旧记录可以用补写的方式修；另外让
+      `--history` 的结算行也带上 note 的条数与最后一位说明者的名字，让一条决定的历史在一页里读完。

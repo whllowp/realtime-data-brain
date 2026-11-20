@@ -2732,6 +2732,46 @@ def settle_link(root: Path, record: str, successor: str, why: str = "", by: str 
     return dict(entry, changed=True)
 
 
+def settle_note(root: Path, record: str, successor: str, why: str = "", by: str = "",
+                now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Append the explanation a recorded decision lacked, without moving its date or its successor (round 114).
+
+    Rounds before 113 could store a settlement with no reason, and this build can only report those -- editing
+    the store by hand is what rounds 83/112 exist to prevent. So the explanation is appended as its own entry:
+    the decision keeps `at`, `successor` and whatever `why` it had, and `notes` grows. The distinction matters
+    later: a decision explained when it was taken and one explained a month afterwards are not the same evidence
+    (boundary 257), so `--campaign` counts them apart instead of letting the note upgrade the record.
+    """
+    name = str(record or "").strip()
+    to = str(successor or "").strip()
+    note_why = str(why or "").strip()
+    if not name or not to:
+        raise ValueError("a note needs both ends: --settle-note RECORD=SUCCESSOR")
+    if not note_why:
+        raise ValueError("a note needs a reason: --settle-why TEXT")
+    store = {"format": SETTLEMENT_FORMAT, "settlements": load_settlements(root)}
+    existing = [item for item in store["settlements"]
+                if str(item.get("record") or "") == name and str(item.get("successor") or "") == to]
+    if not existing:
+        raise ValueError("no settlement recorded for %s -> %s: `--settle-link` records a decision, "
+                         "`--settle-note` explains one" % (name, to))
+    entry = existing[0]
+    author = str(by or "").strip()
+    notes = entry.get("notes") if isinstance(entry.get("notes"), list) else []
+    if notes and str(notes[-1].get("why") or "").strip() == note_why \
+            and str(notes[-1].get("by") or "").strip() == author:
+        return {"record": name, "successor": to, "at": str(entry.get("at") or ""),
+                "notes": len(notes), "changed": False}
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    note = {"at": moment.isoformat(), "why": note_why, "by": author}
+    entry["notes"] = notes + [note]
+    path = root / EVOLVE_DIR / SETTLEMENTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(store, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    return {"record": name, "successor": to, "at": str(entry.get("at") or ""),
+            "note": note, "notes": len(entry["notes"]), "changed": True}
+
+
 def legacy_links(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """The `legacy` links as pairs: a retirement whose successor recorded no end of its own (round 83).
 
@@ -3808,12 +3848,15 @@ def _link_lines(result: Audit) -> List[str]:
                      % len(result.settled))
         unattributed = 0
         unexplained = 0
+        explained_later = 0
         for item in result.settled:
             by = str(item.get("by") or "").strip()
             if not by:
                 unattributed += 1
             if not str(item.get("why") or "").strip():
                 unexplained += 1
+            if item.get("notes"):
+                explained_later += 1
             lines.append("  %-26s -> %-26s  (%s%s)"
                          % (str(item.get("record") or ""), str(item.get("successor") or ""),
                             str(item.get("at") or ""),
@@ -3829,10 +3872,24 @@ def _link_lines(result: Audit) -> List[str]:
             lines.append("and a decision nobody is named for is the one nobody can be asked to defend.")
         if unexplained:
             # Round 113: rounds before this one accepted a settlement with no reason at all, so a real store can
-            # hold one. Reporting it is all this build can do -- there is no command yet that adds a reason to an
-            # existing decision, and editing the store by hand is what rounds 83/112 are about (item 100).
-            lines.append("%d of them carry no reason at all: written before --settle-why was required, and this "
-                         "build can only report them" % unexplained)
+            # hold one. Round 114 gives it a way to gain one; this line keeps saying that the reason did not come
+            # with the decision (boundary 257).
+            lines.append("%d of them carry no reason from the moment they were taken: written before --settle-why "
+                         "was required, and a later note does not make the original decision explained" % unexplained)
+        if explained_later:
+            # Round 114: the note is an amendment, not the original judgement. Printed apart so a reader cannot
+            # read "explained" as "explained at the time" (boundary 257).
+            for item in result.settled:
+                notes = item.get("notes") or []
+                if not notes:
+                    continue
+                last = notes[-1] if isinstance(notes[-1], dict) else {}
+                author = str(last.get("by") or "").strip()
+                lines.append("  %-26s -> %-26s  explained later, on %s%s"
+                             % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                                str(last.get("at") or ""), ", by %s" % author if author else ""))
+            lines.append("%d of them were explained after the fact: the decision keeps its date, and the "
+                         "explanation came later." % explained_later)
     if result.in_force:
         # Round 85: round 84 could refuse to stack a promise, because a version that is not yet in force can
         # simply not be applied. A version that is already applied is running; the refusal is gone, and what

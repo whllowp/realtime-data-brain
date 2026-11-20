@@ -251,8 +251,12 @@ def test_the_audit_reports_a_settlement_written_without_a_reason(tmp_path):
         {"record": RETIRED, "successor": SUCCESSOR, "at": NOW.isoformat(), "why": ""}]}, indent=2) + "\n",
                     encoding="utf-8")
     flat = " ".join(format_audit(audit(tmp_path)).split())
-    assert "1 of them carry no reason at all" in flat
+    # Round 114 gave an old decision a way to gain a reason, so the sentence now says what is true of the
+    # decision itself: the reason did not come with it (boundary 190 -- the sentence and its assertion move
+    # together when the mechanism under them does).
+    assert "1 of them carry no reason from the moment they were taken" in flat
     assert "written before --settle-why was required" in flat
+    assert "a later note does not make the original decision explained" in flat
 
 
 def test_the_cli_refuses_a_settlement_without_a_reason(tmp_path, monkeypatch, capsys):
