@@ -92,6 +92,7 @@ from .evolve import (
     settle_note,
     restore_settlement,
     preview_settlement_change,
+    preview_withdrawal_change,
     withdraw_settlement,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
@@ -323,8 +324,17 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
         stored = load_settlements(root)
         rounds_all = history(root, include_retired=True)
         wanted = [pair.split("=", 1) for pair in pairs if "=" in pair]
-        after = preview_settlement_change(stored, wanted, kind=kind, why="(preview)", by="")
-        if kind == "restore":
+        if kind == "drop":
+            after = preview_withdrawal_change(stored, wanted, why="(preview)", by="")
+        else:
+            after = preview_settlement_change(stored, wanted, kind=kind, why="(preview)", by="")
+        if kind == "drop":
+            before_rows = reaffirm_plan(rounds_all, stored)
+            after_rows = reaffirm_plan(rounds_all, after)
+            key = "unpayable"
+            before_queue = sum(int(row.get("decisions") or 0) for row in withdrawal_plan(rounds_all, stored))
+            after_queue = sum(int(row.get("decisions") or 0) for row in withdrawal_plan(rounds_all, after))
+        elif kind == "restore":
             before_rows = withdrawal_plan(rounds_all, stored)
             after_rows = withdrawal_plan(rounds_all, after)
             key = "decisions"
@@ -343,7 +353,14 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
         return sum(int(row.get(key) or 0) for row in rows
                    if same_stream_path(str(row.get("origin") or ""), origin))
 
-    noun = "unanswered withdrawal(s)" if kind == "restore" else "stale decision(s)"
+    noun = {"restore": "unanswered withdrawal(s)", "drop": "decision(s) no re-take can pay"}.get(
+        kind, "stale decision(s)")
+    if kind == "drop":
+        return ["after this run  %s would owe %d %s, and %d more withdrawal(s) would wait in the withdrawal queue "
+                "(the queue goes from %d to %d)"
+                % (origin, here(after_rows), noun, after_queue - before_queue, before_queue, after_queue),
+                "                dropping a decision does not settle anything: the pair becomes an unanswered "
+                "withdrawal, which has its own queue, age and file grouping (boundary 318)"]
     return ["after this run  %s would owe %d %s, and the ledger would go from %d to %d"
             % (origin, here(after_rows), noun, total(before_rows), total(after_rows)),
             "                the repair bill is not previewed: it reads the queue's stored refusals, which this "
@@ -373,16 +390,27 @@ def _print_what_if(root: Path, target: str) -> None:
                      for entry in (withdrawal_rows[0].get("records") if withdrawal_rows else [])]
     retake_pairs = ["%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
                     for item in (reaffirm_rows[0].get("pairs") if reaffirm_rows else [])]
-    _print("what if          %s owes %d unanswered withdrawal(s) and %d stale decision(s)"
+    drop_pairs = ["%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
+                  for item in (reaffirm_rows[0].get("unpayable_pairs") if reaffirm_rows else [])]
+    _print("what if          %s owes %d unanswered withdrawal(s), %d stale decision(s) and %d decision(s) no "
+           "re-take can pay"
            % (target, sum(int(row.get("decisions") or 0) for row in withdrawal_rows),
-              sum(int(row.get("stale") or 0) for row in reaffirm_rows)))
-    if not restore_pairs and not retake_pairs:
+              sum(int(row.get("stale") or 0) for row in reaffirm_rows),
+              sum(int(row.get("unpayable") or 0) for row in reaffirm_rows)))
+    if not restore_pairs and not retake_pairs and not drop_pairs:
         _print("                 nothing to pay: neither plan lists that file, so no batch command would change it")
         return
     if restore_pairs:
         _print("                 paying the withdrawals (%d pair(s), `--settle-restore-file %s`):"
                % (len(restore_pairs), target))
         for line in _after_preview_lines(root, restore_pairs, kind="restore", origin=target):
+            _print("                   " + line.strip())
+    if drop_pairs:
+        # Round 135: round 133 stopped counting unpairable pairs as `stale`, which made the page honest and this
+        # question false -- "paying it all" silently meant "paying the payable part" (boundary 319).
+        _print("                 paying the decisions no re-take can pay (%d pair(s), `--settle-drop-file %s`):"
+               % (len(drop_pairs), target))
+        for line in _after_preview_lines(root, drop_pairs, kind="drop", origin=target):
             _print("                   " + line.strip())
     if retake_pairs:
         _print("                 paying the re-takes (%d pair(s), `--settle-reaffirm-file %s`):"
@@ -1881,10 +1909,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("--what-if-records asks the campaign page a question; without --campaign nothing prints it")
         return 2
     if getattr(args, "dry_run", False) and not (getattr(args, "settle_reaffirm_file", None)
-                                                or getattr(args, "settle_restore_file", None)):
+                                                or getattr(args, "settle_restore_file", None)
+                                                or getattr(args, "settle_drop_file", None)):
         # Round 130: `--dry-run` exists for the two batch commands. Anywhere else it would be silently ignored, and
         # a flag that looks like a safety belt must not be decorative (rounds 103/117/120/127/128, boundary 305).
-        _print("--dry-run previews --settle-reaffirm-file or --settle-restore-file; without one of those the "
+        _print("--dry-run previews --settle-reaffirm-file, --settle-restore-file or --settle-drop-file; without "
+               "one of those the "
                "command would go ahead and record nothing you could see first")
         return 2
     if getattr(args, "from_queue", None) is not None and not getattr(args, "verify", False):
@@ -3232,6 +3262,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("no decision recorded against %s cannot be re-taken: `brian evolve --campaign` lists the files "
                    "that hold one" % target)
             return 2
+        if getattr(args, "dry_run", False):
+            # Round 135: the third batch command was the one `--dry-run` did not know. It says what it would hand
+            # over, in the shape the other two families use, and writes nothing (boundaries 304/305).
+            _print("would withdraw %d decision(s) on %s in one dry run: nothing was recorded"
+                   % (len(pairs), match[0].get("origin") or target))
+            for item in match[0].get("unpayable_pairs") or []:
+                _print("  %s=%s  (the record now names %s)"
+                       % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                          str(item.get("names") or "(nothing)")))
+            for line in _after_preview_lines(root, pairs, kind="drop", origin=target):
+                _print("  " + line.strip())
+            _print("nothing was written; drop --dry-run to withdraw them (boundary 304).")
+            return 0
         _print("dropping       %d decision(s) on %s in one command" % (len(pairs), match[0].get("origin") or target))
         inner = argparse.Namespace(**vars(args))
         inner.settle_drop_file = None

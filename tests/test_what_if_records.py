@@ -21,7 +21,8 @@ def test_a_file_that_owes_withdrawals_previews_paying_them(tmp_path, monkeypatch
     monkeypatch.chdir(tmp_path)
     assert _what_if(ONE) == 0
     printed = " ".join(capsys.readouterr().out.split())
-    assert "what if data/smd/stream-one.json owes 2 unanswered withdrawal(s) and 0 stale decision(s)" in printed
+    assert ("what if data/smd/stream-one.json owes 2 unanswered withdrawal(s), 0 stale decision(s) and 0 "
+            "decision(s) no re-take can pay") in printed
     assert "paying the withdrawals (2 pair(s), `--settle-restore-file data/smd/stream-one.json`)" in printed
     assert ("after this run data/smd/stream-one.json would owe 0 unanswered withdrawal(s), and the ledger would go "
             "from 2 to 0") in printed
@@ -34,7 +35,8 @@ def test_a_file_that_owes_re_takes_previews_paying_them(tmp_path, monkeypatch, c
     monkeypatch.chdir(tmp_path)
     assert _what_if(ONE) == 0
     printed = " ".join(capsys.readouterr().out.split())
-    assert "owes 0 unanswered withdrawal(s) and 3 stale decision(s)" in printed
+    assert ("owes 0 unanswered withdrawal(s), 3 stale decision(s) and 0 "
+            "decision(s) no re-take can pay") in printed
     assert "paying the re-takes (3 pair(s), `--settle-reaffirm-file data/smd/stream-one.json`)" in printed
     assert "would owe 0 stale decision(s), and the ledger would go from 3 to 0" in printed
 
@@ -44,7 +46,8 @@ def test_a_file_that_owes_nothing_says_so(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert _what_if(THIRD) == 0
     printed = " ".join(capsys.readouterr().out.split())
-    assert "what if data/smd/third.json owes 0 unanswered withdrawal(s) and 0 stale decision(s)" in printed
+    assert ("what if data/smd/third.json owes 0 unanswered withdrawal(s), 0 stale decision(s) and 0 "
+            "decision(s) no re-take can pay") in printed
     assert "nothing to pay: neither plan lists that file" in printed
 
 

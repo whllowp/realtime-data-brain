@@ -3225,6 +3225,28 @@ def unanswered_withdrawals(settlements: Sequence[Mapping[str, Any]],
     return rows
 
 
+def preview_withdrawal_change(settlements: Sequence[Mapping[str, Any]], pairs: Sequence[Sequence[str]],
+                               *, now: Optional[Any] = None, why: str = "", by: str = "") -> List[Dict[str, Any]]:
+    """A copy of the store with a withdrawal appended per pair, and nothing written (round 135).
+
+    Round 131 did this for re-takes and restores by appending the entry the real command appends. A withdrawal is
+    the same trick with a different field: append, let the plan recompute, read the difference. The point is that
+    the preview and the command share `is_withdrawn`, so "what would this leave" cannot drift from "what it left"
+    (boundary 308).
+    """
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    stamp = moment.isoformat() if isinstance(moment, datetime) else str(moment)
+    wanted = {(str(pair[0]).strip(), str(pair[1]).strip()) for pair in pairs if len(pair) >= 2}
+    after: List[Dict[str, Any]] = []
+    for item in settlements or []:
+        entry = dict(item)
+        if (str(entry.get("record") or ""), str(entry.get("successor") or "")) in wanted:
+            entry["withdrawn"] = list(entry.get("withdrawn") or []) + [{"at": stamp, "why": str(why or ""),
+                                                                        "by": str(by or "")}]
+        after.append(entry)
+    return after
+
+
 def preview_settlement_change(settlements: Sequence[Mapping[str, Any]], pairs: Sequence[Sequence[str]],
                               *, kind: str, now: Optional[datetime] = None, why: str = "", by: str = "",
                               claimants: Sequence[str] = ()) -> List[Dict[str, Any]]:

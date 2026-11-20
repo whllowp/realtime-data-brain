@@ -7277,6 +7277,74 @@ withdrawn      2 of 2 decision(s), 0 already withdrawn, 0 refused
 留下行内那句「为什么付不掉」。
 
 
+### 3.141 三条批量命令，就这一条不能先看：预览的口子要跟着家族长
+
+第 130 轮给两条批量命令装了 `--dry-run`（`--settle-reaffirm-file` 与 `--settle-restore-file`），护栏写得很清楚：
+这两个之外用 `--dry-run` 一律拒绝，理由是一句照旧的话——"看起来像安全带的开关不能是装饰品"（边界 305）。
+第 134 轮加了第三条批量命令 `--settle-drop-file`，护栏没有跟着长。于是同一个开关，在两个兄弟身上是预览，
+在最小的弟弟身上是拒绝：
+
+```text
+$ brian evolve --settle-drop-file data/smd/stream-two.json --settle-why "..." --dry-run
+--dry-run previews --settle-reaffirm-file, --settle-restore-file or --settle-drop-file; without one of those the
+command would go ahead and record nothing you could see first
+```
+
+护栏本身是对的（它没有假装预览），错的是它数错了家族。改法不是放宽判断，而是把 `settle_drop_file` 加进
+那个条件，然后让这条命令真的会预览：
+
+```text
+would withdraw 2 decision(s) on data/smd/stream-two.json in one dry run: nothing was recorded
+  round-other.json=round-new.json  (the record now names round-elsewhere.json)
+  round-sixth.json=round-new.json  (the record now names round-seventh.json)
+  after this run  data/smd/stream-two.json would owe 0 decision(s) no re-take can pay, and 2 more withdrawal(s)
+                  would wait in the withdrawal queue (the queue goes from 3 to 5)
+  dropping a decision does not settle anything: the pair becomes an unanswered withdrawal, which has its own
+  queue, age and file grouping
+nothing was written; drop --dry-run to withdraw them (boundary 304).
+```
+
+第二句"账去哪了"是本轮真正的收获。第 131 轮定下的规矩是"预览要说出跑完之后账变成什么样"（边界 307/308），
+而丢弃这件事的后果不是"少了 2 条"，是"2 条从'不能重开'搬到'没人接手'"：同一个文件上的欠账条数只增不减，
+只是换了队列。预览若只说"会少 2 条"，读的人会以为债务消失了——这正是第 127 轮"同一笔债不要收两次费"的反面：
+也不要把一笔债说成凭空消失。`preview_withdrawal_change()` 走的是同一条路：拷贝一份 store，把 `withdrawn`
+往上追加，然后让 `reaffirm_plan` 与 `withdrawal_plan` 自己重算——所以预览与真跑共用 `is_withdrawn` 一个判断。
+
+同一天还修了另一半：`--campaign --what-if-records` 在第 132 轮只问两个家族（重开、接手），第 133 轮把
+"不能重开的对"从 `stale` 里移走之后，这个问题就悄悄变成了"付得起的那部分"。页面上的答案是假的：
+
+```text
+$ brian evolve --campaign --what-if-records data/smd/stream-two.json
+what if          data/smd/stream-two.json owes 2 unanswered withdrawal(s), 1 stale decision(s) and 2 decision(s)
+                 no re-take can pay
+                 paying the withdrawals (2 pair(s), `--settle-restore-file ...`):
+                   after this run  ... would owe 0 unanswered withdrawal(s), and the ledger would go from 3 to 1
+                 paying the decisions no re-take can pay (2 pair(s), `--settle-drop-file ...`):
+                   after this run  ... would owe 0 decision(s) no re-take can pay, and 2 more withdrawal(s) would
+                   wait in the withdrawal queue (the queue goes from 3 to 5)
+                 paying the re-takes (1 pair(s), `--settle-reaffirm-file ...`):
+                   after this run  ... would owe 0 stale decision(s), and the ledger would go from 3 to 2
+                 nothing here is written: this is the same recomputation the dry runs print (boundary 308)
+```
+
+三个家族各算各的，都用同一个 `_after_preview_lines()`，所以页面的预言和命令的结果不会分叉。真跑一次之后，
+文件上"不能重开"的那行消失，没人接手的从 3 变成 5——与预览说的一致。
+
+**边界 318：丢弃一条决定不是解决任何事，它只是把债务换了一种形式（"不能重开"→"没人接手"），所以预览必须
+说出它去哪，而不是只说出少了多少。**
+
+**边界 319：说"把这些都付了会怎样"时，必须把别的命令拒绝的那部分算进来，否则这句话回答的是一个子集，
+而读的人会当成全集。**
+
+**边界 320：一个列出了自己所适用命令的护栏，在家族长大的那一刻就过期了；加一条命令不是加一个分支，
+是把每一处点名的地方都改一遍。**
+
+测试：`tests/test_drop_preview.py`（7 项）覆盖预览不写盘、两张账的前后数字、真跑后该家族清空且没人在
+"没人接手"里补齐、`preview_withdrawal_change()` 不改 store，以及 what-if 三个家族的出现与"nothing to pay"
+不再误报；`tests/test_settle_dry_run.py`、`tests/test_what_if_records.py` 里钉住旧句子的断言随句子一起改
+（边界 190）。全套 1920 项通过，`pyflakes` 干净。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7802,6 +7870,6 @@ missing for the next level
 
 119. 已做成：`reaffirm_plan` 把不可付的对分离成 `unpayable`/`unpayable_pairs`/`stuck`，带上 `--settle-drop` 补救；`--campaign` 单独一行点名（文件、当前后继、命令）；批量命令的头行数字与之自动一致；`--max-moved-per-file` 只数可付的；顺带修掉 `moved_settlements` 把撤销过的决定算成「欠一次重开」的旧账。1902 tests，pyflakes 0。
 120. 已做成：`--settle-drop` 改成 `nargs="+"`（载荷为列表，含 `drop_refused`/`drop_skipped`）；新增 `--settle-drop-file STREAM`，对子取自 `reaffirm_plan` 的 `unpayable_pairs`，走单对分支、按文件一次付完；`--history` 的 settled 行新增 `[cannot be re-taken: the record names <后继>]`，与 `[retired, re-measured as …]` 对得上。1911 tests，pyflakes 0。
-121. 干跑也要能预览这一族：`--settle-drop-file --dry-run` 现在直接退出（`--dry-run` 只认两个 restore /
-     reaffirm 命令），而它已经是第三个批量命令；顺手把 `--campaign --what-if-records` 里「不可付的对」也算进
-     「付完还欠」，否则那句预报对这一族不成立。
+121. ~~把 `--dry-run` 教给第三条批量命令（`--settle-drop-file`），并让 `--campaign --what-if-records` 把"不能重开"的那一族也算进"付完还剩什么"。~~ 已完成：预览说清"这条决定会搬到没人接手的队列里"，页面对三个家族各算各的，共用 `_after_preview_lines()`（§3.141，边界 318/319/320）。
+
+122. 让预览能回答"如果我按这个顺序做"：`--campaign --what-if-records FILE --plan restore,drop,retake` 依次算出每一步之后的两张账，因为三条命令互相改变对方的队列（丢弃会把对推进没人接手，接手又把对推回可重开），单独看不等于合起来看。
