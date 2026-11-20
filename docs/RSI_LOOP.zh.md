@@ -7648,6 +7648,60 @@ $ ... 去掉 --dry-run，同一份载荷就在 p140.json 里：
 **边界 335：拒绝不是付款。** 一次什么都没付的批量不写载荷——空的列表会被读成"付过，付了零个"。
 
 
+### 3.147 载荷也要报账：八处写文件，一种写法
+
+第 127 条说"同一个标志在两条线上有两种可见性"。查下去比这句更糟：整个 CLI 里有**八处**写 `--json-out` 载荷，
+八处八样——六处不吭声（`--settle-link` 的两处载荷、`--settle-note`、`--settle-reanchor`、`--settle-drop`、`--settle-restore`、
+`--settle-reaffirm`、`--repair-links`），`--repair-links` 那处甚至用 `__import__("json")` 绕开已经导入的模块；一处自己
+建父目录（写轮次记录那处，第 113 轮），其余的父目录不存在就直接抛；而**写不出来时抛的是回溯**。最后这条最贵：
+
+```
+$ python -m brian.cli evolve --settle-reanchor-file data/smd/stream-two.json --settle-why x --settle-by carol \
+      --json-out nodir\p.json
+  File ".../src/brian/cli.py", line 3538, in cmd_evolve
+    with open(out, "w", encoding="utf-8", newline="\n") as handle:
+FileNotFoundError: [Errno 2] No such file or directory: 'nodir\\p.json'
+```
+
+而那时**裁定已经写进 store**：两条决策已经改锚。所以读者拿到的是一次回溯、一个非零退出码、和一个已经改了账的本子——
+三者互相矛盾，而唯一能让它们一致的东西（那句话"已经记下了，只缺这个文件"）没有印出来。
+
+改法是把这件事收到一处：`_write_payload(path, payload) -> bool`。建父目录（第 113 轮的规则推广到所有载荷）→ 写
+`<target>.tmp` → `replace` 落位（半截的载荷不会被当成完整的）→ 印 `wrote <path>`，与非裁定命令一直用的措辞一致。
+写失败时印两行——
+
+```
+cannot write the payload to .: [WinError 5] ...
+                what this command recorded is already in the store: only the payload is missing
+```
+
+——并且调用方退 2。九处替换（八个旧点 + 新增的 `--repair-links`）之后，全族一个形状。
+
+```
+$ ... --json-out deep\nested\p141.json        # 父目录不存在
+re-anchored    2 of 2 decision(s), 0 needed no change, 0 refused
+wrote deep\nested\p141.json
+$ ... --json-out .                             # 目标是目录
+cannot write the payload to .: [WinError 5] ...
+                what this command recorded is already in the store: only the payload is missing
+$ echo $LASTEXITCODE
+2
+```
+
+一处自己踩的坑：第一版写的是 `temp = target.with_name(target.name + ".tmp")`，而 `Path(".").name` 是空串，
+于是 `with_name` 抛的是 **`ValueError` 而不是 `OSError`**，回溯照旧。改成 `Path(str(target) + ".tmp")` 并把 `ValueError`
+一起接住。"接住 `OSError`"不等于接住所有失败的写法——这本身就是下面 337 的一个例子。
+
+**边界 336：一个文件写没写，页面上必须能看得见。** 写了的印 `wrote <path>`，没写的不能有这一行；否则这句话不再
+意味着任何事（同一句话在八个地方被念，就等于没有念）。
+
+**边界 337：载荷是衍生物，不是证据。** 它写不出来时，命令必须说"记录已经进库、只缺这个文件"并非零退出；用回溯把
+一次已经付过的运行变成一次"不知道结果"的运行，是把读者最需要的那条信息扔掉了。
+
+**边界 338：一个动作在多处重复实现时，一致性只能靠收到一处，不能靠每一处都记得。** 八个写载荷的点里，一个建目录、
+一个绕过 `json`、六个不吭声；没有人写错，只是没有人把它当成同一件事。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8197,6 +8251,10 @@ missing for the next level
       单条那段写的那个载荷（`{"reanchored": [...]}` / `{"withdrawn": [...], "drop_refused", "drop_skipped"}`），
       四个文件命令因此同形；四条 dry-run 分支各印 `no payload      a preview writes nothing …`；一条都没付的批量
       退出 2 且不写载荷。见 §3.146。
-127. 让写法统一到"写没写"这件事上：`--settle-link`/`--settle-note`/`--settle-restore` 这边写载荷时不吭声，而
-      `--json-out` 的别处（如 `evolve --json-out`）会印 `wrote <path>`。要么每个写载荷的地方都印一行 `payload  <path>`，
-      要么统一不印——现在同一个标志在两条线上有两种可见性（边界 333 的同族问题）。
+127. 已实现（第 141 轮）：八个写 `--json-out` 载荷的点收进一个 `_write_payload(path, payload) -> bool`——
+      建父目录、写 `<target>.tmp` 再 `replace` 落位、印 `wrote <path>`；写不出来时印
+      `cannot write the payload to …` + `what this command recorded is already in the store: only the payload is
+      missing` 并退 2，而不是在账已经改完之后抛回溯。`--repair-links` 那处的 `__import__("json")` 一并清掉。见 §3.147。
+128. 让 `--from-queue` 的遍历也能交付一份载荷：它现在每个记录都把 `json_out` 置空（第 141 轮确认这条是唯一
+      剩下的静默点，为的是不互相覆盖），于是一整趟队列跑完，读者拿不到"这一趟测了哪几个版本、各是什么结论"。
+      要么按记录写进一个目录（`--json-out DIR`），要么在文件里追加一个 `{"walks": [...]}`。

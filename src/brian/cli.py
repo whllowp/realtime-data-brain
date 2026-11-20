@@ -183,6 +183,34 @@ def _json(payload: Any) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False, default=str)
 
 
+def _write_payload(path: str, payload: Any) -> bool:
+    """Write a JSON payload the way every command writes it, and say where it went.
+
+    Round 141: the settlement commands wrote their payload with a bare `open(...)`, printed nothing, and raised a
+    traceback when the path could not be written -- after the decisions had already been recorded. Eight call sites
+    did it eight ways. This is the one way: the parent directory is created (round 113 already did this for the round
+    record), the file is renamed into place so a half-written payload cannot be mistaken for a whole one, and the
+    page says `wrote <path>` -- the same words the non-settlement commands have always used (boundary 336).
+    """
+    target = Path(path)
+    try:
+        if not str(path).strip():
+            raise ValueError("the path is empty")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = Path(str(target) + ".tmp")
+        temp.write_text(json.dumps(payload, indent=2, sort_keys=False, ensure_ascii=False) + "\n",
+                        encoding="utf-8", newline="\n")
+        temp.replace(target)
+    except (OSError, ValueError) as error:
+        # The decisions are already recorded: the payload is the only thing missing, and saying so is the whole
+        # difference between a half-done command and a lost one (boundary 337).
+        _print("cannot write the payload to %s: %s" % (path, error))
+        _print("                what this command recorded is already in the store: only the payload is missing")
+        return False
+    _print("wrote %s" % path)
+    return True
+
+
 def _load_events(path: str) -> List[Event]:
     """Read events from a JSONL file of raw events, for `replay`/`decide`."""
     events: List[Event] = []
@@ -3248,9 +3276,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if change["changed"]:
             # Round 111: a repair that cannot say whether it moved the plan leaves the reader ranking twice.
             _print_repair_delta(record_repair(root, "set-stream-path", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None):
-            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps({"stream_path": change}, indent=2, sort_keys=False) + "\n")
+        if getattr(args, "json_out", None) and not _write_payload(args.json_out, {"stream_path": change}):
+            return 2
         return 0
 
     if getattr(args, "settle_link", None):
@@ -3293,9 +3320,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (decision["by"] if decision.get("by")
                       else "(not recorded -- pass --settle-by NAME to attribute this decision)"))
             _print_repair_delta(record_repair(root, "settle-link", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None):
-            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps({"settled": decision}, indent=2, sort_keys=False) + "\n")
+        if getattr(args, "json_out", None) and not _write_payload(args.json_out, {"settled": decision}):
+            return 2
         return 0
 
     if getattr(args, "settle_note", None):
@@ -3331,9 +3357,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 114: the amendment is a repair too, and the plan's own numbers are how it reports itself
             # (round 111) -- "nothing changed in the plan" is the honest answer here and must print.
             _print_repair_delta(record_repair(root, "settle-note", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None):
-            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps({"noted": noted}, indent=2, sort_keys=False) + "\n")
+        if getattr(args, "json_out", None) and not _write_payload(args.json_out, {"noted": noted}):
+            return 2
         return 0
 
     if getattr(args, "settle_reaffirm_file", None):
@@ -3534,11 +3559,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if done and any(item["changed"] for item in done):
             _print_repair_delta(record_repair(root, "settle-reanchor", plan_before, repair_plan(root)))
         out = getattr(args, "json_out", None)
-        if out:
-            with open(out, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump({"reanchored": done, "reanchor_refused": refused}, handle, indent=2,
-                          sort_keys=False, ensure_ascii=False)
-                handle.write("\n")
+        if out and not _write_payload(out, {"reanchored": done, "reanchor_refused": refused}):
+            return 2
         return 2 if refused else 0
 
     if getattr(args, "settle_drop", None):
@@ -3597,11 +3619,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("withdrawn      %d of %d decision(s), %d already withdrawn, %d refused"
                    % (len(done), len(wanted), skipped, refused))
         _print_repair_delta(record_repair(root, "settle-drop", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None):
-            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump({"withdrawn": done, "drop_refused": refused, "drop_skipped": skipped},
-                          handle, indent=2, sort_keys=False)
-                handle.write("\n")
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"withdrawn": done, "drop_refused": refused, "drop_skipped": skipped}):
+            return 2
         return 2 if refused else 0
 
     if getattr(args, "settle_restore_file", None):
@@ -3708,10 +3728,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (changed, len(pairs), len(done) - changed, refused))
         if done:
             _print_repair_delta(record_repair(root, "settle-restore", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None):
-            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps({"restored": done, "restore_refused": refused},
-                                        indent=2, sort_keys=False) + "\n")
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"restored": done, "restore_refused": refused}):
+            return 2
         return 2 if refused else 0
 
     if getattr(args, "settle_reaffirm", None):
@@ -3784,12 +3803,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if done:
             _print("                `--audit` stops reporting these as resting on books that have moved.")
             _print_repair_delta(record_repair(root, "settle-reaffirm", plan_before, repair_plan(root)))
-        if getattr(args, "json_out", None):
-            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(json.dumps({"reaffirmed": done, "reaffirm_refused": refused,
-                                         "reaffirm_skipped": int(getattr(args, "settle_reaffirm_skipped", 0)
-                                                                 or 0)},
-                                        indent=2, sort_keys=False) + "\n")
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"reaffirmed": done, "reaffirm_refused": refused,
+                                "reaffirm_skipped": int(getattr(args, "settle_reaffirm_skipped", 0) or 0)}):
+            return 2
         return 2 if refused else 0
 
     if getattr(args, "repair_links", False):
@@ -3821,10 +3838,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % BACKFILL_KEY)
             _print("separately and does not treat them as independent confirmation.")
         json_out = getattr(args, "json_out", None)
-        if json_out:
-            target = Path(json_out)
-            target.write_text(__import__("json").dumps({"repairs": rows}, indent=2) + "\n",
-                              encoding="utf-8")
+        if json_out and not _write_payload(json_out, {"repairs": rows}):
+            return 2
         return 0
 
     if args.propose:
