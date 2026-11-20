@@ -93,6 +93,7 @@ from .evolve import (
     restore_settlement,
     preview_settlement_change,
     preview_withdrawal_change,
+    reanchor_settlement,
     withdraw_settlement,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
@@ -2463,6 +2464,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     sentence = "  [re-taken %d time(s): the decision keeps going stale]" % retakes
                     if sentence not in mark:
                         mark += sentence
+                if entry.get("successor_history") and own_name == pair[0]:
+                    # Round 138: a re-anchored decision was never taken on its new successor, so the row has to say
+                    # the target moved -- otherwise a repaired target reads as the target the decision was made
+                    # on (boundary 203, and round 93's rule for a repaired path one field over).
+                    move = (entry.get("successor_history") or [{}])[-1]
+                    sentence = ("  [re-anchored on %s: %s -> %s]"
+                                % (str(move.get("at") or "?"), str(move.get("from") or "?"),
+                                   str(move.get("to") or "?")))
+                    if sentence not in mark:
+                        mark += sentence
                 # Round 134: a pair no re-take can pay says so on its own row, with the successor the record names
                 # now -- the `--campaign` line already names it, and a reader who lands here should not have to
                 # guess why the re-take command will refuse this decision.
@@ -3393,6 +3404,39 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         inner.settle_drop = pairs
         inner.json_out = None
         return cmd_evolve(inner, settings)
+
+    if getattr(args, "settle_reanchor", None):
+        # Round 138: round 133 stops counting a pair whose record names another successor, and round 137 makes the
+        # restore door refuse it. Both are right, and together they left the decision with no forward step: the old
+        # target stayed unpairable for ever and the only alternatives were "make a brand-new decision" (which leaves
+        # the old one behind) or "drop it" (which throws the decision away). This moves the decision to the successor
+        # the ledger says the record's measurement went to, keeping the old target in `successor_history`.
+        record = str(args.settle_reanchor or "").strip()
+        plan_before = repair_plan(root)
+        try:
+            change = reanchor_settlement(root, record, why=args.settle_why, by=args.settle_by)
+        except (OSError, ValueError) as error:
+            _print("cannot re-anchor that decision: %s" % error)
+            return 2
+        if not change["changed"]:
+            _print("re-anchored    %s already names %s, which is what the record names: nothing to change"
+                   % (change["record"], change["to"]))
+        else:
+            _print("re-anchored    %s  %s -> %s" % (change["record"], change["from"], change["to"]))
+            _print("                the decision now names what the record names, and the earlier target stays in "
+                   "successor_history")
+            _print("                because: %s" % str(args.settle_why or "").strip())
+            _print("                re-anchored by: %s"
+                   % (str(args.settle_by or "").strip() or "(not recorded -- pass --settle-by NAME)"))
+            _print("                a re-anchored decision was not taken on the new successor: the page says so, "
+                   "and only a check can measure it there (boundary 203)")
+            _print_repair_delta(record_repair(root, "settle-reanchor", plan_before, repair_plan(root)))
+        out = getattr(args, "json_out", None)
+        if out:
+            with open(out, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump({"reanchored": change}, handle, indent=2, sort_keys=False, ensure_ascii=False)
+                handle.write("\n")
+        return 0
 
     if getattr(args, "settle_drop", None):
         # Round 125: round 124 names the decisions that keep needing a re-take, and the honest answer to one of them
@@ -5646,6 +5690,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-drop-file", default=None, metavar="STREAM",
                         help="withdraw every decision on STREAM that cannot be re-taken in one command, resolved "
                              "from the same plan --campaign prints; needs --settle-why")
+    evolve.add_argument("--settle-reanchor", default=None, metavar="RECORD",
+                        help="move a decision to the successor its record now names, keeping the earlier target "
+                             "in successor_history")
     evolve.add_argument("--settle-drop", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="withdraw a recorded decision: it keeps its date and gains the reason it stopped "
                              "standing, and the contradiction it settled is charged again; needs --settle-why")

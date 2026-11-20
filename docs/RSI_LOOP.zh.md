@@ -7469,6 +7469,79 @@ what if          data/smd/stream-two.json owes 2 unanswered withdrawal(s), 1 sta
 这一轮没有改动任何测量：`--settle-restore` 的语义仍是"把撤回的决定重新立起来"，只是它现在只对账本还认的那一对生效；`--audit --strict` 在补检查之前是 0、补完之后对同一份账本仍是 0（demo 里恢复过的对子不再计费），而 `--max-withdrawn-per-file 0` 在同一份账本上退出 1，点名那一个文件——两种闸门各自回答自己的问题。
 
 
+### 3.144 目标搬家了，裁定没有：重新锚定，以及"两扇门都拒绝"之后的那一步
+
+第 133 轮让清单不再把"记录已经不指的那一对"算成待付（因为 `reaffirm_link` 会拒绝）；第 137 轮让 `--settle-restore`
+用同一条约束拒绝。两处拒绝都是对的，合起来却把这条裁定逼进了死角：
+
+- 清单说"这一对不可付"，于是没有队列会把它报价；
+- 恢复门说"记录已经不指它了"，于是 `--settle-restore` 拒；
+- 只剩两条路：**记一条新裁定**（旧的那条永远留在"不可付"里），或者 **`--settle-drop`**（把这条裁定扔掉）。
+
+两条都不回答拒绝本身提出的问题：**记录搬家了，裁定没有。**
+
+第 138 轮补的是第三步：
+
+```
+$ brian evolve --settle-reanchor round-other.json \
+      --settle-why "the record was retargeted to round-elsewhere.json" --settle-by carol
+re-anchored    round-other.json  round-new.json -> round-elsewhere.json
+                the decision now names what the record names, and the earlier target stays in successor_history
+                because: the record was retargeted to round-elsewhere.json, and the decision still names round-new.json
+                re-anchored by: carol
+                a re-anchored decision was not taken on the new successor: the page says so, and only a check can
+                measure it there (boundary 203)
+repair plan      nothing left the table: cost 0 -> 0, 0 file(s) still owing
+```
+
+要点有三条：
+
+1. **只写 store，不写账本。** 改瞄的是 `settlements.json` 里那一条裁定的 `successor`，记录文件、`ledger.jsonl`
+   一个字节都不动——裁定是"人读过账本之后的判断"，让它去改账本就是让判断改证据（边界 329）。真要修记录的字段，
+   那是 `--set-stream-path` 那一类命令的活（第 93–96 轮），两者的留下痕迹的方式不同。
+2. **旧目标留在 `successor_history`。** `at` 不动，改动另起一条 `{"from","to","at","why","by"}`。页面上因此能说
+   "这条裁定是在 `round-new.json` 上做的，后来改锚到 `round-elsewhere.json`"——这正是第 203 轮给"修过的路径"
+   定的规矩，挪到"修过的目标"上一个字段。`--history` 在那一行标
+   `[re-anchored on 2026-11-20T06:23:23+00:00: round-new.json -> round-elsewhere.json]`，紧挨着同一行的
+   `[retired, re-measured as round-elsewhere.json]`，两件事并排读得出来。
+3. **改锚不等于付掉。** 改完之后这一对**不在清单里了**，因为它不再是"账本动过、裁定没动"的状态——记录自己的退休标记
+   就是裁定的前提，不是与它竞争的第三份主张。只有当**又一份**晚于改锚时刻的主张出现，它才重新变成"待重开"，
+   而那时它是**可付**的：
+
+```
+$ brian evolve --settle-reaffirm-file data/smd/stream-one.json --settle-why "a later claim arrived" --settle-by alice
+reaffirmed     round-other.json -> round-elsewhere.json
+```
+
+实测（`var/demo138`，从 `var/demo137` 复制）：改锚前清单写
+`2 stale decision(s) on data/smd/stream-two.json cannot be re-taken at all: round-other.json -> round-new.json
+(the record now names round-elsewhere.json) -- brian evolve --settle-drop round-other.json=round-new.json`；
+改锚后这一行变成 `1 stale …`（只剩另一条），并多出
+
+```
+links             1 decision(s) were re-anchored to the successor the record now names: round-other.json round-new.json -> round-elsewhere.json
+links             a re-anchored decision was not taken on its new successor: only a check measures it there, and `--history` marks the rows
+```
+
+`--campaign --json-out` 里那条裁定的 `successor_history` 是
+`[{"from": "round-new.json", "to": "round-elsewhere.json", "at": "…", "why": "…", "by": "carol"}]`，
+`settlement_summary["reanchored"] == 1`；`--audit --strict` 仍旧 0（改锚不产生新的收费理由）。
+
+这一轮的实现缺陷记两条：其一，CLI 分支里写了 `import json as _json`，让它成了 `cmd_evolve` 的局部名，
+函数里其它分支一读就是 `UnboundLocalError: cannot access local variable '_json'`——模块级的 `json` 已经在，别在分支里再导一次；
+其二，campaign 那半截脚本在 CLI 那半截的断言处先中断，于是**页面一句话都没写**，测试红了两条才看出来。
+一条"三种页面都要说"的改动，必须逐个页面确认输出，而不是相信脚本跑完了。
+
+**边界 327：一条裁定的目标搬了家，不等于这条裁定要重做。** 它可以是"同一条裁定，换一个目标，留下痕迹"，而页面必须同时
+印出两个目标——否则一次改锚读起来就像那条裁定一直是在新目标上做的（边界 203 的同一个错误，换个字段）。
+
+**边界 328：拒绝必须留下下一步。** 清单拒付、恢复门拒签，两条都对；但如果没有任何一步能消化这对矛盾，读者实际只有
+"重开一条"和"扔掉"两个选择，而那正是让一条裁定变成永久噪声的办法。两扇门都关上时，第三扇门是这个层级的义务。
+
+**边界 329：裁定可以改自己的目标，不能改它的证据。** 改锚写 store，账本与记录一个字节不动；如果某天需要改记录本身的
+字段，那是另一类命令（第 93 轮），"判断"与"证据"必须各走各的门，否则一条裁定就能改写它自己被检验的那份材料。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8004,7 +8077,11 @@ missing for the next level
      先付能付的、再报剩下的，只剩付不掉时退出 2；`--campaign`、按文件队列行、`--what-if-records` 都按
      可付/总数两个数说话。见 §3.143。
 
-124. 让 `--settle-link` 也能处理"记录已经改了指向"的一对：现在它只接受账本里存在的后继，读者若确认
-     新指向是对的，应当有一条"把记录与实际同步"的命令（例如 `--settle-link RECORD=SUCCESSOR --repoint`），
-     在 `stream_path_history` 之外留下 `successor_history`；同时让 `--campaign` 把"记录被改过指向"的
-     决定单列一类，避免它们永远停在"付不掉"。
+124. 已实现（第 138 轮）：`--settle-reanchor RECORD --settle-why TEXT --settle-by NAME` 把一条裁定的目标改到记录如今
+     指的那一支（`successor_history` 记下 `from/to/at/why/by`，`at` 不动，store 之外一个字节都不改），
+     `--campaign` 单列"被重新锚定的裁定"，`--history` 在那一行标 `[re-anchored on …: old -> new]`，
+     `settlement_summary["reanchored"]` 计数。原文请的 `--settle-link --repoint` 没有做：那条命令写的是"新裁定"，
+     把"旧裁定改锚"塞进同一个入口会让两种语义共用一个开关（第 226 轮边界的形状）。
+125. 让 `--settle-reanchor` 也接受多条记录（`--settle-reanchor-file STREAM`，与其余三个文件命令同形），
+     并让 `--campaign --what-if-records` 把"重新锚定之后有多少条会变成可付"作为第四族算进去——改锚会改变
+     "可付"的构成却一条都不付，正是第 135 轮那条"what if 必须回答全集"的下一格。

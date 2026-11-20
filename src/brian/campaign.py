@@ -1308,6 +1308,19 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
     # Round 126: the answer to a withdrawal. Printed next to it, because the reader who saw the pair come back
     # among the charges needs to see the command that takes it out again -- and needs to know that doing so is a
     # decision, not a repair (boundary 294).
+    _reanchored = [item for item in result.settlements if item.get("successor_history")]
+    if _reanchored:
+        # Round 138: a decision moved to the successor its record now names is neither a fresh decision nor the one
+        # it was -- its first target is in successor_history, and folding it into "settled" reports a decision taken
+        # on evidence it was never taken on (boundary 203, one field over from round 94's repaired path).
+        lines.append("links             %d decision(s) were re-anchored to the successor the record now names: %s"
+                     % (len(_reanchored),
+                        "; ".join("%s %s -> %s" % (str(item.get("record") or ""),
+                                                  str((item.get("successor_history") or [{}])[0].get("from") or ""),
+                                                  str(item.get("successor") or ""))
+                                  for item in _reanchored)))
+        lines.append("links             a re-anchored decision was not taken on its new successor: only a check "
+                     "measures it there, and `--history` marks the rows")
     if result.settlements_restored:
         lines.append("links             %d decision(s) were taken up again by a new decision: %s"
                      % (len(result.settlements_restored),

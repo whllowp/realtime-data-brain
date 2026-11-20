@@ -54,7 +54,7 @@ def test_an_empty_store_summarises_to_zeros(tmp_path):
     # Round 125: `stored` counts every decision the file holds and `withdrawn` the ones a person took back, so a
     # page can say "3 recorded, 1 withdrawn" without recomputing it from the list (boundary 291).
     assert summary == {"pairs": 0, "explained": 0, "explained_later": 0, "unexplained": 0, "reaffirmed": 0,
-                       "repeated": 0, "deciders": {}, "explainers": {}, "unattributed": 0,
+                       "repeated": 0, "reanchored": 0, "deciders": {}, "explainers": {}, "unattributed": 0,
                        "stored": 0, "withdrawn": 0, "redecided": 0}
 
 

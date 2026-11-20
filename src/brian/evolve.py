@@ -2686,6 +2686,10 @@ def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, An
     Round 126: `redecided` counts the decisions that were taken back and later taken up again, over the whole
     store rather than the standing ones, because "this decision was once withdrawn" is a fact about the pair's
     history -- and a pair decided twice is different work from one decided once (boundary 295).
+
+    Round 138: `reanchored` counts the decisions that were moved to the successor their record now names. A
+    re-anchored decision is not a fresh one: its first target is in `successor_history`, and a page that folded the
+    two together would report a decision taken on evidence it was never taken on (boundary 203).
     """
     stored = list(settlements or [])
     pairs = active_settlements(stored)
@@ -2708,6 +2712,7 @@ def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, An
     return {"reaffirmed": sum(1 for item in pairs if item.get("reaffirmations")), "repeated": repeated,
             "pairs": len(pairs), "stored": len(stored), "withdrawn": len(stored) - len(pairs),
             "redecided": sum(1 for item in stored if item.get("redecisions")),
+            "reanchored": sum(1 for item in stored if item.get("successor_history")),
             "explained": explained, "explained_later": later,
             "unexplained": unexplained,
             "deciders": dict(sorted(deciders.items())), "explainers": dict(sorted(explainers.items())),
@@ -3386,6 +3391,60 @@ def restore_settlement(root: Path, record: str, successor: str, why: str = "", b
     path.write_text(json.dumps(store, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
     return {"record": name, "successor": target, "at": moment.isoformat(), "redecisions": len(back),
             "changed": True}
+
+
+def reanchor_settlement(root: Path, record: str, why: str = "", by: str = "",
+                        now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Point a decision at the successor its *record* now names (round 138).
+
+    Round 137 made the restore door refuse a pair whose record names another successor, and round 133 stopped
+    counting such a pair as payable -- two honest refusals that left the decision with no way forward: the only
+    doors were "record a brand-new decision on the new pair" (which leaves the old one unpairable for ever) and
+    "drop it" (which throws the decision away). Neither answers the question the refusals raise: *the record moved,
+    the decision did not*.
+
+    So the decision moves to where the ledger says the record's measurement went, and the old target stays in
+    `successor_history` -- the same shape round 93 gave a repaired stream path, and for the same reason: a repaired
+    target is not the original one, and a reader who cannot see the difference reads a re-anchored decision as one
+    that was taken on that successor all along (boundary 203's rule, one field over). Nothing about the record is
+    touched: this edits the settlement store only, so the ledger keeps saying what it said.
+    """
+    name = str(record or "").strip()
+    if not name:
+        raise ValueError("a re-anchored decision needs the record whose decision moved: "
+                         "--settle-reanchor RECORD")
+    reason = str(why or "").strip()
+    if not reason:
+        raise ValueError("a re-anchored decision needs a reason: --settle-why TEXT. Moving a decision to another "
+                         "successor says the earlier target was wrong, and the reader has to know why")
+    store = {"format": SETTLEMENT_FORMAT, "settlements": load_settlements(root)}
+    entries = [item for item in store["settlements"] if str(item.get("record") or "") == name]
+    if not entries:
+        raise ValueError("no settlement recorded for %s: `--settle-link` records a decision before anything can "
+                         "be re-anchored" % name)
+    rounds = history(root, include_retired=True)
+    payload = {str(item.get("round") or ""): item for item in rounds}.get(name)
+    named = _named_successor(payload)
+    if not named:
+        raise ValueError("the record %s names no successor, so there is no target to re-anchor the decision to"
+                         % name)
+    entry = entries[0]
+    before = str(entry.get("successor") or "")
+    author = str(by or "").strip()
+    if before == named:
+        return {"record": name, "from": before, "to": named, "at": "", "changed": False,
+                "history": len([item for item in entry.get("successor_history") or []
+                                if isinstance(item, Mapping)])}
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    trail = [item for item in entry.get("successor_history") or [] if isinstance(item, Mapping)]
+    trail.append({"from": before, "to": named, "at": moment.isoformat(), "why": reason, "by": author})
+    entry["successor_history"] = trail
+    entry["successor"] = named
+    path = root / EVOLVE_DIR / SETTLEMENTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(store, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
+    return {"record": name, "from": before, "to": named, "at": moment.isoformat(), "changed": True,
+            "history": len(trail)}
 
 
 def settle_link(root: Path, record: str, successor: str, why: str = "", by: str = "",
