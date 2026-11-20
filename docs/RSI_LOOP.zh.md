@@ -6286,6 +6286,64 @@ notes after the refusal: 5
 放在段上等于要求读者做一次手工连接（边界 167 说事实属于它描述的对象，这一条说：对象是行，就不要放在组上）。
 
 
+### 3.123 一条没人能解释的决定，是一项可以收费的债
+
+第 116 轮把四个状态算清了：带着理由来的、后来补上说明的、两者都没有的、以及四种里各自"有名字/没名字"。但 `unexplained` 只是页面上的一个数字：`--strict` 永远为它返回 0，于是"有 3 条决定没人能复核"这句话说完就完了。第 154 条边界（能付的欠账才进闸门）说的是"要有命令能还"，而这里恰好有一条：`--settle-note`。既然能还，就该收。
+
+**收的是"过期的"，不是"存在的"。** 默认不收费：`--max-unexplained-days N` 关着时闸门不为它退 1。原因和第 255 条边界同源——`settlements.json` 里躺着 `--settle-why` 强制之前写的记录，一个默认让整本账永远红灯，红灯久了就没人看。页面无论有没有 cap 都把年龄印出来，cap 只决定"什么时候变成退出码"。
+
+```
+$ brian evolve --history
+decisions       1 settled decision(s) have no explanation: no reason was recorded with them, and no note was added since
+  round-old.json             -> round-new.json              (decided 2026-11-10T02:20:46.784974+00:00, 10.0 day(s) ago)
+                `brian evolve --settle-note RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` explains one
+
+$ brian evolve --audit --strict --max-unexplained-days 3     # exit 1
+1 decision(s) have had no explanation for longer than the 3 day(s) asked for:
+  a decision with no reason and no note is debt nobody can review, and `--settle-note RECORD=SUCCESSOR`
+  with `--settle-why TEXT --settle-by NAME` is the command that pays it: --strict exits 1 (boundary 266).
+
+$ brian evolve --audit --strict                               # exit 0：没有 cap 就没有收费
+$ brian evolve --audit --max-unexplained-days 3               # exit 2：flag 不带 --strict 会被静默忽略
+--max-unexplained-days caps a --strict charge; without --strict nothing reads it
+```
+
+**还掉的样子。** 缴费不是"编辑 JSON"，而是一条被记录的说明：
+
+```
+$ brian evolve --settle-note round-old.json=round-new.json \
+      --settle-why "two books named the same successor; the retirement was right and the record keeps saying so" \
+      --settle-by alice
+noted           round-old.json -> round-new.json
+                the decision keeps its date (2026-11-10T02:20:46.784974+00:00) and its successor; the explanation is appended
+                because: two books named the same successor; the retirement was right and the record keeps saying so
+                explained by: alice
+                `--audit` prints this apart from a reason the decision came with.
+repair plan      nothing left the table: cost 0 -> 0, 0 file(s) still owing
+
+$ brian evolve --audit --strict --max-unexplained-days 3     # exit 0，`decisions` 那一行消失
+```
+
+注意 `repair plan nothing left the table`：补一条说明**不会**让书账少一件——它付的是"没人能复核"这笔债，不是"两本书互相矛盾"那笔（第 111 轮的发现）。两条债各有各的命令。
+
+**每个域只欠自己那几条。** `--campaign` 的每一行现在带 `settlements`：
+
+```
+$ brian evolve --campaign --json-out c117.json
+[('SMD', {'unexplained': 1})]
+{'pairs': 1, 'explained': 0, 'explained_later': 0, 'unexplained': 1, 'deciders': {'': 1}, 'explainers': {}, 'unattributed': 1}
+```
+
+整本账的 `settlement_summary` 和每一行的 `settlements` 是同一份计算的两个投影（`_round_source` 用裁定所指轮的 `stream.source` 定归属，退役的轮也算——裁定可以针对一个后来被取代的轮）。页面每个数字都按域分，新数字不按域分，就是第 69 轮那个缺陷换个字段。
+
+**三条边界**
+
+**边界 266：循环永远填不上的债，必须由闸门收、由一条命令还。** "没人解释的决定"不是"待处理"，因为没有任何测量会补上它，只有人会。既然有一条命令能还（`--settle-note`），一个永远返回 0 的闸门就等于把这笔债留给仔细的读者。
+
+**边界 267：规则不能追溯收费。** cap 默认关、页面始终印年龄、旧记录只报告不收费（255/258 的同一条规则，用在一笔钱上）。一个让历史永远违约的默认值，最终会让整个检查被绕过。
+
+**边界 268：按域印的页面，新数字也要按域印。** 一本账级的"1 条决定没人解释"，在每行都写着域名的页面上等于没说清楚是谁欠的；而"谁欠"正是决定"该去修哪本书"的那一半信息。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6751,3 +6809,5 @@ missing for the next level
       `--strict` 永远为它返回 0；加 `--max-unexplained-days N`（默认不启用），一条没有理由、没有 note、且已经存在
       超过 N 天的裁定进闸门，并在 `--history` 里点名是哪几条；同时让 `--campaign --json-out` 的每行带上它对应的
       裁定状态，脚本才能算出"这个 stream 上有几条决定没人能解释"。
+     （第 117 轮完成：`unexplained_decisions(settlements, now)`；`--max-unexplained-days DAYS`（默认关，只对 `--strict` 生效，不带 `--strict` 直接退 2）；`--audit`／`--campaign` 两个闸门调用点都传 `unexplained_stale`／`unexplained_days`；`--history` 印 `decisions` 一段并给过期行加 `[past the cap: --strict exits 1]`；`CampaignRow.settlement_state` 进 `--campaign --json-out` 的每一行；`tests/test_unexplained_gate.py` 11 个测试；边界 266/267/268。）
+104. 让 `--settle-note` 也接受「后来没人能复核」的反向状态：如果一条决定曾被补过说明，却在补写之后又出现了互相矛盾的证据，页面要说「这条决定被重新质疑了」，并让 `--campaign` 把「有说明但证据变了」单列一列，而不是继续算作已解释。

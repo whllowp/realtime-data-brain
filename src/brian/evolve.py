@@ -2695,6 +2695,31 @@ def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, An
             "deciders": dict(sorted(deciders.items())), "explainers": dict(sorted(explainers.items())),
             "unattributed": sum(1 for item in pairs if not str(item.get("by") or "").strip())}
 
+def unexplained_decisions(settlements: Sequence[Mapping[str, Any]],
+                          now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """The decisions nobody has explained, oldest first, with how long they have stood (round 117).
+
+    A decision with no `why` and no `notes` is not "pending": nothing in the loop will ever fill it in, and the
+    only command that can is `--settle-note`. That makes it debt, and debt a page counts but no gate charges is
+    debt that only a careful reader ever pays (boundary 154's rule, applied to a decision instead of a round).
+    """
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    rows: List[Dict[str, Any]] = []
+    for item in settlements or []:
+        if str(item.get("why") or "").strip() or item.get("notes"):
+            continue
+        taken = item.get("at")
+        age: Optional[float] = None
+        if isinstance(taken, str) and taken:
+            try:
+                age = max(0.0, (moment - datetime.fromisoformat(taken)).total_seconds() / 86400.0)
+            except ValueError:
+                age = None
+        rows.append({"record": str(item.get("record") or ""), "successor": str(item.get("successor") or ""),
+                     "at": str(taken or ""), "age_days": age})
+    rows.sort(key=lambda row: (row["at"] or "", row["record"]))
+    return rows
+
 
 def load_settlements(root: Path) -> List[Dict[str, Any]]:
     """The link decisions somebody wrote down, newest last (round 112).

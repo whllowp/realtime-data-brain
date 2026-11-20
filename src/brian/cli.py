@@ -77,6 +77,7 @@ from .evolve import (
     backfilled_links,
     format_repairs,
     load_settlements,
+    unexplained_decisions,
     settlement_summary,
     repair_legacy,
     settle_link,
@@ -357,7 +358,9 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  ceiling_missing: int = 0, ceiling_rounds: int = 0, ceiling_payable: int = 0,
                  max_ceiling_debt: Optional[float] = None,
                  broken_links: int = 0, in_force: int = 0,
-                 in_force_stale: int = 0, in_force_untested: int = 0) -> int:
+                 in_force_stale: int = 0, in_force_untested: int = 0,
+                 unexplained_stale: int = 0,
+                 unexplained_days: Optional[float] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -422,6 +425,17 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                    % in_force_untested)
             _print("same stream will compare nothing again. Use the file that version recorded, or retire the")
             _print("version whose claim cannot be checked (boundary 188).")
+    if unexplained_stale:
+        # Round 117: a decision with no reason and no note is answered by one command, and nothing else in the
+        # loop will ever fill it in -- so an old one is debt, charged only when the caller sets the age cap
+        # (a default would be red on every ledger whose settlements predate --settle-why).
+        _print("")
+        _print("%d decision(s) have had no explanation for longer than the %.0f day(s) asked for:"
+               % (unexplained_stale, float(unexplained_days or 0.0)))
+        _print("  a decision with no reason and no note is debt nobody can review, and `--settle-note "
+               "RECORD=SUCCESSOR`")
+        _print("  with `--settle-why TEXT --settle-by NAME` is the command that pays it: --strict exits 1 "
+               "(boundary 266).")
     if broken_links:
         return 2
     if unreconstructable:
@@ -586,7 +600,7 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     ceiling_capped = (max_ceiling_debt is not None and ceiling_missing
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
-                 or ceiling_capped or in_force_stale) else 0
+                 or ceiling_capped or in_force_stale or unexplained_stale) else 0
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -1595,6 +1609,17 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # before any branch, so the campaign page, the audit page and the gate cannot disagree about them.
     # Round 87: the clearings are cited, so the store has to see the verdicts -- a "cleared" row that cites a
     # measurement is a resolution, and one that cites nothing is an absence of observation.
+    # Round 117: one reading of the settlements, used by the history page and by the gate.
+    try:
+        unexplained_rows = unexplained_decisions(load_settlements(root))
+    except OSError:
+        unexplained_rows = []
+    # Round 117: a decision nobody explained becomes debt only past the age the caller asked for, because a
+    # ledger whose settlements predate --settle-why would otherwise be red on every run (boundary 154's rule).
+    _unexplained_cap = getattr(args, "max_unexplained_days", None)
+    unexplained_stale = ([row for row in unexplained_rows
+                          if float(row.get("age_days") or 0.0) >= float(_unexplained_cap)]
+                         if _unexplained_cap is not None else [])
     try:
         deployed = load_promotions(root)
     except OSError:
@@ -1643,6 +1668,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # Round 72: `--max-ceiling-debt` is read by the gate, not by the page, so without --strict it would be
         # inert and the reader would believe a check ran (round 40's lesson, in a third place).
         _print("--max-ceiling-debt caps a --strict charge; without --strict nothing reads it")
+        return 2
+
+    if getattr(args, "max_unexplained_days", None) is not None and not getattr(args, "strict", False):
+        # Round 117: same shape as --max-ceiling-debt. The page prints the ages either way; only the gate fails.
+        _print("--max-unexplained-days caps a --strict charge; without --strict nothing reads it")
         return 2
 
     if getattr(args, "from_queue", None) is not None and not getattr(args, "verify", False):
@@ -1740,6 +1770,20 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 0
 
     if args.history:
+        if unexplained_rows:
+            # Round 117: the count is on the page whether or not a cap exists, because "3 decisions nobody can
+            # review" is the fact a reader of the ledger needs, and the cap only decides when it becomes an exit.
+            _print("decisions       %d settled decision(s) have no explanation: no reason was recorded with "
+                   "them, and no note was added since" % len(unexplained_rows))
+            for row in unexplained_rows:
+                past = (_unexplained_cap is not None
+                        and float(row.get("age_days") or 0.0) >= float(_unexplained_cap))
+                _print("  %-26s -> %-26s  (decided %s, %.1f day(s) ago)%s"
+                       % (row["record"] or "(unrecorded)", row["successor"] or "(unrecorded)",
+                          row["at"] or "(no date)", float(row.get("age_days") or 0.0),
+                          "  [past the cap: --strict exits 1]" if past else ""))
+            _print("                `brian evolve --settle-note RECORD=SUCCESSOR --settle-why TEXT "
+                   "--settle-by NAME` explains one")
         rounds = history(root, include_retired=True)
         if not rounds:
             _print("no rounds recorded yet in %s" % directory)
@@ -2494,7 +2538,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             max_ceiling_debt=getattr(args, "max_ceiling_debt", None),
                             broken_links=result.broken_links, in_force=in_force_broken,
                             in_force_stale=len(in_force_stale_rows),
-                            in_force_untested=sum(1 for row in in_force_stale_rows if row.get("untested")))
+                            in_force_untested=sum(1 for row in in_force_stale_rows if row.get("untested")),
+                            unexplained_stale=len(unexplained_stale),
+                            unexplained_days=_unexplained_cap)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -2633,7 +2679,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             broken_links=result.broken_links, in_force=in_force_broken,
                             in_force_stale=len(in_force_stale_rows),
                             in_force_untested=sum(1 for row in in_force_stale_rows
-                                                  if row.get("untested")))
+                                                  if row.get("untested")),
+                            unexplained_stale=len(unexplained_stale),
+                            unexplained_days=_unexplained_cap)
 
     if args.grade:
         try:
@@ -4709,6 +4757,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --audit --strict: fail when more than this many recorded rounds were "
                              "judged under wait ceilings that differ from today's (a ceiling is not in the "
                              "rulebook, so a rules audit cannot otherwise see it move)")
+    evolve.add_argument("--max-unexplained-days", type=float, default=None, metavar="DAYS",
+                        help="with --strict: fail when a decision has had no reason and no note for longer "
+                             "than DAYS (default off)")
     evolve.add_argument("--max-ceiling-debt", type=float, default=None, metavar="SHARE",
                         help="with --strict: fail when more than this fraction of the live rounds do not "
                              "record the ceilings they were judged under -- charged only when the re-run queue "

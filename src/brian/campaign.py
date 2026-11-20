@@ -51,6 +51,9 @@ class CampaignRow:
     overdue: bool = False
     # This domain's share of the audit (round 34). The header line is the whole ledger's number; a row
     # that shows rounds and trials but no audit says "this stream is clean" without having looked.
+    # Round 117: this stream's share of the decisions (the row is what a reader of one stream opens, and a
+    # ledger-wide "1 decision has no explanation" does not say whose it is).
+    settlement_state: Dict[str, int] = field(default_factory=dict)
     audit_moved: int = 0
     audit_relabelled: int = 0
     audit_unreconstructable: int = 0
@@ -123,6 +126,7 @@ class CampaignRow:
             "withheld_no_longer_holding": self.withheld_stale,
             "withheld_due_for_check": self.withheld_due,
             "withheld_oldest_evidence_days": self.withheld_oldest_days,
+            "settlements": dict(sorted(self.settlement_state.items())),
             "stream_files": dict(sorted(self.files.items())),
             "ceilings_differ": self.drift,
             "ceilings_unrecorded": self.drift_unrecorded,
@@ -558,6 +562,21 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.repair_history = repair_history(root)
     result.settlements = load_settlements(root)
     result.settlement_summary = settlement_summary(result.settlements)
+    # Round 117: attribute each decision to the stream of the round it settled, so the row a reader opens can
+    # say "one decision here has no explanation". `load_settlements` names round files; the source lives on the
+    # round record, retired ones included, because a decision can settle a round that has since been superseded.
+    _round_source = {str(record.get("round") or ""): _source(record) for record in everything}
+    for _decision in result.settlements:
+        _owner = _round_source.get(str(_decision.get("record") or ""))
+        if _owner is None:
+            continue
+        _row = rows.get(_owner)
+        if _row is None:
+            continue
+        if not str(_decision.get("why") or "").strip() and not _decision.get("notes"):
+            _row.settlement_state["unexplained"] = _row.settlement_state.get("unexplained", 0) + 1
+        else:
+            _row.settlement_state["explained"] = _row.settlement_state.get("explained", 0) + 1
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
