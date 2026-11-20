@@ -21,7 +21,7 @@ from .evolve import (BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, hist
                      withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
                       current_state, domain_slug,
-                      load_promotions, never_tested_at_origin, shape_note, walks_phrase)
+                      load_promotions, never_tested_at_origin, repair_plan, shape_note, walks_phrase)
 
 __all__ = ["Campaign", "CampaignRow", "budget_text", "campaign", "format_campaign", "span_text"]
 
@@ -175,6 +175,7 @@ class Campaign:
     queue_run: Optional[Dict[str, Any]] = None
     queue_history: Dict[str, Any] = field(default_factory=dict)
     blocked_dossier: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    repair_plan: List[Dict[str, Any]] = field(default_factory=list)
     stale_refusals: List[Dict[str, Any]] = field(default_factory=list)
     # Round 107: per promise, how many of the recorded walks refused it, when the first and the last were, and whether
     # the refusal still stands. `blocked_versions` answers the last question only, so a promise refused twice and then
@@ -280,6 +281,7 @@ class Campaign:
             "queue_run": dict(self.queue_run) if isinstance(self.queue_run, Mapping) else None,
             "queue_history": dict(self.queue_history),
             "blocked_dossier": {str(key): dict(value) for key, value in self.blocked_dossier.items()},
+            "repair_plan": [dict(item) for item in self.repair_plan],
             "stale_refusals": [dict(item) for item in self.stale_refusals],
             "refusal_history": {str(key): dict(value) for key, value in self.refusal_history.items()},
             "in_force_untested": self.in_force_untested,
@@ -539,6 +541,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
                               if isinstance(refusal_history, Mapping) else {})
     result.blocked_dossier = ({str(key): dict(value) for key, value in blocked_dossier.items()}
                            if isinstance(blocked_dossier, Mapping) else {})
+    # Round 110: which origin file to open first, computed from the same books the dossier counts.
+    result.repair_plan = repair_plan(root)
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
@@ -1130,6 +1134,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                 # once for the file it belongs to (round 105's split between the row and the page).
                 line += " -- %s" % reasons[0]
             lines.append(line)
+        # Round 110: the reader who has just learned which file is behind the refusals asks which one to open first.
+        plan = result.repair_plan
+        if isinstance(plan, list) and plan:
+            first = plan[0]
+            lines.append("links             repair next: %s -- %d walk(s) of refusals, %d promise(s) held behind it "
+                         "(%s)" % (str(first.get("origin") or "(unnamed)"), int(first.get("walks_blocked") or 0),
+                                   int(first.get("held") or 0), str(first.get("remedy") or "")))
+            for row in plan[1:]:
+                lines.append("links             then: %s -- %d walk(s), %d promise(s) held"
+                             % (str(row.get("origin") or "(unnamed)"), int(row.get("walks_blocked") or 0),
+                                int(row.get("held") or 0)))
 
     run = result.queue_run
     if isinstance(run, Mapping) and run.get("at"):

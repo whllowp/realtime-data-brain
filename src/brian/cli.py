@@ -116,6 +116,7 @@ from .promote import (
     revert_promotion,
     set_state_budget,
     repaired_paths,
+    repair_plan,
     evidence_split,
     prior_evidence,
     same_stream_path,
@@ -285,6 +286,20 @@ def _evolve_streams(args: argparse.Namespace, settings: Settings
     streams = [Stream(name=args.service, windows=list(windows),
                       meta={"service": args.service, "seed": args.seed})]
     return settings, streams, "demo", {}
+
+
+def _print_repair_plan(plan: List[Dict[str, Any]]) -> None:
+    """Say which origin file to open first, and the two numbers that decided it (round 110)."""
+    if not plan:
+        return
+    first = plan[0]
+    _print("repair order     %s costs %d walk(s) of refusals and holds %d promise(s) behind it -- start there (%s)"
+           % (str(first.get("origin") or "(unnamed)"), int(first.get("walks_blocked") or 0),
+              int(first.get("held") or 0), str(first.get("remedy") or "")))
+    for row in plan[1:]:
+        _print("                 then %s (%d walk(s), %d promise(s) held)"
+               % (str(row.get("origin") or "(unnamed)"), int(row.get("walks_blocked") or 0),
+                  int(row.get("held") or 0)))
 
 
 def _refusal_phrase(history: Mapping[Any, Mapping[str, Any]], version: int,
@@ -2817,6 +2832,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 else:
                     _print("no promise in the queue can be measured here: %d record(s) hold no verdict on the file "
                            "they were born with, and none of those files is in this checkout." % len(queued))
+                _print_repair_plan(repair_plan(root))
                 # A walk that measured nothing is still a walk: it is the observation behind "nobody has measured
                 # this", and leaving it out would let a queue that is stuck read as a queue nobody visits.
                 try:
@@ -2848,6 +2864,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 if skipped:
                     _print("                 %d left out: the file they were born with is not in this checkout"
                            % skipped)
+                _print_repair_plan(repair_plan(root))
                 _print("")
                 _print("nothing was measured. Run the same command with --from-queue N to measure the first N of "
                        "them on the files they were born with.")

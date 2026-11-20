@@ -5913,6 +5913,41 @@ still blocked    1 promise(s) ended on a build defect last time and nothing has 
 **边界 245：清单页要能独立回答"值不值得修"；把一个判断拆到两个页面上，读者就得先知道要去看第二个页面。**
 
 
+### 3.116 代价要写成两件事的乘积，顺序要写成一句话
+
+第 109 轮把三处的趟号对齐了，档案行就此能说清楚"这个文件被拒了几趟"。但读者紧接着要问的是另一件事：**先修哪
+一个**。档案按文件名排，那是字母顺序，不是优先级。
+
+第 110 轮把它算成一个可执行的判断。两个数字都来自已经记下的账：
+
+- `walks_blocked`：这支队列为它花掉了几趟（`refused_walks` 的长度）；
+- `held`：名下还有几条承诺从未在原件上量过（它们正排在这条拒绝后面）。
+
+代价是两者相乘（`held` 为 0 时按 1 算，因为花掉的趟数是沉没成本，不是零）：
+
+```
+repair order     data/smd/stream-real.json costs 2 walk(s) of refusals and holds 1 promise(s) behind it
+                 -- start there (brian evolve --audit)
+```
+
+排序依次按代价、趟数、文件名。最后一个键不是洁癖：一个每隔两次运行就换一次顺序的页面，教读者不要相信它。
+
+`--campaign` 的对应行是 `repair next: …`，脚本读的是 JSON：
+
+```json
+{"origin": "data/smd/stream-real.json", "records": [20], "walks_blocked": 2, "walks": 4,
+ "last_walk": 2, "held": 1, "cost": 2, "remedy": "brian evolve --audit"}
+```
+
+**一个实现上的坑**：`repair_plan()` 的排序测试不能靠端到端搭两个被挡的文件——那要两套互不矛盾的错账。改成把
+`blocked_dossier` 与 `origin_queue` 换成桩，断言排序规则本身（代价相同、趟数相同 → 按名字），端到端只测一行的
+字段与两页的句子。测规则的地方测规则，测集成的地方测集成。
+
+**边界 246：代价必须是它相乘的那两件事的乘积，并被写出来；"被拒 2 次"不能给两个文件排序。**
+
+**边界 247：说出故障的页面必须说出第一个动作，而且要排序；一份没有顺序的清单，是让读者自己重算一遍。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6348,6 +6383,11 @@ missing for the next level
     把 `[1, 3]` 写成"walks 1 and 3"；`--campaign` 的档案行改成
     `(walk 2 of 3; its promises were refused in walks 1 and 2, 2 time(s))`，`--from-queue 0` 的两处提示（`still
     blocked` 与清单行）都带上"几次、哪几趟、是否还成立"。1597 → 1606 tests。
-96. 让"要不要花一轮修账本"变成一个可执行的判断：`--campaign` 为每个被挡的原始文件算一份代价（挡了几趟、
-    名下几条承诺因此排队、最近一趟是哪趟），并在 `--verify --from-queue 0` 的末尾给出"先修哪一个文件"的排序，
-    同时把这份排序写进 `--campaign --json-out`，让脚本不必解析句子。
+96. 已完成：把"要不要花一轮修账本"变成可执行的判断（第 110 轮）。`repair_plan()` 为每个被挡的原始文件算一份
+    代价——`walks_blocked`（花了多少趟被拒）× `max(1, held)`（名下还排着几条没在原件上量过的承诺），并给出
+    `remedy`；排序按代价、再按趟数、最后按文件名（两次运行不能给出两个顺序）。`--verify --from-queue 0` 末尾打
+    `repair order`，"没有可量的承诺"分支也打；`--campaign` 打 `repair next:`，`--campaign --json-out` 的
+    `repair_plan` 让脚本不必解析句子。1606 → 1617 tests。
+97. 让修复本身也留下账：`--repair-links` 与 `--set-stream-path` 之后重算 `repair_plan` 并对比"修之前/修之后"
+    （哪个文件退出了这张表、代价降了多少），把这份对比写进 `--campaign` 页与 JSON，让"花一轮修账本值不值"
+    有事后答案，而不只是事前排序。

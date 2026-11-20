@@ -2070,6 +2070,42 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
 
 
 
+def repair_plan(root: Path) -> List[Dict[str, Any]]:
+    """Which origin file to repair first, and what its refusal has cost so far (round 110).
+
+    `blocked_dossier` says which file stands behind the refusals; it does not say which one to open first. Two numbers
+    decide that, and both are facts the store already holds: how many recorded walks the queue spent being refused
+    (`refused_walks`), and how many promises are still waiting behind the file (records that never got a verdict where
+    they were born). Their product is the cost -- a file that blocked one promise for one walk is cheap, a file that
+    blocked three promises across five walks is not, and a single "2 refusals" reads them the same.
+
+    Ranking is by cost, then by walks blocked, then by name, so the order is deterministic: a page that reshuffles
+    between two runs teaches the reader not to trust it.
+    """
+    dossier = blocked_dossier(root)
+    if not dossier:
+        return []
+    waiting = {int(row.get("version") or 0) for row in origin_queue(root)}
+    plan: List[Dict[str, Any]] = []
+    for origin, entry in dossier.items():
+        versions = sorted(int(item) for item in entry.get("records") or [])
+        walks_blocked = len(entry.get("refused_walks") or [])
+        held = len([version for version in versions if version in waiting])
+        plan.append({
+            "origin": origin,
+            "records": versions,
+            "walks_blocked": walks_blocked,
+            "walks": int(entry.get("walks") or 0),
+            "last_walk": int(entry.get("last_walk") or 0),
+            "held": held,
+            # Named, not implied: the walks the queue already spent, times the promises still queued behind the file.
+            "cost": walks_blocked * max(1, held),
+            "remedy": "brian evolve --audit",
+        })
+    plan.sort(key=lambda row: (-int(row["cost"]), -int(row["walks_blocked"]), str(row["origin"])))
+    return plan
+
+
 def repaired_paths(root: Path) -> List[Dict[str, Any]]:
     """Versions whose measured file has been rewritten by hand, with every move (round 94).
 
