@@ -8225,6 +8225,84 @@ SMD              round-out-of-reach.json          unknown                       
 同一张表把它们排在一起，等于建议了一条对一半行无效的命令。
 
 
+### 3.158 给"付不动"那半配一个动词：把轮记录的文件补回去
+
+第 151 轮把那笔欠账按"读者的下一步"分成了两段，并且诚实地写了第二段缺的是**修好的记录**。写完就发现这句话
+有问题：本仓库没有任何命令能把一个轮自己的文件补回去，所以"缺的是修好的记录"其实是在建议手工编辑 JSON。诊断
+有了，动词没有——这正是第 108 轮那条教训的第十二次复发（一条命令能指出矛盾，不等于有一条命令能消除它）。
+
+于是这一轮加 `--claim-round-file ROUND=FILE`（配 `--force-claim` 与 `--claim-why`），并把它接进三处：它的
+预览、`--unrecorded` 的脚注、欠账行本身。
+
+**三次拒绝，每次都是因为"看起来修好了"比"没修"更坏：**
+
+1. 轮记录必须存在——对一条没人读得到的轮做断言，是对"无"做断言。
+2. 文件必须在这个 checkout 里——指着一个读者打不开的路径，修的是文书、丢的是证据（第 92 轮的规则）。
+3. 文件必须就是这轮记录下来的几何指向的那一个，除非 `--force-claim`——窗口数、计分窗口数、节奏对不上的文件
+   不是它测过的那一个；把它写进去，等于把一个行从"没有命令能付"挪到"有命令能付"，而这件事并不成立。
+
+另外，**已经记了另一个文件**的记录也拒绝（除非 `--force-claim`）：这时记录不是缺一个事实，而是错了一个事实，
+"修"和"重测"是两个动词，只有重测能裁决。
+
+几何判定由调用方给（匹配器住在 `cli`，第 51 轮），答案只有三个：`agrees` / `disagrees` / `unknown`。
+`unknown` 会被如实记进记录，不会被凑成 `agrees`——不知道不等于同意（边界 369）。
+
+**真账本上的效果**（`var/demo151`：一条付得动的轮、一条付不动的轮）：
+
+```
+ceiling debt      2 of 3 round(s) do not record the ceilings they were judged under; re-running 1 of them would
+                  leave 1 without one, so the default --max-limit-drift cap stays a warning; 1 of them are out of
+                  reach: no command can pay a round that names no single file, or that no longer decides anything;
+                  repair a row with brian evolve --claim-round-file ROUND=FILE; measure them with brian evolve
+                  --rerun-unrecorded --rerun-limit 0
+```
+
+跑一次 `--claim-round-file round-out-of-reach.json=data/smd/stream-one.json --force-claim`（那轮的几何是 7 窗口 /
+600 秒，文件是 3 窗口 / 300 秒，所以必须显式越权）：
+
+```
+claimed          round-out-of-reach.json  now names data/smd/stream-one.json (geometry disagrees)
+claimed          1 record(s) repaired; each keeps the file it named before in stream_path_history, so the repair
+                 is visible in the record (boundary 369).
+```
+
+同一句欠账行变成：
+
+```
+ceiling debt      2 of 3 round(s) do not record the ceilings they were judged under; re-running 1 of them would
+                  leave 1 without one, so the default --max-limit-drift cap stays a warning; 1 of them name their
+                  file, so --with-ceilings can re-measure them; measure them with brian evolve --rerun-unrecorded
+                  --with-ceilings --rerun-limit 0
+```
+
+注意两件事：`out of reach` 那一段消失了，**而且 `measure them with` 后面换成了带 `--with-ceilings` 的命令**——
+这一行的语义从"没有命令能付"变成了"上限队列能付"，连建议的命令都换了。修记录不是记账，它改变了下一步。
+
+`--unrecorded` 也跟着变短：修之前 `2 of 3 cannot be attributed; 2 of them still decide something`，修之后
+`1 of 3 cannot be attributed; 1 of them still decide something`，再跑一次就只剩那句话：
+`Every round that still decides something says which file it measured.`——这一段自己消失了，而不是被标记为
+"已修"。
+
+**一个当场修掉的缺陷。** 预览的第一版把 `dry_run` 的早退放在几何检查**之前**，于是
+`--claim-round-file … --dry-run` 打印了一个真跑会被拒绝的计划（`would claim … (geometry disagrees)` 然后
+`exit 0`）。这正是第 135 轮那个缺陷换了位置：预览必须跑完所有检查，只跳过写入。改成"检查全跑、写入包在
+`if not dry_run:` 里"之后，同一个预览会以 `cannot claim that record: … does not agree with the geometry` 退出 2。
+
+**三条读法。** 一是"缺的是记录"必须配一条能改记录的命令，否则这句话是让读者去手改 JSON。二是修复要让**类别**
+移动，而不只是数字移动：这里欠账数没变（还是 2 of 3），变的是它由哪一族付、以及页面建议哪条命令。三是"人员
+断言"与"几何证据"冲突时，两者都要进记录（`geometry: disagrees` + `--claim-why`），否则下一位读者会以为匹配器
+同意过。
+
+**边界 368：修复必须先跑完所有检查，只跳过写入。** 一个打印出真跑会拒绝的计划的预览，比没有预览更坏——它把
+"计划"和"承诺"混成一件东西。
+
+**边界 369：人员断言要带它自己的判定。** 记录里写 `agrees` 还是 `disagrees` 不是措辞问题：前者说几何支持这次
+修复，后者说有人越过了几何，两者对后来者的含义完全不同。
+
+**边界 370：修一条记录可以改变"哪一族付得起"，却不改变欠账的数字。** 只说"欠账 2 of 3"会把一次类别迁移说成
+什么都没发生；句子要跟着说"这 1 条现在由上限队列付"。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8812,5 +8890,9 @@ missing for the next level
 137. ~~让 `--campaign` 的上限欠账行也说清 47 轮里有多少轮是"任何命令都付不动"的，并把 `--unrecorded` 的行
      分成"可付"与"付不动"两段。~~（第 151 轮：§3.157）
 
-138. 让 `--unrecorded` 的"付不动"那一段也能被修好：写一条命令（`--set-stream-path` 或重新测量）把"没有单一
-     文件"的轮补上文件，跑完之后这一段自己变短；今天页面只能说"缺的是修好的记录"，说不出该修哪一条。
+138. ~~让 `--unrecorded` 的"付不动"那一段也能被修好：写一条命令把"没有单一文件"的轮补上文件，跑完之后这一段
+     自己变短。~~（第 152 轮：§3.158）
+
+139. 让"补回去的文件"也能被反过来检查：`--claim-round-file` 记下的 `geometry: disagrees` 会让那一轮的上限重测
+     在错误几何上发生，而页面现在不说这件事；给重测加一句"这次重测用的文件是人员补的、几何不同意"，并让
+     `--campaign` 数出有多少条这样的记录（今天只数了 `stream_path_history` 的长度）。

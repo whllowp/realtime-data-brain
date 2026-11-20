@@ -43,6 +43,7 @@ from .evolve import (
     Candidate,
     catalogue,
     ceiling_shortfall,
+    claim_round_file,
     debt_history,
     format_audit,
     format_ceiling_shortfall,
@@ -460,6 +461,7 @@ BATCH_PREVIEWS: Tuple[Tuple[str, str], ...] = (
     ("--settle-restore-file", "settle_restore_file"),
     ("--settle-drop-file", "settle_drop_file"),
     ("--settle-reanchor-file", "settle_reanchor_file"),
+    ("--claim-round-file", "claim_round_file"),
     ("--backfill-walks", "backfill_walks"),
 )
 
@@ -2757,6 +2759,53 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             }), encoding="utf-8")
         return 0
 
+    if getattr(args, "claim_round_file", None):
+        # Round 152 (item 138): the out-of-reach half of the debt was a diagnosis without a verb. A person who
+        # knows which file a round measured can now record it; the geometry check says whether the record and
+        # the file agree, and `--force-claim` is the only way past a disagreement -- a repair that moves a row
+        # into the queue's reach without making that true is worse than the debt it hides (boundary 368).
+        shapes = dict(_stream_library(root))
+        records = {str(row.get("round")): row for row in history(root, include_retired=True)}
+        claims: List[Dict[str, Any]] = []
+        refused = 0
+        for pair in [str(item) for item in args.claim_round_file]:
+            name, _sep, claimed = pair.partition("=")
+            name = name.strip()
+            claimed = claimed.strip().replace("\\", "/")
+            shape = shapes.get(claimed)
+            geometry = "unknown" if shape is None else (
+                "agrees" if _matching_streams(records.get(name, {}), [(claimed, shape)]) == [claimed]
+                else "disagrees")
+            try:
+                done = claim_round_file(root, [pair], force=bool(getattr(args, "force_claim", False)),
+                                        geometry_of=lambda _path, verdict=geometry: verdict,
+                                        dry_run=bool(getattr(args, "dry_run", False)),
+                                        why=str(getattr(args, "claim_why", "") or ""))
+            except (OSError, ValueError) as error:
+                _print("cannot claim that record: %s" % error)
+                refused += 1
+                continue
+            for item in done:
+                claims.append(item)
+                if getattr(args, "dry_run", False):
+                    _print("would claim      %s  now names %s (geometry %s)" % (item["round"], item["to"],
+                                                                              item["geometry"]))
+                elif item.get("changed"):
+                    _print("claimed          %s  now names %s (geometry %s)" % (item["round"], item["to"],
+                                                                              item["geometry"]))
+                else:
+                    _print("claimed          %s  already named it, nothing to repair" % item["round"])
+        if getattr(args, "dry_run", False):
+            _print("nothing was written; drop --dry-run to record the claim (boundary 304).")
+        elif claims:
+            _print("claimed          %d record(s) repaired; each keeps the file it named before in "
+                   "stream_path_history, so the repair is visible in the record (boundary 369)."
+                   % sum(1 for item in claims if item.get("changed")))
+        if getattr(args, "json_out", None) and not _write_payload(
+                args.json_out, {"claimed": claims, "claim_refused": refused}):
+            return 2
+        return 2 if refused else 0
+
     if args.rerun_unrecorded:
         # Round 52: round 51 turned "which file did this round measure?" into a printed answer; this turns the
         # answer into a run. A round with exactly one candidate file is re-measured on that file, so its totals
@@ -3218,7 +3267,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if reachless_rows:
             _print("Re-run one of the reachable rows with `brian evolve --stream-file <file>`: the new record")
             _print("names the file, and this list shrinks. The out-of-reach rows stay: no command re-measures a")
-            _print("round that names no single file, so what they need is a repaired record, not a re-run.")
+            _print("round that names no single file -- unless a person records the file: `brian evolve")
+            _print("--claim-round-file <round>=<file>` moves the row out of this list, and the ceiling debt")
+            _print("it owes becomes payable, because the queue can finally find the file (boundary 370).")
         else:
             _print("Re-run one with `brian evolve --stream-file <file>`: the new record names the file, and this")
             _print("list shrinks.")
@@ -3294,6 +3345,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # 154), and the sentence now says so instead of leaving the reader to subtract (boundary 366).
         ceiling_note = format_ceiling_shortfall(ceiling_rows, payable=ceiling_file_payable,
                                                 named=ceiling_named, unpayable=ceiling_unpayable,
+                                                repair="brian evolve --claim-round-file ROUND=FILE",
                                                 command=_ceiling_command(ceiling_file_payable, ceiling_named))
         # Round 149: `0 by the queue` is a fact about the past; the page also says what the queue could pay
         # today and names the command, computed once so the page and the payload print one sentence (boundary 360).
@@ -6168,6 +6220,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-decide a recorded round file under today's rules and exit")
     evolve.add_argument("--audit", action="store_true",
                         help="re-decide every recorded round under today's rules and exit")
+    evolve.add_argument("--claim-round-file", dest="claim_round_file", nargs="+", metavar="ROUND=FILE",
+                        help="record the file a round measured, for a round whose record names none; the file "
+                             "must agree with the geometry the round recorded unless --force-claim")
+    evolve.add_argument("--force-claim", dest="force_claim", action="store_true",
+                        help="with --claim-round-file: record a file the round's geometry does not point at")
+    evolve.add_argument("--claim-why", dest="claim_why", default="",
+                        help="with --claim-round-file: why the record names this file, kept with the repair")
     evolve.add_argument("--backfill-walks", dest="backfill_walks", action="store_true",
                         help="write a walk for every payment the ledger records but the re-run store never saw "
                              "(rounds retired before the store existed; each entry says it was written after the "

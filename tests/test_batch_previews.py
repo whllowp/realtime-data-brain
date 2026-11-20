@@ -59,8 +59,10 @@ def test_the_guard_accepts_every_row(flag: str, attribute: str) -> None:
 
 def test_the_table_holds_every_file_level_command_the_parser_offers() -> None:
     offered = {option for option in _evolve_options() if option.startswith("--settle-") and option.endswith("-file")}
-    # `--backfill-walks` is a batch preview too, and the only one the naming rule does not cover.
+    # Two batch previews are outside the naming rule, and both are pinned here on purpose: a rule that covers
+    # only what it happens to cover stops covering the next member (round 152 added the second, boundary 357).
     offered.add("--backfill-walks")
+    offered.add("--claim-round-file")
     assert {flag for flag, _attribute in cli.BATCH_PREVIEWS} == offered
 
 

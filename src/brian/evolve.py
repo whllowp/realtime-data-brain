@@ -2437,6 +2437,116 @@ def _moment(stamp: Any) -> Optional[datetime]:
     return moment
 
 
+
+def _rewrite_ledger_line(root: Path, name: str, changes: Dict[str, Any]) -> bool:
+    """Write a repair into the ledger line too, so `history` does not read two different records.
+
+    Round 44's lesson: a round has two books, and an edit to one is invisible to every page that reads the
+    other. `history` merges the round file first and the ledger line last, so a line that still says
+    `stream_path: null` would hide the repaired field. Returns whether the line was found.
+    """
+    path = root / EVOLVE_DIR / "ledger.jsonl"
+    if not path.exists():
+        return False
+    rows: List[Dict[str, Any]] = []
+    found = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            row = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if str(row.get("round")) == name:
+            row.update(changes)
+            found = True
+        rows.append(row)
+    if not found:
+        return False
+    payload = "\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + "\n"
+    temp = Path(str(path) + ".tmp")
+    temp.write_bytes(payload.encode("utf-8"))
+    temp.replace(path)
+    return True
+
+
+def claim_round_file(root: Path, pairs: Sequence[str], *, force: bool = False,
+                     geometry_of: Optional[Callable[[str], str]] = None,
+                     why: str = "", now: Optional[datetime] = None,
+                     dry_run: bool = False) -> List[Dict[str, Any]]:
+    """Record the one file a round measured, for a round whose own record names no file.
+
+    Round 151's page splits the ceiling debt by the reader's next step, and says the out-of-reach half needs a
+    repaired record rather than a queue run. That was a diagnosis with no verb behind it: no command could give
+    a round its file back, so the half could only shrink by editing a record by hand. This is the verb.
+
+    Three refusals, each because the alternative is a record that looks repaired and is not (boundary 368):
+
+    * the round record must exist -- a claim about a round nobody can read is a claim about nothing;
+    * the file must exist in this checkout -- a repair pointing at a path a reader cannot open fixes the
+      paperwork and loses the evidence (round 92's rule, boundary 195);
+    * the file must be the one the round's own geometry points at, unless `force` -- a file that disagrees with
+      the windows, scored count or cadence the round recorded is not the file it measured, and recording it
+      would move a row from "no command can pay it" to "a command can pay it" without making that true.
+
+    A record that already names a different file is refused without `force` as well: at that point the record is
+    not missing a fact, it is wrong, and "repair" and "re-measure" are different verbs -- the re-measurement
+    itself is the only thing that can settle it.
+
+    `geometry_of` is the caller's check, because the matcher lives in `cli` (round 51) and this module has no
+    stream library. It answers "agrees", "disagrees" or "unknown", and "unknown" is recorded as such rather than
+    rounded up to agreement (boundary 369).
+    """
+    directory = root / EVOLVE_DIR
+    moment = now or datetime.now(timezone.utc)
+    done: List[Dict[str, Any]] = []
+    for pair in pairs:
+        text = str(pair or "").strip()
+        if "=" not in text:
+            raise ValueError("a claim reads ROUND=FILE, and %r has no '=' in it" % text)
+        name, path = text.split("=", 1)
+        name = name.strip().replace("\\", "/")
+        path = path.strip().replace("\\", "/")
+        if not name or not path:
+            raise ValueError("a claim reads ROUND=FILE, and %r is missing half of it" % text)
+        record = directory / name
+        if not record.is_file():
+            raise ValueError("no round record for %s: %s" % (name, record))
+        payload = json.loads(record.read_text(encoding="utf-8"))
+        before = str(payload.get("stream_path") or "")
+        if before == path:
+            done.append({"round": name, "from": before, "to": path, "changed": False, "geometry": "agrees"})
+            continue
+        if before and not force:
+            raise ValueError("the record already names %s: claiming another file is not a repair, it is a "
+                             "re-measurement -- pass --force-claim when the record is simply wrong" % before)
+        if not (root / path).is_file():
+            raise ValueError("the file to claim does not exist in this checkout: %s (a repair must point at "
+                             "something a reader can open)" % path)
+        geometry = str((geometry_of or (lambda _p: "unknown"))(path))
+        if geometry == "disagrees" and not force:
+            raise ValueError("%s does not agree with the geometry %s recorded (windows, scored, cadence): "
+                             "record it anyway with --force-claim, or re-measure the round on that file"
+                             % (path, name))
+        entry = {"from": before, "to": path, "at": moment.isoformat(), "geometry": geometry,
+                 "why": str(why or "the record named no file; this one was claimed by hand")}
+        history = payload.get("stream_path_history")
+        history = list(history) if isinstance(history, list) else []
+        # Round 152: the preview runs every check above and stops here. A dry run that skipped the geometry
+        # test would print a plan the real command refuses -- the round-135 defect in a new place (boundary 368).
+        if not dry_run:
+            history.append(entry)
+            payload["stream_path"] = path
+            payload["stream_path_history"] = history
+            record.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8",
+                              newline="\n")
+            _rewrite_ledger_line(root, name, {"stream_path": path, "stream_path_history": history})
+        done.append({"round": name, "from": before, "to": path, "changed": True, "geometry": geometry,
+                     **({} if dry_run else {"claimed_at": moment.isoformat()})})
+    return done
+
+
 def debt_history(root: Path, days: float = 7.0, now: Optional[datetime] = None) -> Dict[str, Any]:
     """How far the unrecorded share has moved, reconstructed from the ledger (round 55).
 
@@ -4551,7 +4661,7 @@ def ceiling_shortfall(rounds: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any
 
 def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0,
                              named: int = 0, command: Optional[str] = None,
-                             unpayable: int = 0) -> Optional[str]:
+                             unpayable: int = 0, repair: Optional[str] = None) -> Optional[str]:
     """One sentence about the rounds that do not record their ceilings, and whether a command could change it.
 
     The number is only worth printing when it can move: `payable` is how many of the missing rounds the re-run
@@ -4579,6 +4689,11 @@ def format_ceiling_shortfall(rows: Sequence[Mapping[str, Any]], payable: int = 0
     unpayable = max(0, min(int(unpayable), missing - payable - named))
     reach_out = ("; %d of them are out of reach: no command can pay a round that names no single file, or that no "
                  "longer decides anything" % unpayable) if unpayable else ""
+    # Round 152: the out-of-reach half has a verb after all -- a person can record the file the round measured.
+    # Naming it here keeps the sentence's promise ("no command can pay it") true while giving the reader the one
+    # command that changes the category rather than the number (boundary 370).
+    if reach_out and repair:
+        reach_out += "; repair a row with %s" % repair
     # Round 73: a round that named its file is one the queue could not reach before (`_unrecorded_matters` lists
     # only rounds whose *file* is unknown), so it was counted as unpayable and the sentence said so. The queue
     # now has a path for it, and the sentence names how many of the remainder became reachable.

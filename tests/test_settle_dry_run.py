@@ -82,7 +82,7 @@ def test_the_dry_run_flag_must_preview_something(tmp_path, monkeypatch, capsys):
     assert cli.main(["evolve", "--audit", "--dry-run"]) == 2
     printed = " ".join(capsys.readouterr().out.split())
     assert ("--dry-run previews --settle-reaffirm-file, --settle-restore-file, --settle-drop-file, "
-            "--settle-reanchor-file or --backfill-walks" in printed)
+            "--settle-reanchor-file, --claim-round-file or --backfill-walks" in printed)
 
 
 def test_a_dry_run_does_not_touch_the_json_payload(tmp_path, monkeypatch):
