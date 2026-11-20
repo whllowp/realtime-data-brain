@@ -172,6 +172,7 @@ class Campaign:
     #: Round 87: the clearings the store remembers, split by what cleared them. An unexplained clearing is a
     #: debt that stopped being visible, not a debt that was paid, so the two are never added together.
     in_force_history: Dict[str, Any] = field(default_factory=dict)
+    queue_run: Optional[Dict[str, Any]] = None
     # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
     retired: int = 0
     # Refusals the loop still holds: the count `previously_rejected` would return, and how many of them
@@ -269,6 +270,7 @@ class Campaign:
             "in_force_cleared": self.in_force_cleared,
             "in_force_stale": self.in_force_stale,
             "in_force_cleared_history": dict(self.in_force_history),
+            "queue_run": dict(self.queue_run) if isinstance(self.queue_run, Mapping) else None,
             "in_force_untested": self.in_force_untested,
             "domains": [row.to_dict() for row in self.rows],
         }
@@ -311,7 +313,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
              in_force: Optional[Sequence[Mapping[str, Any]]] = None,
              in_force_cleared: Optional[Sequence[Mapping[str, Any]]] = None,
              in_force_stale: Optional[Sequence[Mapping[str, Any]]] = None,
-             in_force_history: Optional[Mapping[str, Any]] = None) -> Campaign:
+             in_force_history: Optional[Mapping[str, Any]] = None,
+             queue_run: Optional[Mapping[str, Any]] = None) -> Campaign:
     """Summarise every recorded round, grouped by the stream each one measured.
 
     A round that does not say which stream it measured cannot be attributed to a domain, and is counted
@@ -514,6 +517,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.in_force_cleared = len(report.in_force_cleared)
     result.in_force_stale = len(report.in_force_stale)
     result.in_force_history = dict(in_force_history or {})
+    result.queue_run = dict(queue_run) if isinstance(queue_run, Mapping) else None
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
@@ -1030,6 +1034,22 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                          % (int(item.get("version") or 0), str(item.get("stream_path") or ""),
                             " (in force)" if item.get("in_force") else "",
                             int(item.get("version") or 0)))
+
+    run = result.queue_run
+    if isinstance(run, Mapping) and run.get("at"):
+        # Round 103: the queue can now be walked by a command, and the ledger says nothing about whether anyone ever
+        # walked it. "No promise waits in the queue" and "nobody has run the queue" are different states of the same
+        # clean page, so the last walk is printed with its own numbers. It is printed outside the clearing block
+        # because it is a fact about the queue, not about the disputes the queue happened to settle (round 87).
+        line = ("links             the last queue run was %s: measured %d of %d runnable promise(s) on their "
+                "origins, left %d out" % (str(run.get("at") or ""), int(run.get("measured") or 0),
+                                          int(run.get("runnable") or 0), int(run.get("skipped") or 0)))
+        if int(run.get("cleared") or 0):
+            line += ", and %d of those measurements left a clearing" % int(run.get("cleared") or 0)
+        lines.append(line)
+        if int(run.get("stopped_at") or 0):
+            lines.append("links             it stopped at v%03d, which exited 2: a build defect is not something "
+                         "the next promise in the queue measures away" % int(run.get("stopped_at") or 0))
 
     if result.in_force_history and int(result.in_force_history.get("total") or 0):
         record = result.in_force_history

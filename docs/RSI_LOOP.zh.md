@@ -5574,6 +5574,58 @@ v020  attempt 1  2026-11-19T23:43:50+00:00  failed  data/smd/stream-real.json  [
 队列"。**
 
 
+### 3.109 走一趟也要留记录：队列执行本身是一条事实，以及遇到断账就停
+
+第 102 轮之后，页面已经能说"哪些承诺还没有在它出生的文件上被量过"、也能说"每一笔清账是队列跑出来的还是手打命令
+跑出来的"。但它说不出**上一次有人走队列是什么时候**。一个从来没被排空过的账本，和一个一小时前排空过的账本，印
+在纸上是同一张干净的页面——"队列空了"和"没人走过队列"是两种状态，只有一种是好消息。
+
+所以走队列这件事本身要落一条记录：`var/evolve/queue_runs.json`，格式 `brian.queue/1`，保留最近 20 条，被裁掉
+的条数单独记（`trimmed`），因为"上一次执行"不等于"全部历史"。一条记录里是读者事后无法重建的东西：
+
+```
+{
+  "at": "2026-11-19T23:59:38.547122+00:00",
+  "limit": 1, "runnable": 1, "measured": 1,
+  "skipped": 0, "skipped_origins": [],
+  "cleared": 1, "worst": 1, "stopped_at": 0
+}
+```
+
+`measured` 与 `cleared` 是两个数，不是同一个数的两种说法：一次检查可以跑完却没有settle 任何东西（第 89 轮的边界
+188 再往上抬一层）。把两者并成一个，就会把"量了三条"读成"答掉了三笔"。`cleared` 是执行前后各读一次观测账本、
+只数这一趟带 `queued` 标记新写下的条目得到的，不是从"量了几条"推出来的。
+
+页面随即能说了：
+
+```
+links             the last queue run was 2026-11-19T23:59:38.547122+00:00: measured 1 of 1 runnable promise(s) on their origins, left 0 out, and 1 of those measurements left a clearing
+links             the last queue run was 2026-11-20T00:04:15.361779+00:00: measured 1 of 1 runnable promise(s) on their origins, left 0 out
+links             it stopped at v020, which exited 2: a build defect is not something the next promise in the queue measures away
+```
+
+第二段来自一个把 `v020` 的产出轮次放进 `mismatch` 链接的账本。走到它时 `--verify` 拒绝在断账上叠承诺（第 84 轮），
+退出 2。走队列此时必须停下：退出 2 的意思是**这个记录的账目互相矛盾**，而队列里的下一条承诺并不能把矛盾量没。
+于是记录里写 `stopped_at: 20`、`measured: 1`、`worst: 2`，页面点名停在哪一条、后面还剩几条；只有一条时不印
+"0 条留在队列里"，而是说没有人在后面排队（边界 226 的老规则，换了一行）：
+
+```
+stopped          v020 exited 2, and no other promise was waiting behind it: a contradiction is not something the next promise measures away
+1 promise(s) measured on the file they were born with. A copied end is measured, never applied; a contradiction is still refused.
+```
+
+**两个实跑才暴露的问题。** 其一，`--from-queue` 只被 `--verify` 分支读，漏掉 `--verify` 时它整个被忽略，命令转而
+量了一整轮（记录落在 `round-*.json` 而不是队列记录里，还没人看得出来）。这类"只被一个模式读取的开关"必须拒绝被其
+他模式静默忽略，于是加了一个守卫：缺 `--verify` 直接退出 2 并说明原因。其二，第一版停住时无论后面有没有东西都印
+`0 promise(s) were left in the queue: none`——零个对象也要印出来是第 226 轮的要求，但"没有一个在等"不是零个对象的
+事，是一句不同的话，所以分成两支。
+
+边界：**227**（一个会列出队列的页面必须同时说队列上一次是什么时候被走的——"没有承诺在等"和"没人走过队列"是两种
+状态，只有一种是好消息）／**228**（一次走队列以断账收场时必须停下并点名没量的那些：退出 2 说的是账目矛盾，而
+"再量一条"不可能把矛盾量没，所以继续走只会把同一个缺陷重复收费）／**229**（一次走执行要分开记"量了几条"与
+"答掉几笔"——检查可以跑完而不 settle 任何东西，两个数并成一个就把执行读成了成效）。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -5966,6 +6018,20 @@ missing for the next level
     `--campaign` 印 `N clearing(s) were produced by the queue, M by a hand-typed command`（全手抄时也要印 0），
     `--from-queue 0` 只列队列不测量。实跑见 §3.108，`tests/test_queued_clearing.py` 11 条。
 
-89. 让"队列跑过"能接到部署上：`--from-queue` 跑完把"这次队列执行"本身记成一条记录（时间、跑了几条、最坏退出码、
-    被跳过的几份原件），让 `--campaign` 能说"最近一次队列执行是何时、跑了几条、其中几条留了结论"，并让
-    `--from-queue N` 在遇到第一条 `contradiction`（退出 2）时停下来，把剩下的几条列出来而不是继续跑。
+89. 完成（第 103 轮）：`--from-queue` 的每一次执行写进 `var/evolve/queue_runs.json`（格式
+    `brian.queue/1`，保留最近 20 条并单独记被裁掉的条数），字段 `at / limit / runnable / measured / skipped /
+    skipped_origins / cleared / worst / stopped_at`。`cleared` 只数这一趟自己写下的清账（执行前后各读一次观测账本），
+    所以"量了三条"与"答掉了三笔"是两个数（边界 229）。`--campaign` 印出
+    `the last queue run was …: measured N of M runnable promise(s) on their origins, left K out`，有清账时补一句
+    `and C of those measurements left a clearing`，停住时补
+    `it stopped at v020, which exited 2: a build defect is not something the next promise in the queue measures away`
+    （边界 227/228）；`--campaign --json-out` 的 `queue_run` 携带同一条记录。走队列时第一条退出 2 就停，并印
+    `stopped  v020 exited 2, and …`（后面还有几条就点名，没有就说没有）。另外补了一个守卫：`--from-queue` 只被
+    `--verify` 分支读取，缺 `--verify` 时直接退出 2 并说明，而不是静默地改成"量一轮"。
+
+    下一项（90）：让 `--campaign` 看队列执行的趋势（最近 N 次里几次以断账收场、平均量几条），并让 `--from-queue`
+    跳过上一趟已经量过而仍然失败的那些记录（或把它们标成"量过、仍不成立"，而不是每趟都重花一次）。
+
+90. 让 `--campaign` 看队列执行的趋势：最近几次里有多少次以断账收场、平均一次量几条、哪些原件被反复跳过；
+    并让 `--from-queue` 不再重花一次在上一趟已经量过而仍然失败的记录上（把它们标成"量过、仍不成立"，
+    而不是每趟都重新量）。

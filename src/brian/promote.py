@@ -1725,6 +1725,75 @@ def never_tested_at_origin(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     return {"records": len(versions), "by_file": by_file, "versions": versions}
 
 
+QUEUE_RUNS = "queue_runs.json"
+QUEUE_RUN_FORMAT = "brian.queue/1"
+QUEUE_RUN_LIMIT = 20
+
+
+def _queue_runs_path(root: Path) -> Path:
+    return _evolve_dir(root) / QUEUE_RUNS
+
+
+def queue_runs(root: Path, limit: int = QUEUE_RUN_LIMIT) -> Dict[str, Any]:
+    """The recorded queue runs, oldest first, plus how many older ones were dropped.
+
+    Round 103: `--from-queue` measured promises on their origins and then forgot that it had run. A campaign page
+    could say which promises still hold no verdict where they were made and never when anyone last walked the
+    queue -- so a ledger that had never been queued and one queued an hour ago read the same.
+    """
+    path = _queue_runs_path(root)
+    empty = {"format": QUEUE_RUN_FORMAT, "runs": [], "trimmed": 0}
+    if not path.is_file():
+        return empty
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty
+    if not isinstance(payload, Mapping):
+        return empty
+    runs = [dict(item) for item in payload.get("runs") or [] if isinstance(item, Mapping)]
+    return {"format": str(payload.get("format") or QUEUE_RUN_FORMAT), "runs": runs[-limit:],
+            "trimmed": int(payload.get("trimmed") or 0)}
+
+
+def last_queue_run(root: Path) -> Optional[Dict[str, Any]]:
+    runs = queue_runs(root)["runs"]
+    return runs[-1] if runs else None
+
+
+def record_queue_run(root: Path, run: Mapping[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Write down one walk of the origin queue.
+
+    The fields are what a reader cannot reconstruct later: when it ran, how much of the queue it covered, how many
+    measurements it actually took, which origins it had to leave out, the worst exit code it produced, and the
+    version it stopped at when a build defect ended the walk. `cleared` counts only the clearings this run wrote
+    itself, so "the queue measured three promises" and "the queue answered three disputes" stay two facts.
+    """
+    moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
+    entry = {
+        "at": moment.isoformat(),
+        "limit": int(run.get("limit") or 0),
+        "runnable": int(run.get("runnable") or 0),
+        "measured": int(run.get("measured") or 0),
+        "skipped": int(run.get("skipped") or 0),
+        "skipped_origins": [str(item) for item in run.get("skipped_origins") or []],
+        "cleared": int(run.get("cleared") or 0),
+        "worst": int(run.get("worst") or 0),
+        "stopped_at": int(run.get("stopped_at") or 0),
+    }
+    held = queue_runs(root)
+    runs = held["runs"] + [entry]
+    trimmed = int(held["trimmed"] or 0)
+    if len(runs) > QUEUE_RUN_LIMIT:
+        trimmed += len(runs) - QUEUE_RUN_LIMIT
+        runs = runs[-QUEUE_RUN_LIMIT:]
+    path = _queue_runs_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"format": QUEUE_RUN_FORMAT, "runs": runs, "trimmed": trimmed}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    return entry
+
+
 def origin_queue(root: Path) -> List[Dict[str, Any]]:
     """The promises never measured where they were made, in the order a reader should act on them (round 101).
 

@@ -99,6 +99,7 @@ from .promote import (
     clearing_evidence,
     in_force_disputes,
     in_force_history,
+    last_queue_run,
     in_force_overrides,
     legacy_state_note,
     load_promotions,
@@ -107,6 +108,7 @@ from .promote import (
     promotions_for_domain,
     provenance_block,
     record_clearing,
+    record_queue_run,
     revert_promotion,
     set_state_budget,
     repaired_paths,
@@ -1588,6 +1590,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("--max-ceiling-debt caps a --strict charge; without --strict nothing reads it")
         return 2
 
+    if getattr(args, "from_queue", None) is not None and not getattr(args, "verify", False):
+        # Round 103: only the verify branch reads `--from-queue`. Without it the command measures a fresh round and
+        # the flag is silently inert -- which is how a queue walk was mistaken for one (the run landed in a round
+        # record instead). A flag one mode reads must refuse to be ignored by the others.
+        _print("--from-queue walks the origin queue through --verify; without --verify it would be ignored and a "
+               "round would be measured instead. Add --verify.")
+        return 2
+
     # Round 72: the ceiling debt is computed once, before any branch, because the campaign page, the audit gate
     # and the re-run queue must agree about how many rounds lack ceilings and how many of those the queue can
     # pay. `payable` counts a missing round only when exactly one candidate file is known and the round is still
@@ -2251,7 +2261,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             result = campaign_result(root, rules, expiry_days=args.expiry_days,
                                      refusal_expiry_days=horizon, limits=limits_view,
                                      in_force=in_force_rows, in_force_cleared=in_force_cleared,
-                                     in_force_stale=in_force_stale_rows, in_force_history=in_force_record)
+                                     in_force_stale=in_force_stale_rows, in_force_history=in_force_record,
+                                     queue_run=last_queue_run(root))
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
@@ -2726,8 +2737,18 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             if skipped:
                 _print("                 %d left out: the file they were born with is not in this checkout"
                        % skipped)
+            # Round 103: count the clearings the queue itself writes, so the run record can separate "measured
+            # three promises" from "answered three disputes".
+            queued_before = 0
+            try:
+                queued_before = sum(1 for item in in_force_history(root)[0] if item.get("queued") is True)
+            except OSError:
+                queued_before = 0
             worst = 0
-            for row in chosen:
+            measured_now: List[int] = []
+            stopped_at = 0
+            remaining: List[int] = []
+            for index, row in enumerate(chosen):
                 version = int(row.get("version") or 0)
                 origin = str(row.get("origin") or "")
                 _print("")
@@ -2742,9 +2763,48 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 inner.stream_file = origin
                 inner.json_out = None
                 worst = max(worst, cmd_evolve(inner, settings))
+                measured_now.append(version)
+                if worst == 2:
+                    # Round 103: exit 2 means the books for this record contradict each other, and that is not a
+                    # defect the next promise in the queue can measure away. Stop, name what was left, and let the
+                    # caller fix the books first.
+                    stopped_at = version
+                    remaining = [int(item.get("version") or 0) for item in chosen[index + 1:]]
+                    break
+            cleared_here = 0
+            try:
+                cleared_here = sum(1 for item in in_force_history(root)[0]
+                                   if item.get("queued") is True) - queued_before
+            except OSError:
+                cleared_here = 0
+            try:
+                record_queue_run(root, {
+                    "limit": from_queue,
+                    "runnable": len(runnable),
+                    "measured": len(measured_now),
+                    "skipped": skipped,
+                    "skipped_origins": [str(item.get("origin") or "") for item in queued
+                                        if not item.get("origin_exists")],
+                    "cleared": max(0, cleared_here),
+                    "worst": worst,
+                    "stopped_at": stopped_at,
+                })
+            except OSError:
+                pass
             _print("")
+            if stopped_at:
+                # Round 103: a walk that ends on a build defect must say what it left behind -- and when the answer
+                # is "nothing", it says that instead of counting zero objects (boundary 226's subject, one line over).
+                if remaining:
+                    _print("stopped          v%03d exited 2, and a contradiction is not something the next "
+                           "promise measures away. %d promise(s) were left in the queue: %s"
+                           % (stopped_at, len(remaining),
+                              ", ".join("v%03d" % item for item in remaining)))
+                else:
+                    _print("stopped          v%03d exited 2, and no other promise was waiting behind it: a "
+                           "contradiction is not something the next promise measures away" % stopped_at)
             _print("%d promise(s) measured on the file they were born with. A copied end is measured, never "
-                   "applied; a contradiction is still refused." % len(chosen))
+                   "applied; a contradiction is still refused." % len(measured_now))
             return worst
         wanted = int(getattr(args, "verify_version", 0) or 0)
         horizon = float(getattr(args, "refusal_expiry_days", REFUSAL_EXPIRY_DAYS))
