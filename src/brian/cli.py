@@ -1298,7 +1298,13 @@ def _rerun_offer(root: Path) -> Dict[str, Any]:
     it; and when the store records hand payments but not one queued walk, it says that in the same breath, because
     "the queue has never run here" is the part an operator needs and it is invisible in a count of walks.
     """
-    file_rounds = _unrecorded_matters(root)
+    matters = _unrecorded_matters(root)
+    # Round 150: "could pay today" is a claim about what a command can do, so it counts only the rounds that have
+    # exactly one candidate file -- the same filter `--rerun-unrecorded` applies before it measures anything
+    # (boundary 363). Round 149 counted every unrecorded round, which made the page promise work no command can
+    # perform: a round with no file, or with two, is skipped by the very queue the sentence recommends.
+    file_rounds = [item for item in matters if len(item[3]) == 1]
+    unplaceable = len(matters) - len(file_rounds)
     ceiling_rounds = _ceiling_matters(root)
     total = len(file_rounds) + len(ceiling_rounds)
     try:
@@ -1308,8 +1314,12 @@ def _rerun_offer(root: Path) -> Dict[str, Any]:
     queued = int(walks.get("queued") or 0)
     hand = int(walks.get("hand") or 0)
     if not total:
-        text = ("nothing for the queue to pay today: every round that still decides something records the file and "
-                "the ceilings it was measured under")
+        if unplaceable:
+            text = ("nothing for the queue to pay today: %d round(s) keep no unique file, so no command can pay them"
+                    % unplaceable)
+        else:
+            text = ("nothing for the queue to pay today: every round that still decides something records the file "
+                    "and the ceilings it was measured under")
         command = ""
     else:
         parts = []
@@ -1319,11 +1329,13 @@ def _rerun_offer(root: Path) -> Dict[str, Any]:
             parts.append("%d that named their file but never recorded their ceilings" % len(ceiling_rounds))
         command = _rerun_command(bool(ceiling_rounds))
         text = "%d round(s) the queue could pay today (%s): %s" % (total, ", ".join(parts), command)
+        if unplaceable:
+            text += ("; %d more keep no unique file, so no command can pay them" % unplaceable)
         if hand and not queued:
             text += ("; the queue has paid none of this store's %d payment(s): every one was typed by hand, so the "
                      "store says nothing about what the queue would do" % hand)
     return {"rounds": total, "file_rounds": len(file_rounds), "ceiling_rounds": len(ceiling_rounds),
-            "command": command, "text": text}
+            "unplaceable": unplaceable, "command": command, "text": text}
 
 
 def _rerun_progress(root: Path) -> Dict[str, Any]:
@@ -2822,6 +2834,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         elif named_pending:
             _print("ceilings          %d round(s) name their file and never recorded their ceilings; "
                    "add --with-ceilings to re-measure them" % len(named_pending))
+        # Round 150: the command prints the page's own sentence before the first measurement (round 60's rule --
+        # one place computes, both places print), so what this invocation is about to pay is not something the
+        # reader has to add up from the three counts above it.
+        _print("offer             %s" % _rerun_offer(root)["text"])
         for domain, name, _why, files in blocked:
             _print("  skipped         %-32s %s" % (name, _candidate_label(files)))
         failures = 0
@@ -3020,6 +3036,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                               100.0 * float(left["share"]), left["ready"]))
             _print("The re-run measures the candidates the record names, on the file it names: the totals move")
             _print("from one sampling to a named one without changing the question. Nothing is deployed by it.")
+        # Round 150: the closing line answers the opening one, from the same function, so "what it promised" and
+        # "what is left" cannot be two different accounts (boundary 364). The label says which moment this is,
+        # because the same sentence at two moments otherwise reads as two numbers that contradict each other
+        # (boundary 365).
+        _print("left to pay       %s" % _rerun_offer(root)["text"])
         return 2 if failures else 0
 
     if getattr(args, "backfill_walks", False):

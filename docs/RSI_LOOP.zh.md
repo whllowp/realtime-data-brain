@@ -8109,6 +8109,60 @@ offer 也进 `--campaign --json-out`：
 最容易被误读的方向。
 
 
+## 3.156 「能付几轮」只数付得动的，「付完了」再印一遍
+
+第 149 轮把"今天能付几轮、用哪条命令"写进了页面。这一轮把它搬到命令里——在开始测量之前印一次，结束之后再印
+一次——结果在改动的过程中先发现页面自己数错了。
+
+**数错的不是句子，是分母。** `_rerun_offer()` 原来把 `_unrecorded_matters()` 的每一行都算进"能付"，而
+`--rerun-unrecorded` 只测**恰好只有一个候选文件**的轮：没有文件的、有两个文件的都会被跳过。真账本上
+`_unrecorded_matters()` 返回 47 轮，其中没有一轮有唯一文件；页面当时说的"9 轮"全部来自上限家族。于是同一句
+话一边数着 47 轮"今天能付"，一边推荐的命令一轮也付不了它们。第 150 轮把这条过滤写进 offer 本身：
+
+```
+    file_rounds = [item for item in matters if len(item[3]) == 1]
+    unplaceable = len(matters) - len(file_rounds)
+```
+
+能付的说"还有 N 轮说不清文件，没有命令能付它们"；一轮都付不动时直接说
+`nothing for the queue to pay today: 47 round(s) keep no unique file, so no command can pay them`。
+
+**同一句话，两处印。** 命令现在在第一次测量之前印一次 offer，在返回之前用同一个函数再印一次，两个标签写明
+各自是哪一刻：
+
+```
+families          1: 0 round(s) from the file queue, 9 from the ceiling queue
+ceilings          9 round(s) name their file and never recorded their ceilings; re-measuring them here (a drain pays this family too)
+offer             9 round(s) the queue could pay today (9 that named their file but never recorded their ceilings):
+                  brian evolve --rerun-unrecorded --with-ceilings --rerun-limit 0; the queue has paid none of this
+                  store's 17 payment(s): every one was typed by hand, so the store says nothing about what the queue
+                  would do
+walk              18 of the re-run queue's recorded invocation(s); each round it pays names it
+...
+ceilings          9 of 9 re-measured with their ceilings; 0 still without
+left to pay       nothing for the queue to pay today: every round that still decides something records the file and
+                  the ceilings it was measured under
+```
+
+这不是一次演示：真账本上这一次拖干就是**队列自己付的第一趟**。跑完之后页面第一次把两种付款分开——
+`1 by the queue, 17 typed by hand`，`26 round(s) paid in all`，`re-run offer` 也从"9 轮"变成"今天没有可付的"。
+在第 147 轮之前，同一本账说的是 `0 by the queue`；那时队列真的没付过一轮，"能付"这句话只活在测试和演示里。
+现在它第一次有了行动记录。
+
+三点读法：
+
+1. **"能付"必须和"执行"用同一个过滤。** 页面和命令本来是两个函数，各写一遍条件就会分叉：页面数 9 轮，
+   命令付 0 轮，而两边都不算错——错在它们算的不是同一件事（边界 363）。
+2. **一句话在两个时刻印，标签就是它的坐标。** `offer` 和 `left to pay` 是同一句 offer 的两个瞬间；不标
+   时刻，读者看到的是一句话自相矛盾（边界 365）。
+3. **两个数都从一个函数出。** 若"承诺付几轮"和"还剩几轮"各算一遍，测量失败、被挡、或中途停下时它们会各说
+   各话，而页面上没有任何东西能指出谁对（边界 364）。
+
+**边界 363**：能付多少轮的计数只能包含有命令能执行的轮；说不清文件的轮必须单独计数，否则页面承诺的是没人
+做的工作。**边界 364**：把页面的句子印到命令里的人，必须在开工前印一次、收工后再印一次，且两次来自同一个
+函数，否则"它承诺付什么"和"还剩下什么"是两本账。**边界 365**：同一句话出现在两个时刻，就必须有标签说明
+是哪一刻，否则一个数字看起来在反驳它自己。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8688,6 +8742,11 @@ missing for the next level
      今天可付的轮数（来自守卫同款的两份名单）、该敲的那条命令，以及"这个仓库的 17 笔全是人打的"；同一份
      结构进 `--campaign --json-out` 的 `rerun_offer`；命令字符串收进 `_rerun_command()`，与 `ceiling debt` 那行
      由测试比对。真账本：9 轮可付。2050 → 2062 tests。
-136. 让 `--rerun-unrecorded` 在开始测量前，把同一句 offer 印出来（今天能付几轮、会不会带上 `--with-ceilings`），
+136. ~~让 `--rerun-unrecorded` 在开始测量前，把同一句 offer 印出来（今天能付几轮、会不会带上 `--with-ceilings`），
      这样"页面说的"和"命令做的"是同一句话；命令结束时再印一次剩下的（第 60 轮 `budget_text` 的形状：一处算、
-     两处印）。
+     两处印）。~~ 已完成（§3.156）：`offer` 与 `left to pay` 两行都由 `_rerun_offer()` 生成；顺手修掉了第 149 轮
+     的分母——"能付"只数恰好一个候选文件的轮，说不清文件的单独计数（`unplaceable`），真账本第一趟队列付款
+     （walk 18，9 轮）就是这次拖干的产出。
+137. 让 `--campaign` 的上限欠账行也说清 47 轮里有多少轮是"任何命令都付不动"的（今天只说 `none of them can be
+     re-run`），并把 `--unrecorded` 的行分成"可付"与"付不动"两段，好让读者一眼看出哪一半缺的是命令、哪一半
+     缺的是记录。

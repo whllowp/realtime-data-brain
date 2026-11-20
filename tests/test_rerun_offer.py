@@ -14,10 +14,14 @@ from brian.campaign import campaign, format_campaign
 
 
 def _offer(monkeypatch: pytest.MonkeyPatch, *, file_rounds: int = 0, ceiling_rounds: int = 0,
-           hand: int = 0, queued: int = 0) -> dict:
+           unplaceable: int = 0, hand: int = 0, queued: int = 0) -> dict:
+    # Round 150: a round counts as payable only when it has exactly one candidate file, so the stub gives each
+    # payable round one and each unplaceable round the two files the queue refuses to choose between.
     monkeypatch.setattr(cli, "_unrecorded_matters",
-                        lambda root, library=None: [("d%d" % index, "round-%d.json" % index, "why", [])
-                                                    for index in range(file_rounds)])
+                        lambda root, library=None: [("d%d" % index, "round-%d.json" % index, "why", ["data/x.json"])
+                                                    for index in range(file_rounds)]
+                        + [("u%d" % index, "round-u%d.json" % index, "why", ["data/a.json", "data/b.json"])
+                           for index in range(unplaceable)])
     monkeypatch.setattr(cli, "_ceiling_matters",
                         lambda root: [("d%d" % index, "round-c%d.json" % index, "why", "data/x.json")
                                       for index in range(ceiling_rounds)])
@@ -91,3 +95,36 @@ def test_the_page_prints_the_offer_under_the_walks_line(tmp_path) -> None:
 def test_a_page_without_an_offer_prints_no_offer_line(tmp_path) -> None:
     printed = format_campaign(campaign(tmp_path))
     assert "re-run offer" not in printed
+
+
+def test_unplaceable_rounds_are_counted_apart(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Round 150: a round with two candidate files is measured by no command -- `--rerun-unrecorded` skips it -- so
+    # counting it as payable promised work nothing performs (boundary 363).
+    offer = _offer(monkeypatch, file_rounds=1, unplaceable=2)
+    assert offer["rounds"] == 1
+    assert offer["unplaceable"] == 2
+    assert "; 2 more keep no unique file, so no command can pay them" in offer["text"]
+
+
+def test_a_queue_that_can_pay_nothing_says_what_holds_the_rest(monkeypatch: pytest.MonkeyPatch) -> None:
+    offer = _offer(monkeypatch, unplaceable=2)
+    assert offer["rounds"] == 0
+    assert offer["command"] == ""
+    assert offer["text"] == ("nothing for the queue to pay today: 2 round(s) keep no unique file, "
+                             "so no command can pay them")
+
+
+def test_the_queue_command_prints_the_offer_and_what_is_left(tmp_path, monkeypatch: pytest.MonkeyPatch,
+                                                             capsys: pytest.CaptureFixture[str]) -> None:
+    # One function, two moments: the sentence before the work answers "what would you pay", the one after answers
+    # "what is left", and each is labelled (boundaries 364/365).
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--rerun-unrecorded", "--rerun-limit", "0"]) == 0
+    text = capsys.readouterr().out
+    offer = [line for line in text.splitlines() if line.startswith("offer ")]
+    left = [line for line in text.splitlines() if line.startswith("left to pay ")]
+    assert offer, text
+    assert left, text
+    assert "nothing for the queue to pay today" in offer[0]
+    assert "nothing for the queue to pay today" in left[0]
+    assert text.index(offer[0]) < text.index(left[0])
