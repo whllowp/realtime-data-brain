@@ -9703,6 +9703,58 @@ source here has them`。`tests/test_payload_sources.py` 里三处断言跟着改
 **边界 429**：一个循环里既有"构造"又有"解析"，那它的措辞必须对每个成员都成立；"built" 对解析成员是假话，
 而这类假话只在那个成员真的出事时才浮出水面。
 
+### 3.186 两个读者，一个 resolver：读不到的时候要说出是哪个文件
+
+第 179 轮给 `--campaign` 找了两处来源，也顺手留下两个隐患：两处读源码用的是两套地址
+（一处按模块定位、一处按 `Path(__file__)`）、两种读法（`read_bytes().decode()` 与 `read_text()`），
+失败时两种说法（一处带路径、一处只有 `substring not found`）。第 179 轮当场就因此红了 43 个闸门测试——
+地址错了，检查本身没错，于是它报了个假的原因。
+
+这一轮把"读哪个文件、怎么读、读不到怎么说"收进两个函数：
+
+```
+SRC_DIR = Path(__file__).resolve().parent
+
+def _source_file(name: str) -> Path:   # 源码都在本模块旁边，不在调用者的当前目录
+    return SRC_DIR / name
+
+def _read_source(name: str) -> str:    # 通用换行；读不到时抛出的句子里带文件
+    try:
+        return _source_file(name).read_text(encoding="utf-8")
+    except OSError as error:
+        raise OSError("src/brian/%s: %s" % (name, error)) from error
+```
+
+`_campaign_keys()` 与 `payload_writer_problems()` 都改走它。真跑一次（`var/prove_180.py`）：
+
+```
+cli.py read from: D:\project\realtime-data-brian\src\brian\cli.py
+no carriage returns: True | lines: 7191
+missing file says: src/brian/nope.py: [Errno 2] No such file or directory: 'D:\project\...\src\brian\nope.py'
+cwd-independent: True
+problems when the class source is gone: 1
+  the keys of --campaign cannot be read here (src/brian/campaign.py: [Errno 2] No such file or directory: 'D:\project\...\src\brian\campaign.py'), so its declaration is unchecked
+restored: True | clean again: []
+```
+
+三件事同时被钉住了：**通用换行**（这个仓库里恰好有一个被跟踪的文件是 CRLF，字节读会把 `\r` 带进锚点比较）、
+**按模块定位**（`cwd-independent: True`——在临时目录里跑，答案不变）、**失败句子带文件**（`src/brian/campaign.py: …`，
+而不是一句"读不到"）。最后那行 `restored: True | clean again: []` 说明证明本身是可逆的：把类源码藏起来、检查必须响、
+还原后必须安静。
+
+**为什么"路径"值得单独一轮**：这条检查从第 166 轮起接在 `--strict` 闸门上，每次 `evolve` 都会跑。它读不到源码时
+的句子会被当成"这份账本有问题"报给使用者，而真实原因是"我在你的工作目录里找不到我自己"。**一个检查的地址错了，
+它给出的每个结论都值得怀疑**——不是因为它总是错的，而是因为它错的时候说得像真的一样。
+
+**边界 430**：一个检查读哪些文件、从哪儿读，必须是它自己的事；地址一旦取决于调用者的当前目录，检查的结论就
+取决于"谁在哪儿跑"，而它报出来的原因会是假的。
+**边界 431**：读失败的句子必须说出**哪个文件**。`cannot be read here` 是症状，不是位置——读者拿着它既不能修，
+也不能判断该不该相信这一轮的其余输出。
+
+**遗留（下一项）**：`--payload-writers` 现在会读 `src/brian/cli.py` 与 `src/brian/campaign.py`，但页面从不列出
+这两个文件名——读者无法知道"被检查的范围"到底包含哪些文件，某个源码被移走时也是等到第一次读失败才知道。
+下一项让页面列出这些文件，并让 `--check` 逐个确认它们存在且可读。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -10380,4 +10432,6 @@ missing for the next level
      还原后字节一致）。builder 编不出来时报「这条没被验」而不是跳过——构造器是权威（§3.184）。
 165. ✅ 把 `--campaign` 的 68 个键也纳入 builder 式的检查（第 179 轮）。`PAYLOAD_BUILDERS` 里新增 `_campaign_keys()`：读 `Campaign.to_dict()` 的返回字面量（按 12 空格缩进只取顶层键，用构造函数自己的 `\n        }\n` 收口）再并上 `cmd_evolve` 的 `if args.campaign:` 分支里 `payload["..."] = ` 的赋值，68 个键逐一对齐；`--check` 因此报 `4 verified shape(s)`。跑一次教了两件事：读 `cli.py` 必须走通用换行（这个文件是 CRLF），读源码必须按模块定位（相对路径让 43 个 chdir 到临时账本的闸门测试变红）。三个 `built` 措辞一并改成 `read/has`。
 
-166. 让 `payload_writer_problems` 与 `_campaign_keys` 共用一处**文件定位**与**读失败说明**：现在一处按模块定位、一处按 `Path(__file__)`，而读不到时只报 `the keys of --campaign cannot be read here (…)`，不说读的是哪个文件。把「哪个文件、哪一行、什么错」一起报出来，并让两个读源码的检查走同一个 resolver。
+166. ✅ 让两处读源码的检查共用一个 resolver，并让读失败说出文件名（第 180 轮）。`SRC_DIR` / `_source_file(name)`（按模块定位）/ `_read_source(name)`（通用换行 + 失败句子带 `src/brian/<file>: …`）进 `src/brian/cli.py`，`_campaign_keys()` 与 `payload_writer_problems()` 都改走它；`var/prove_180.py` 证明 `cwd-independent: True`、CRLF 不再是坑，并且把 `campaign.py` 藏起来时那句话里带着路径。
+
+167. 让 `--payload-writers` 列出 `--check` 读取的**源码文件**（今天是 `src/brian/cli.py` 与 `src/brian/campaign.py`），并由 `--check` 逐个确认存在且可读：页面现在不说清被检查的范围，源码被移走时要等到第一次读失败才暴露。

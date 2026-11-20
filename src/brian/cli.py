@@ -657,6 +657,32 @@ def _dataset_summary_keys() -> Iterable[str]:
     return set(summarise([example]))
 
 
+SRC_DIR = Path(__file__).resolve().parent
+
+
+def _source_file(name: str) -> Path:
+    """Round 180 (item 166): the sources this file checks live beside it, never under the caller's cwd.
+
+    Round 179 found `Path("src/brian/campaign.py")` turning 43 gate tests red from a fixture directory: the check
+    was right and its address was wrong (boundary 430). Two readers means two chances to write the address twice,
+    so both go through here.
+    """
+    return SRC_DIR / name
+
+
+def _read_source(name: str) -> str:
+    """Read one module source with universal newlines, naming the file when it cannot be read.
+
+    `src/brian/cli.py` is the one tracked file stored with CRLF, so a byte read would keep `\r\n` and every anchor
+    written with `\n` would miss (round 179). And an OSError without a path says something went wrong without
+    saying where, which is the only thing a reader can act on (boundary 431).
+    """
+    try:
+        return _source_file(name).read_text(encoding="utf-8")
+    except OSError as error:
+        raise OSError("src/brian/%s: %s" % (name, error)) from error
+
+
 def _campaign_keys() -> Iterable[str]:
     """`Campaign.to_dict()`'s keys plus the nine the campaign branch assigns.
 
@@ -664,14 +690,14 @@ def _campaign_keys() -> Iterable[str]:
     (boundary 427). So this reads the two places that decide the keys instead: the class's own return literal and
     the `payload["..."] = ` assignments inside `if args.campaign:` (boundary 428).
     """
-    class_text = (Path(__file__).resolve().parent / "campaign.py").read_text(encoding="utf-8")
+    class_text = _read_source("campaign.py")
     start = class_text.index("\nclass Campaign:")
     method = class_text[start:].index("    def to_dict(self)")
     literal = class_text[start + method:]
     literal = literal[literal.index("return {"):]
     literal = literal[: literal.index("\n        }\n") + 1]
     class_keys = set(re.findall(r'\n {12}"([a-z_0-9]+)":', literal))
-    branch = Path(__file__).read_text(encoding="utf-8")
+    branch = _read_source("cli.py")
     branch = branch[branch.index("    if args.campaign:"):]
     branch = branch[: branch.index("\n        return gate_code\n")]
     return class_keys | set(re.findall(r'\n\s+payload\["([a-z_0-9]+)"\] = ', branch))
@@ -830,7 +856,7 @@ def payload_writer_problems(source: Optional[str] = None) -> List[str]:
     text = source
     if text is None:
         try:
-            text = Path(__file__).read_bytes().decode("utf-8")
+            text = _read_source("cli.py")
         except OSError as error:  # pragma: no cover - the file is this module
             return ["cannot read my own source to check the inventory: %s" % error]
     calls = payload_writer_calls(text)
