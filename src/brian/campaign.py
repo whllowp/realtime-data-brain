@@ -176,6 +176,10 @@ class Campaign:
     queue_history: Dict[str, Any] = field(default_factory=dict)
     blocked_dossier: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     stale_refusals: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 107: per promise, how many of the recorded walks refused it, when the first and the last were, and whether
+    # the refusal still stands. `blocked_versions` answers the last question only, so a promise refused twice and then
+    # repaired read exactly like one refused once an hour ago.
+    refusal_history: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Rounds a re-measurement superseded: still in the ledger, no longer re-decided (round 34).
     retired: int = 0
     # Refusals the loop still holds: the count `previously_rejected` would return, and how many of them
@@ -277,6 +281,7 @@ class Campaign:
             "queue_history": dict(self.queue_history),
             "blocked_dossier": {str(key): dict(value) for key, value in self.blocked_dossier.items()},
             "stale_refusals": [dict(item) for item in self.stale_refusals],
+            "refusal_history": {str(key): dict(value) for key, value in self.refusal_history.items()},
             "in_force_untested": self.in_force_untested,
             "domains": [row.to_dict() for row in self.rows],
         }
@@ -323,7 +328,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
              queue_run: Optional[Mapping[str, Any]] = None,
              queue_history: Optional[Mapping[str, Any]] = None,
              blocked_dossier: Optional[Mapping[str, Mapping[str, Any]]] = None,
-             stale_refusals: Optional[Sequence[Mapping[str, Any]]] = None) -> Campaign:
+             stale_refusals: Optional[Sequence[Mapping[str, Any]]] = None,
+             refusal_history: Optional[Mapping[str, Mapping[str, Any]]] = None) -> Campaign:
     """Summarise every recorded round, grouped by the stream each one measured.
 
     A round that does not say which stream it measured cannot be attributed to a domain, and is counted
@@ -529,6 +535,8 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.queue_run = dict(queue_run) if isinstance(queue_run, Mapping) else None
     result.queue_history = dict(queue_history or {})
     result.stale_refusals = [dict(item) for item in (stale_refusals or [])]
+    result.refusal_history = ({str(key): dict(value) for key, value in refusal_history.items()}
+                              if isinstance(refusal_history, Mapping) else {})
     result.blocked_dossier = ({str(key): dict(value) for key, value in blocked_dossier.items()}
                            if isinstance(blocked_dossier, Mapping) else {})
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
@@ -1072,6 +1080,19 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                 lines.append("links             origins skipped on more than one walk: %s"
                              % "; ".join("%s %d" % (name, count) for name, count in sorted(repeated.items())))
 
+    # Round 107: a refusal history, not only the refusals that still stand. One line per promise: how many of the
+    # recorded walks refused it, when the first and last were, and whether it still does. The reason is not repeated
+    # here -- the dossier prints it once per origin file.
+    for key in sorted(result.refusal_history, key=lambda item: int(item) if str(item).isdigit() else 0):
+        entry = result.refusal_history.get(key) or {}
+        count = int(entry.get("count") or 0)
+        if not count:
+            continue
+        lines.append("links             v%03d was refused by the queue %d time(s) among %d recorded walk(s): first %s, last %s%s"
+                     % (int(entry.get("version") or 0), count, int(entry.get("walks") or 0),
+                        str(entry.get("first_at") or "?"), str(entry.get("last_at") or "?"),
+                        ", and the refusal still stands" if entry.get("standing")
+                        else ", and it no longer stands"))
     stale = result.stale_refusals
     if isinstance(stale, list) and stale:
         # Round 106: the books moved, so these refusals no longer stand and the queue can try them again without

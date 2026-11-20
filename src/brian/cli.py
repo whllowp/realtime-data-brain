@@ -100,6 +100,7 @@ from .promote import (
     in_force_disputes,
     in_force_history,
     blocked_versions,
+    refusal_history,
     last_queue_run,
     in_force_overrides,
     legacy_state_note,
@@ -1717,6 +1718,21 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # someone walked the queue, tried this promise, and the walk ended on a build defect. A reader asking "why is
         # this row never measured" needs the second sentence, and only `blocked_versions` knows it.
         blocked_rows = blocked_versions(root)
+        # Round 107: the row's job is to say the queue tried and was refused, and when. A promise refused twice and
+        # then repaired needs more than the standing refusal: how many walks refused it, and the first and last
+        # stamp, so "this version was refused" and "it has not been refused for a while" read apart.
+        refusal_rows = refusal_history(root)
+        # Round 107: the counts, the first and the last belong on one header line, the way the link and ceiling
+        # headers carry their own counts. A long mark repeated on every row that produced the version is not
+        # emphasis -- round 105 already learned that with the contradiction sentence (boundary 235).
+        for version in sorted(refusal_rows):
+            entry = refusal_rows.get(version) or {}
+            _print("refusals          v%03d was refused by the queue %d time(s) among %d recorded walk(s): "
+                   "first %s, last %s%s"
+                   % (version, int(entry.get("count") or 0), int(entry.get("walks") or 0),
+                      str(entry.get("first_at") or "?"), str(entry.get("last_at") or "?"),
+                      ", and the refusal still stands" if entry.get("standing")
+                      else ", and it no longer stands"))
         if link_defects:
             _print("links             %d replacement link(s) disagree with their other end: %s"
                    % (len(link_defects), ", ".join(sorted({str(item["round"]) for item in link_defects}))))
@@ -1872,14 +1888,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # sentence twice reads as two separate defects. The row says it once; the header says how many.
                 if others and sentence not in mark:
                     mark += sentence
-            for version, blocked in blocked_rows.items():
+            # Round 107: the row is about what happened to this promise, not only about what is still true of it. A
+            # refusal the ledger has since answered is history a reader searching for "why was this never measured"
+            # still needs, so the loop walks every refused promise and says which kind it is.
+            for version in sorted(refusal_rows):
                 if version not in produced_versions:
                     continue
+                blocked = blocked_rows.get(version)
                 # The long sentence (which record's book contradicts this promise) belongs on the campaign page,
                 # where it is printed once per origin file. On a row it would repeat on every record that produced
                 # the version and bury the column it sits in -- the row's job is to say the queue tried and was
                 # refused, and when.
-                mark += "  [refused by the queue on %s]" % (str(blocked.get("at") or "an unrecorded walk"))
+                # The row carries the short fact; the header above carries the counts and the stamps.
+                mark += "  [refused by the queue]" if not blocked else "  [refused by the queue, still standing]"
             _print("%2d  %s  accepted=%-24s recall@b %s -> %s  tokens/report %5s -> %s%s"
                    % (index, record.get("finished_at") or record.get("started_at") or "?",
                       ",".join(accepted) or "-", baseline_recall, recall_after, baseline, after, mark))
@@ -2291,7 +2312,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                      in_force_stale=in_force_stale_rows, in_force_history=in_force_record,
                                      queue_run=last_queue_run(root), queue_history=queue_history(root),
                                      blocked_dossier=blocked_dossier(root),
-                                     stale_refusals=stale_refusals(root))
+                                     stale_refusals=stale_refusals(root),
+                                     refusal_history=refusal_history(root))
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2

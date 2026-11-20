@@ -127,7 +127,9 @@ def test_the_history_row_says_the_queue_was_refused(tmp_path, monkeypatch, capsy
     monkeypatch.chdir(tmp_path)
     assert cli.cmd_evolve(argparse.Namespace(history=True), None) == 0
     out = capsys.readouterr().out
-    assert "[refused by the queue on " in out
+    # Round 107: the row carries the short fact, the header carries the count and the stamps.
+    assert "[refused by the queue, still standing]" in out
+    assert "was refused by the queue 1 time(s) among" in out
     # The row names the walk; the campaign names the book that refused it.
     assert "one of the records in a mismatch link" not in out
 

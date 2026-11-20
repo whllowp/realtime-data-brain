@@ -1870,6 +1870,47 @@ def stale_refusals(root: Path) -> List[Dict[str, Any]]:
     return stale
 
 
+def refusal_history(root: Path) -> Dict[int, Dict[str, Any]]:
+    """Every refusal the recorded walks left behind, per promise (round 107).
+
+    `blocked_versions` answers "is this promise refused *now*", which is all a queue needs and not enough for a
+    reader: a promise refused twice and then repaired and one refused once an hour ago print the same row. The runs
+    the store still holds have each attempt with its stamp, so the history is a scan -- first refusal, last refusal,
+    how many walks refused it, and whether the refusal still stands. It is a *windowed* history: `walks` says how
+    many runs are in the store, because a count over a trimmed store is not a count over all time (boundary 239).
+    """
+    held = queue_runs(root)
+    runs = [run for run in held["runs"] if isinstance(run, Mapping)]
+    standing = blocked_versions(root)
+    history: Dict[int, Dict[str, Any]] = {}
+    # Newest first: the first stamp seen for a promise is the newest refusal, the last one is the oldest.
+    for run in reversed(runs):
+        moment = str(run.get("at") or "")
+        for item in run.get("attempted") or []:
+            if not isinstance(item, Mapping) or int(item.get("code") or 0) != 2:
+                continue
+            version = int(item.get("version") or 0)
+            if not version:
+                continue
+            row = history.setdefault(version, {"version": version, "count": 0, "first_at": "", "last_at": "",
+                                              "reasons": [], "walks": len(runs), "_moments": []})
+            row["count"] += 1
+            row["_moments"].append(moment)
+            why = str(item.get("why") or "")
+            if why and why not in row["reasons"]:
+                row["reasons"].append(why)
+    for version, row in history.items():
+        row["standing"] = version in standing
+        row["walks"] = len(runs)
+        # The scan runs newest-first, so the stamps must be ordered after the fact: "first" is the oldest refusal,
+        # and printing the newest one under that word makes a promise look twice as recently refused as it was.
+        moments = sorted(str(item or "") for item in row.pop("_moments", []))
+        if moments:
+            row["first_at"] = next((item for item in moments if item), "")
+            row["last_at"] = next((item for item in reversed(moments) if item), "")
+    return history
+
+
 def _blocked_reason(root: Path, version: int) -> str:
     """Why the ledger refuses this version, in words a reader can act on (round 105).
 

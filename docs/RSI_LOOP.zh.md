@@ -5775,6 +5775,59 @@ from queue       1 of 1 runnable promise(s) hold no verdict on the file they wer
 **边界 238**：账本自己已经答掉的拒绝，必须在没有任何绕行开关的情况下失效；否则 `--retry-blocked` 变成常规入口，
 而常规入口就是没有人去量过的那个入口。
 
+### 3.113 一条被挡过的承诺，值得一份拒绝史
+
+第 105 轮让 `--history` 的行带上 `[refused by the queue on <at>]`，第 106 轮让修好的账本自己解掉拒绝。两次都只回答
+"**现在**还被挡着吗"——一个被挡过两次、随后修好、再没被挡过的承诺，和一个一小时前刚被挡的承诺，在页面上长得一模一样。
+
+第 107 轮把存下来的那几趟走当成一份史来读：`refusal_history()` 扫一遍 `queue_runs.json` 里的每一趟，按承诺汇总
+"被挡了几趟、第一次、最后一次、现在还成不成立"。
+
+```
+refusals          v020 was refused by the queue 1 time(s) among 1 recorded walk(s): first 2026-11-20T00:56:51.776676+00:00, last 2026-11-20T00:56:51.776676+00:00, and the refusal still stands
+```
+
+修好之后，同一行改口，而拒绝本身不会被删掉——那一趟确实走过：
+
+```
+refusals          v020 was refused by the queue 2 time(s) among 4 recorded walk(s): first 2026-11-20T00:34:56.791204+00:00, last 2026-11-20T00:37:28.706167+00:00, and it no longer stands
+```
+
+`--campaign` 用同一份数字，只是把"第几趟"说成一句话：
+
+```
+links             v020 was refused by the queue 2 time(s) among 4 recorded walk(s): first …, last …, and it no longer stands
+links             blocked by the books: data/smd/stream-real.json 1 promise(s) (v020), 1 refusal(s) across none retried, last … -- round-old.json is one of the records in a mismatch link: …
+```
+
+三个缺陷都是**跑**出来的，而且一个比一个更说明"计数"这件事本身。
+
+第一个：**"第一次"印成了最新的那次**。扫描是从新到旧（这个存储里所有列表都是新在前），`first_at` 就在第一次遇见时
+被赋值，于是印出来的"first"是最近的那趟。第一版实测 `first 00:37 … last 00:34`，顺序反了——读者会以为这条承诺
+刚刚才被挡。现在把时间戳收齐再排：`first` 是最旧、`last` 最新。
+
+第二个：**同一句长标记印在每一行**。一条承诺可能由三条记录产出（`applied` 都含 `v020`），三轮的 `round-other`/`round-old`/
+`round-new` 各自成行，于是同一句"被挡过 2 次、第一次、最后一次"在页面上出现三遍，三行都被撑到两百列开外。这正是
+第 105 轮的边界 235：长句子属于它描述的那个对象，行只留短事实。现在行上是 `[refused by the queue, still standing]`，
+计数与时间戳归一行表头：
+
+```
+refusals          v020 was refused by the queue 1 time(s) among 1 recorded walk(s): first …, last …, and the refusal still stands
+```
+
+第三个：**拒绝已经失效的承诺，行上什么都不印了**。第一版的行循环遍历的是 `blocked_rows`（现在还成立的拒绝），
+所以"拒绝已失效"这条史只出现在表头、不出现在它自己的行上——而"为什么这一轮从没被量过"的读者恰恰是在找那一行。
+循环改为遍历 `refusal_rows`，行上仍印短标记，表头说明它已不成立。
+
+**边界 239**：从一个会被裁剪的存储里算出来的历史，必须同时说出它覆盖了几趟走（`among N recorded walk(s)`），
+否则一个窗口里的计数会被读成有史以来的计数。
+
+**边界 240**："第一次"和"最后一次"必须按时间排，不能按扫描顺序——日志是新在前读的，把最新的时间戳印在"第一次"
+这个词下面，读者读到的频率会翻倍。
+
+**边界 241**：同一条事实在每一行上重复，不是强调而是噪声；一条承诺由多条记录产出时，计数属于表头，行只留短标记。
+这是边界 235 的第二个字段：上一轮是"哪本书挡的"，这一轮是"挡了几次"。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6198,4 +6251,6 @@ missing for the next level
     再让 `--retry-blocked` 只重试那些账本真的变过的记录（比对挡下时的 `provenance_block` 详情与今天的）。
 
 
-93. 给 `--campaign` 一份"拒绝史"：每条被挡过的承诺，第一次被挡在哪一趟、被挡了几趟、最后一次是哪一趟；并让 `--history` 的 `[refused by the queue on …]` 标记能指出是哪一趟走过（用 `at` 连到 `queue_runs.json` 的那一条），这样"这个版本被挡过"和"它已经很久没被挡了"可以分开读。
+93. （已完成）给每条被挡过的承诺一份拒绝史：`refusal_history()` 按承诺汇总"被挡几趟、第一次、最后一次、是否还成立"；`--history` 用一行 `refusals` 表头承载计数与时间戳、行上只留短标记；`--campaign` 与 `--json-out` 用同一份数字。文档 §3.113，测试 `tests/test_refusal_history.py`（10 项）。
+
+94. 让 `--campaign` 把拒绝史和档案连起来：档案行（按原件文件分组）里补上"这份原件上的承诺合起来被挡过几趟"，并让 `--history` 的 `refusals` 表头点出最近一趟走的所有被挡承诺，使"这个文件上问题最集中的一处"能一眼看到；同时给 `refusal_history()` 一份 `first_walk`/`last_walk` 的趟号（在窗口内的序号），让"第 3 趟被挡、第 4 趟修好"这种句子可以直接写出来。
