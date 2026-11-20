@@ -183,6 +183,10 @@ class Campaign:
     in_force_history: Dict[str, Any] = field(default_factory=dict)
     queue_run: Optional[Dict[str, Any]] = None
     queue_history: Dict[str, Any] = field(default_factory=dict)
+    #: Round 143: every walk the store holds, in its own order, each carrying the ordinal the store gives it. The page
+    #: printed the last walk and the summary counted all of them; nothing said *which* record a reader who opened
+    #: `var/evolve/queue_runs.json` was looking at (boundary 342).
+    walks: List[Dict[str, Any]] = field(default_factory=list)
     blocked_dossier: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     repair_plan: List[Dict[str, Any]] = field(default_factory=list)
     repair_history: Dict[str, Any] = field(default_factory=dict)
@@ -315,6 +319,7 @@ class Campaign:
             "in_force_cleared_history": dict(self.in_force_history),
             "queue_run": dict(self.queue_run) if isinstance(self.queue_run, Mapping) else None,
             "queue_history": dict(self.queue_history),
+            "walks": [dict(item) for item in self.walks],
             "blocked_dossier": {str(key): dict(value) for key, value in self.blocked_dossier.items()},
             "repair_plan": [dict(item) for item in self.repair_plan],
             "repair_history": {str(key): value for key, value in self.repair_history.items()},
@@ -584,6 +589,13 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.in_force_history = dict(in_force_history or {})
     result.queue_run = dict(queue_run) if isinstance(queue_run, Mapping) else None
     result.queue_history = dict(queue_history or {})
+    # Round 143: the store's own order, numbered, so the page and a payload can both name a walk by position instead
+    # of by a timestamp a reader has to match by hand. The ordinal is the store's position, never a counter kept
+    # somewhere else -- a second counter would be a second account of how many walks there have been.
+    try:
+        result.walks = [dict(run, ordinal=index + 1) for index, run in enumerate(queue_runs(root)["runs"])]
+    except OSError:
+        result.walks = []
     result.stale_refusals = [dict(item) for item in (stale_refusals or [])]
     result.refusal_history = ({str(key): dict(value) for key, value in refusal_history.items()}
                               if isinstance(refusal_history, Mapping) else {})
@@ -1443,6 +1455,12 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                                           int(run.get("runnable") or 0), int(run.get("skipped") or 0)))
         if int(run.get("cleared") or 0):
             line += ", and %d of those measurements left a clearing" % int(run.get("cleared") or 0)
+        # Round 143: which walk this was. A payload says the same number, so "the last run" and "walk 3 of 7" name
+        # one record instead of two descriptions of one store.
+        ordinal = next((int(item.get("ordinal") or 0) for item in result.walks
+                        if str(item.get("at") or "") == str(run.get("at") or "")), 0)
+        if ordinal:
+            line += " (walk %d of %d)" % (ordinal, len(result.walks))
         lines.append(line)
         if int(run.get("stopped_at") or 0):
             lines.append("links             it stopped at v%03d, which exited 2: a build defect is not something "

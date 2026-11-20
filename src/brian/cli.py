@@ -183,6 +183,26 @@ def _json(payload: Any) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False, default=str)
 
 
+def _walk_store(root: Path, entry: Mapping[str, Any]) -> Dict[str, Any]:
+    """Which record in the walk store a payload just handed over (round 143).
+
+    Round 142 made the queue walk hand over the record it keeps, and the campaign summarised all of them; neither
+    said *which* record it was reading, so a script holding the payload and a reader holding
+    `var/evolve/queue_runs.json` had to line them up by timestamp. The ordinal is the store's own position (boundary
+    342): it is read back from the store rather than counted on the side, so the two cannot drift.
+    """
+    try:
+        runs = queue_runs(root)["runs"]
+    except OSError:
+        runs = []
+    stamp = str(entry.get("at") or "")
+    ordinal = 0
+    for index, run in enumerate(runs):
+        if str(run.get("at") or "") == stamp:
+            ordinal = index + 1
+    return {"path": "var/evolve/queue_runs.json", "ordinal": ordinal, "of": len(runs)}
+
+
 def _write_payload(path: str, payload: Any) -> bool:
     """Write a JSON payload the way every command writes it, and say where it went.
 
@@ -4018,7 +4038,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # Round 142: a walk that measured nothing is still a walk, and what it hands over is the record it
                 # just wrote -- the same numbers the campaign page reads (boundary 340).
                 if getattr(args, "json_out", None):
-                    _write_payload(args.json_out, {"walks": [empty_entry]})
+                    _write_payload(args.json_out, {"store": _walk_store(root, empty_entry),
+                                                   "walks": [empty_entry]})
                 return 0
             if from_queued is not None and not from_queue:
                 # Round 102: a plan, not a measurement. It lists exactly the records `--from-queue N` would walk, in
@@ -4129,7 +4150,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # Round 142: the walk used to null `json_out` for every inner record (one file per record would overwrite
             # itself) and hand the caller nothing. One record for the whole walk is what it owes, and it is the record
             # the store just kept (boundary 340).
-            if getattr(args, "json_out", None) and not _write_payload(args.json_out, {"walks": [walk_entry]}):
+            if getattr(args, "json_out", None) and not _write_payload(
+                    args.json_out, {"store": _walk_store(root, walk_entry), "walks": [walk_entry]}):
                 worst = max(worst, 2)
             _print("")
             if stopped_at:
