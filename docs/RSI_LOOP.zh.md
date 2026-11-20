@@ -9353,6 +9353,51 @@ inconsistent      the source can report why_empty = "', 1)[1].split('" and the p
 检查越来越沉默。清单只能取自被核的源码。
 **边界 415**：靠 token 匹配的扫描器一定会扫到它自己；按语句形状匹配，它扫不到。
 
+### 3.180 一行 `{...}` 不是说明，是承诺：payload 键集合的声明与拒绝
+
+清单页上每条命令后面跟着一段 `{...}`，二十二轮以来它一直是**散文**。`--audit` 那行写的是"审计报告、它的上限
+和它的收费清单"——真实 payload 有 **14 个键**（`ceiling_drift`、`entries`、`gate`、`limits`、`limits_text`、
+`rules_hash`、`settlements`……），而清单上一个都没写。于是第 160 项问的那个问题一直无人回答：某条命令少写一个
+键、或多写一个没人要的键，页面照样通过，读 payload 的脚本才在运行中发现。
+
+现在的做法是：**键集合声明一次，页面从声明渲染，写入处按声明拒绝。**
+
+```
+A payload's keys are declared for 3 row(s) -- --audit, --history, --unrecorded -- and checked where the payload is built:
+_write_payload refuses a payload whose keys disagree with the declaration (boundary 416). Every
+other row describes its payload in prose: `--campaign` alone writes far more keys than the four
+words it lists, and none of them is declared yet (boundary 417).
+
+  --history                                  reports                 {"ceilings", "claim_counts", "gate", "in_force_clearings", "links", "rounds", "stream_path_moves"}
+  --unrecorded                               reports                 {"ceilings", "gate", "matters", "out_of_reach", "payable", "rounds", "unattributed", "why_empty"}
+  --audit                                    reports                 {"ceiling_drift", "entries", "gate", "inconsistent", "limits", "limits_text", "moved", "relabelled", "retired", "rounds", "rules_hash", "settlements", "trials", "unreconstructable"}
+```
+
+`PAYLOAD_KEYS` 是那份声明，`_write_payload(..., keys=...)` 在**写入的那一刻**对：
+
+```
+payload shape     the payload this command built does not match the inventory:
+                  built but not declared: unattributed, matters, payable, out_of_reach, ceilings, gate
+                  PAYLOAD_KEYS in src/brian/cli.py is the declaration; both sides move together
+```
+
+（这是把声明故意改错之后真跑出来的：报告已经打印，导出被拒，退出码 2——与边界 337 一致，缺的只是导出。）
+
+`--payload-writers --check` 仍然通过，并且照样只核一件事：声明的每个键在源码里确实出现过（`"gate"`、`"entries"`
+这些字面量），核不到就报 `was declared from memory`。
+
+**为什么不在页面上核对"行里写的键 vs 声明"？** 因为行是从声明渲染的，再读回来核，测的是格式化函数和它自己
+是否一致——永远绿，而且看起来很像在尽责（边界 418）。真正会漂的是**声明 vs 命令**，所以核对放在写入处。
+
+**这件事的代价要写在纸上。** 24 行里只有 3 行有声明，而 `--campaign` 一个 payload 就有 **70 个键**——页面上那
+四个词（"战役报告，链接和队列"）离它有多远，任何人都看不出来。所以页面那一句必须说"其余行仍是散文"，而不是
+让"检查通过"去暗示 24 行都被核过（边界 417）。
+
+**边界 416**：一个关于某条命令的声明，要在**这条命令真的构造 payload 的地方**被核对；页面对页面、测试对测试，
+漂移就在两页之间发生。
+**边界 417**：一份只覆盖 3/24 的清单必须自己说出覆盖率；"检查通过"不能替未被检查的 21 行背书。
+**边界 418**：从声明渲染出来的东西，再读回来核对，测的是渲染器与它自身的一致性——那不是检查，是自证。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -10008,4 +10053,8 @@ missing for the next level
 
 159. 让 `--unrecorded` 的空页也在清单上说清三种 `why_empty` 取值（每个取值一句说明），并让
      `--payload-writers --check` 从源码核对每条取值恰好赋值一次（已完成，见 §3.179；清单取自源码，不取自页面自己的常量）。
-160. 让 `--payload-writers --check` 也核对表格里每一行的 payload 键集合：今天它核行数、核文件级形态、核 `why_empty` 取值，但一行的 `{...}` 里列了哪些键仍只是文字——某条命令少写一个键（或写上一个它从不写出的键），页面照样通过，读 payload 的脚本才在运行中发现。
+160. 让 `--payload-writers --check` 也核对表格里每一行的 payload 键集合（已完成一半，见 §3.180）：3 行有
+     声明（`--audit`/`--history`/`--unrecorded`），页面从声明渲染，`_write_payload(keys=…)` 在写入处拒绝，
+     页面自报覆盖率。剩下 21 行仍是散文。
+161. 把剩下 21 行的键集合也声明出来，从 `--campaign` 开始（它一个 payload 就有 70 个键，页面上还只是四个词）：
+     声明要**从源码的构造处读**，不能凭一次运行的输出抄——抄下来的集合没人核，就成了第二个页面。

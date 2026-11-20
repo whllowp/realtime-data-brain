@@ -229,7 +229,8 @@ def _walk_store(root: Path, entry: Mapping[str, Any]) -> Dict[str, Any]:
     return {"path": "var/evolve/queue_runs.json", "ordinal": ordinal, "of": len(runs)}
 
 
-def _write_payload(path: str, payload: Any, recorded: bool = True) -> bool:
+def _write_payload(path: str, payload: Any, recorded: bool = True,
+                   keys: Optional[Tuple[str, ...]] = None) -> bool:
     """Write a JSON payload the way every command writes it, and say where it went.
 
     Round 141: the settlement commands wrote their payload with a bare `open(...)`, printed nothing, and raised a
@@ -241,6 +242,20 @@ def _write_payload(path: str, payload: Any, recorded: bool = True) -> bool:
     `recorded=False` is for the report pages (`--history`, `--campaign`, round 162): they change no book, so the
     failure sentence must say that only the export is missing rather than report a store change that never happened.
     """
+    # Round 174 (item 160): a declared shape is a claim about *this* command, so the writer checks it where the
+    # command builds a payload -- not on the page, and not only in a test that can drift with the page.
+    if keys is not None and isinstance(payload, dict):
+        missing = [key for key in keys if key not in payload]
+        extra = [key for key in payload if key not in keys]
+        if missing or extra:
+            _print("payload shape     the payload this command built does not match the inventory:")
+            if missing:
+                _print("                  declared but missing: %s" % ", ".join(missing))
+            if extra:
+                _print("                  built but not declared: %s" % ", ".join(extra))
+            _print("                  PAYLOAD_KEYS in src/brian/cli.py is the declaration; both sides move "
+                   "together")
+            return False
     target = Path(path)
     try:
         if not str(path).strip():
@@ -540,6 +555,20 @@ PAYLOAD_BATCH_FORMS: Tuple[str, ...] = (
 # named, so the next one is printed rather than left out (an empty tuple is a claim the page can make out loud).
 PAYLOAD_NONE: Tuple[str, ...] = ()
 
+# Round 174 (item 160): the keys each payload carries, declared once. `_write_payload` refuses a payload that
+# disagrees with its declaration, so the column and the command cannot drift in either direction -- a row
+# naming a key nothing writes, or a command writing a key no row names (boundary 416).
+# Rows not listed here still describe their payload in prose; `format_payload_writers` says so on the page.
+PAYLOAD_KEYS: Dict[str, Tuple[str, ...]] = {
+    "--audit": ("ceiling_drift", "entries", "gate", "inconsistent", "limits", "limits_text", "moved",
+                "relabelled", "retired", "rounds", "rules_hash", "settlements", "trials",
+                "unreconstructable"),
+    "--history": ("ceilings", "claim_counts", "gate", "in_force_clearings", "links", "rounds",
+                  "stream_path_moves"),
+    "--unrecorded": ("ceilings", "gate", "matters", "out_of_reach", "payable", "rounds", "unattributed",
+                     "why_empty"),
+}
+
 # Round 173 (item 159): the three nothings `--unrecorded` can find, and what each one means. The page names them
 # because `why_empty` is a value a script branches on, and a value nobody documents is a value somebody guesses
 # at; `payload_writer_problems` checks that every one of them is assigned in exactly one place in the source.
@@ -555,7 +584,10 @@ def format_payload_writers() -> str:
     lines = ["brian payload writers: %d command(s), one writer" % len(PAYLOAD_WRITERS)]
     lines.append("")
     for command, payload, kind in PAYLOAD_WRITERS:
-        lines.append("  %-42s %-23s %s" % (command, kind, payload))
+        # Round 174 (item 160): a declared row is rendered from the declaration, so the page cannot describe a
+        # payload the writer would refuse -- prose rows keep their prose and are named as such below.
+        shown = '{"' + '", "'.join(PAYLOAD_KEYS[command]) + '"}' if command in PAYLOAD_KEYS else payload
+        lines.append("  %-42s %-23s %s" % (command, kind, shown))
     lines.append("")
     lines.append("the file-level forms %s write" % ", ".join(PAYLOAD_BATCH_FORMS))
     lines.append("the record list of their single form: one writer, because the single form is the one that writes it.")
@@ -580,6 +612,12 @@ def format_payload_writers() -> str:
     lines.append("  changed a book  what this command recorded is already in the store: only the payload is missing")
     lines.append("  only reported   nothing was recorded: this command only reports, so only its export is missing")
     lines.append("                  -- also what a `records, unless --dry-run` row says while it previews (boundary 395)")
+    lines.append("")
+    lines.append("A payload's keys are declared for %d row(s) -- %s -- and checked where the payload is built:"
+                 % (len(PAYLOAD_KEYS), ", ".join(sorted(PAYLOAD_KEYS))))
+    lines.append("_write_payload refuses a payload whose keys disagree with the declaration (boundary 416). Every")
+    lines.append("other row describes its payload in prose: `--campaign` alone writes far more keys than the four")
+    lines.append("words it lists, and none of them is declared yet (boundary 417).")
     lines.append("")
     lines.append("A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this")
     lines.append("table and its count move together (boundary 392).")
@@ -607,7 +645,8 @@ def _write_unrecorded_payload(args: argparse.Namespace, payload: Dict[str, Any])
     """
     if not getattr(args, "json_out", None):
         return True
-    return _write_payload(args.json_out, payload, recorded=False)
+    return _write_payload(args.json_out, payload, recorded=False,
+                          keys=PAYLOAD_KEYS["--unrecorded"])
 
 
 def payload_writer_problems(source: Optional[str] = None) -> List[str]:
@@ -636,6 +675,20 @@ def payload_writer_problems(source: Optional[str] = None) -> List[str]:
     # Round 173 (item 159): a value the page names and the source never assigns is a promise nothing keeps; a
     # value assigned twice is two statements about the same nothing (boundary 414). The reasons live on the
     # page rather than in the table's command column, so this reads the page the caller sees.
+    # Round 174 (item 160): a declared shape must be a row, must name its keys on the page, and must name keys
+    # the source actually mentions -- a declaration nobody can find in the code is a plan, not an inventory.
+    rendered = {row[0]: row[1] for row in PAYLOAD_WRITERS}
+    for command, declared_keys in sorted(PAYLOAD_KEYS.items()):
+        if command not in rendered:
+            problems.append("the shape of %s is declared and the table has no row for it" % command)
+            continue
+        # The row is *rendered* from this declaration (see format_payload_writers), so re-reading the row back
+        # would test the formatter against itself; what is checked here is that the source names each key at all
+        # (boundary 418: a check that reads its own output back tests nothing, and looks diligent).
+        for key in declared_keys:
+            if '"%s"' % key not in text:
+                problems.append("the key %r of %s appears nowhere in this source: it was declared from memory"
+                                % (key, command))
     page = format_payload_writers()
     documented = {reason: meaning for reason, meaning in WHY_EMPTY_REASONS}
     # Only a line that *starts* with the assignment is one; the lines of this scanner quote the same token and
@@ -3112,7 +3165,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # computation that can disagree with the sentence printed beside it (boundary 385).
                 "claim_counts": history_counts.to_dict(),
                 "gate": history_gate,
-            }):
+            }, keys=PAYLOAD_KEYS["--history"]):
                 # Round 161 (item 148): this page wrote its payload with a bare Path.write_text and printed the
                 # line itself, so a missing directory raised FileNotFoundError -- the exact shape round 141
                 # collected out of the settlement commands (boundaries 336/337). The page is a report, not a
@@ -4041,7 +4094,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unanswered_file=str(_worst_withdrawn.get("origin") or ""),
                             into=gate_report)
         gate_report["exit"] = gate_code
-        if args.json_out and not _write_payload(args.json_out, payload, recorded=False):
+        if args.json_out and not _write_payload(args.json_out, payload, recorded=False,
+                                               keys=PAYLOAD_KEYS["--audit"]):
             return 2
         return gate_code
 
