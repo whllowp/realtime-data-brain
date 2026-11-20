@@ -3447,6 +3447,61 @@ def reanchor_settlement(root: Path, record: str, why: str = "", by: str = "",
             "history": len(trail)}
 
 
+def reanchor_plan(rounds: Sequence[Mapping[str, Any]],
+                  settlements: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The decisions still pointing where their record no longer points, grouped by the record's file (round 139).
+
+    Round 138 gave a single decision a way to follow its record; a file that was retargeted owes the same step N
+    times, and typing it N times is how one gets skipped (boundary 277 one level down, boundary 301's rule that a
+    queue grouped by file must be payable by one command). Only *standing* decisions are grouped: a withdrawn one
+    owes nothing (boundary 293), and one that already names the record's successor owes nothing either.
+    """
+    by_name = {str(item.get("round") or ""): item for item in rounds}
+    buckets: Dict[str, Dict[str, Any]] = {}
+    for item in active_settlements(settlements):
+        record = str(item.get("record") or "")
+        if not record:
+            continue
+        named = _named_successor(by_name.get(record))
+        if not named or named == str(item.get("successor") or ""):
+            continue
+        origin = str((by_name.get(record) or {}).get("stream_path") or "")
+        bucket = buckets.setdefault(origin, {"origin": origin, "records": [], "pairs": [], "batch": ""})
+        bucket["records"].append(record)
+        bucket["pairs"].append({"record": record, "from": str(item.get("successor") or ""), "to": named})
+    rows = sorted(buckets.values(), key=lambda row: (-len(row["records"]), row["origin"]))
+    for row in rows:
+        row["batch"] = ("brian evolve --settle-reanchor-file %s --settle-why TEXT --settle-by NAME" % row["origin"]
+                        if row["origin"] else "")
+    return rows
+
+
+def preview_reanchor_change(settlements: Sequence[Mapping[str, Any]], rounds: Sequence[Mapping[str, Any]],
+                            records: Sequence[str], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """A copy of the store with those decisions re-anchored, nothing written (round 139).
+
+    Round 131's rule: a preview and the run it previews must share one computation, or the prophecy drifts from the
+    books. So this does exactly what `reanchor_settlement` does to the entry, on a copy.
+    """
+    copied = [dict(item) for item in settlements or []]
+    by_name = {str(item.get("round") or ""): item for item in rounds}
+    wanted = {str(name or "").strip() for name in records or ()}
+    moment = (now if isinstance(now, datetime) else datetime.now(timezone.utc)).isoformat()
+    for item in copied:
+        record = str(item.get("record") or "")
+        if record not in wanted:
+            continue
+        named = _named_successor(by_name.get(record))
+        if not named or named == str(item.get("successor") or ""):
+            continue
+        trail = [entry for entry in item.get("successor_history") or [] if isinstance(entry, Mapping)]
+        trail.append({"from": str(item.get("successor") or ""), "to": named, "at": moment,
+                      "why": "previewed", "by": ""})
+        item["successor_history"] = trail
+        item["successor"] = named
+    return copied
+
+
 def settle_link(root: Path, record: str, successor: str, why: str = "", by: str = "",
                 now: Optional[datetime] = None) -> Dict[str, Any]:
     """Record that `record`'s measurement went into `successor`, and that a person decided it (round 112).

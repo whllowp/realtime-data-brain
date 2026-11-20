@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .evolve import (
-    frequent_retakes, retake_timeline, moved_settlements, reaffirm_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
+    frequent_retakes, retake_timeline, moved_settlements, reaffirm_plan, reanchor_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
                      is_withdrawn, load_settlements, rejection_provenance,
                      restored_settlements,
     unanswered_withdrawals, settlement_summary, withdrawal_plan, withdrawn_settlements, withheld_due,
@@ -204,6 +204,7 @@ class Campaign:
     settlement_summary: Dict[str, Any] = field(default_factory=dict)
     # Round 118: decisions that rest on books which have moved since they were taken (reported, not charged).
     settlement_moved: List[Dict[str, Any]] = field(default_factory=list)
+    reanchorable: List[Dict[str, Any]] = field(default_factory=list)
     # Round 120: the same debt grouped by the file the decision is about, with the command that re-takes each pair.
     reaffirm_plan: List[Dict[str, Any]] = field(default_factory=list)
     # Round 124: each decision's re-takes in order, and the ones that keep needing one. A count says a decision
@@ -320,6 +321,7 @@ class Campaign:
             "settlements": [dict(item) for item in self.settlements],
             "settlement_summary": dict(self.settlement_summary),
             "settlements_moved": [dict(item) for item in self.settlement_moved],
+            "reanchorable": [dict(item) for item in self.reanchorable],
             "settlements_withdrawn": [dict(item) for item in self.settlements_withdrawn],
             "settlements_restored": [dict(item) for item in self.settlements_restored],
             "settlements_unanswered": [dict(item) for item in self.settlements_unanswered],
@@ -593,6 +595,9 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.settlements = load_settlements(root)
     result.settlements_withdrawn = withdrawn_settlements(result.settlements)
     result.settlements_restored = restored_settlements(result.settlements)
+    # Round 139: the decisions that still name a successor their record has left -- the work `--settle-reanchor-file`
+    # pays. Computed where the rounds are, so the page prints a plan instead of recomputing one (boundary 264).
+    result.reanchorable = reanchor_plan(everything, result.settlements)
     result.settlements_unanswered = unanswered_withdrawals(result.settlements)
     result.withdrawal_plan = withdrawal_plan(everything, result.settlements)
     result.settlement_summary = settlement_summary(result.settlements)
@@ -1308,6 +1313,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
     # Round 126: the answer to a withdrawal. Printed next to it, because the reader who saw the pair come back
     # among the charges needs to see the command that takes it out again -- and needs to know that doing so is a
     # decision, not a repair (boundary 294).
+    _reanchorable = result.reanchorable
+    if _reanchorable:
+        # Round 139: round 138 taught one decision to follow its record; a file that was retargeted owes the same step
+        # N times, and a command nobody is told about is a command nobody runs (boundary 261).
+        _lead = _reanchorable[0]
+        lines.append("links             %d decision(s) still name a successor their record has left: %s -- %s"
+                     % (sum(len(row.get("records") or []) for row in _reanchorable),
+                        "; ".join("%s %s -> %s" % (str(item.get("record") or ""), str(item.get("from") or "?"),
+                                                  str(item.get("to") or "?"))
+                                  for item in _lead.get("pairs") or []),
+                        str(_lead.get("batch") or "brian evolve --settle-reanchor RECORD")))
     _reanchored = [item for item in result.settlements if item.get("successor_history")]
     if _reanchored:
         # Round 138: a decision moved to the successor its record now names is neither a fresh decision nor the one

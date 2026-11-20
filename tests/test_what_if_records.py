@@ -48,7 +48,8 @@ def test_a_file_that_owes_nothing_says_so(tmp_path, monkeypatch, capsys):
     printed = " ".join(capsys.readouterr().out.split())
     assert ("what if data/smd/third.json owes 0 unanswered withdrawal(s), 0 stale decision(s) and 0 "
             "decision(s) no re-take can pay") in printed
-    assert "nothing to pay: neither plan lists that file" in printed
+    # Round 139: the question now reaches a fourth family, so "neither plan" became "no plan".
+    assert "nothing to pay: no plan lists that file" in printed
 
 
 def test_the_question_is_not_an_answer(tmp_path, monkeypatch, capsys):

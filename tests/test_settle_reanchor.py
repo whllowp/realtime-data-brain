@@ -145,8 +145,10 @@ def test_the_cli_records_it_and_names_the_evidence_gap(tmp_path, monkeypatch, ca
     assert "the earlier target stays in successor_history" in printed
     assert "was not taken on the new successor" in printed
     payload = json.loads(target.read_text(encoding="utf-8"))
-    assert payload["reanchored"]["to"] == "round-moved-away.json"
-    assert payload["reanchored"]["changed"] is True
+    # Round 139: one shape for one record or several, so the payload is a list (boundary 278).
+    assert [item["to"] for item in payload["reanchored"]] == ["round-moved-away.json"]
+    assert payload["reanchored"][0]["changed"] is True
+    assert payload["reanchor_refused"] == 0
 
 
 def test_the_cli_refuses_without_a_reason(tmp_path, monkeypatch, capsys):

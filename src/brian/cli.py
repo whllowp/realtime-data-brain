@@ -92,7 +92,9 @@ from .evolve import (
     settle_note,
     restore_settlement,
     preview_settlement_change,
+    preview_reanchor_change,
     preview_withdrawal_change,
+    reanchor_plan,
     reanchor_settlement,
     withdraw_settlement,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
@@ -325,7 +327,11 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
         stored = load_settlements(root)
         rounds_all = history(root, include_retired=True)
         wanted = [pair.split("=", 1) for pair in pairs if "=" in pair]
-        if kind == "drop":
+        if kind == "reanchor":
+            # Round 139: a re-anchor changes what is *payable* without paying anything, so the preview has to run the
+            # same copy the command would produce and count there (boundary 308).
+            after = preview_reanchor_change(stored, rounds_all, [str(name) for name in pairs])
+        elif kind == "drop":
             after = preview_withdrawal_change(stored, wanted, why="(preview)", by="")
         else:
             after = preview_settlement_change(stored, wanted, kind=kind, why="(preview)", by="")
@@ -344,6 +350,10 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
             before_rows = withdrawal_plan(rounds_all, stored)
             after_rows = withdrawal_plan(rounds_all, after)
             key = "decisions"
+        elif kind == "reanchor":
+            before_rows = reaffirm_plan(rounds_all, stored)
+            after_rows = reaffirm_plan(rounds_all, after)
+            key = "unpayable"
         else:
             runs = queue_runs(root)["runs"]
             before_rows = reaffirm_plan(rounds_all, stored, runs)
@@ -359,8 +369,19 @@ def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str
         return sum(int(row.get(key) or 0) for row in rows
                    if same_stream_path(str(row.get("origin") or ""), origin))
 
-    noun = {"restore": "unanswered withdrawal(s)", "drop": "decision(s) no re-take can pay"}.get(
-        kind, "stale decision(s)")
+    noun = {"restore": "unanswered withdrawal(s)", "drop": "decision(s) no re-take can pay",
+            "reanchor": "decision(s) no re-take can pay"}.get(kind, "stale decision(s)")
+    if kind == "reanchor":
+        # Round 139: the two numbers a re-anchor moves are "no re-take can pay" and "still names a successor the
+        # record has left". Paying one is not paying the other, and the page must not let the reader conflate them
+        # (boundary 330).
+        still = sum(len(row.get("pairs") or []) for row in reanchor_plan(rounds_all, after)
+                    if same_stream_path(str(row.get("origin") or ""), origin))
+        return ["after this run  %s would owe %d %s, and %d decision(s) would still name a successor their record "
+                "has left (the ledger goes from %d to %d)"
+                % (origin, here(after_rows), noun, still, total(before_rows), total(after_rows)),
+                "                a re-anchored decision was not taken on its new successor: the page says so, and "
+                "only a check measures it there (boundary 203)"]
     if kind == "drop":
         return ["after this run  %s would owe %d %s, and %d more withdrawal(s) would wait in the withdrawal queue "
                 "(the queue goes from %d to %d%s)"
@@ -477,6 +498,8 @@ def _print_what_if(root: Path, target: str, steps: Sequence[str] = ()) -> None:
                            if same_stream_path(str(row.get("origin") or ""), target)]
         reaffirm_rows = [row for row in reaffirm_plan(rounds_all, stored, runs)
                          if same_stream_path(str(row.get("origin") or ""), target)]
+        reanchor_rows = [row for row in reanchor_plan(rounds_all, stored)
+                         if same_stream_path(str(row.get("origin") or ""), target)]
     except (OSError, ValueError) as error:
         _print("what if          the plans could not be read: %s" % error)
         return
@@ -486,13 +509,18 @@ def _print_what_if(root: Path, target: str, steps: Sequence[str] = ()) -> None:
                     for item in (reaffirm_rows[0].get("pairs") if reaffirm_rows else [])]
     drop_pairs = ["%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
                   for item in (reaffirm_rows[0].get("unpayable_pairs") if reaffirm_rows else [])]
+    # Round 139: re-anchoring is the fourth answer to "what can this file still owe", and it is neither paying a
+    # withdrawal, nor paying a stale decision, nor dropping one -- it changes what is payable without paying anything
+    # (boundary 331). Asking three of four families is how "nothing to pay" came out wrong twice already.
+    reanchor_pairs = [str(item.get("record") or "")
+                      for item in (reanchor_rows[0].get("pairs") if reanchor_rows else [])]
     _print("what if          %s owes %d unanswered withdrawal(s), %d stale decision(s) and %d decision(s) no "
            "re-take can pay"
            % (target, sum(int(row.get("waiting") or row.get("decisions") or 0) for row in withdrawal_rows),
               sum(int(row.get("stale") or 0) for row in reaffirm_rows),
               sum(int(row.get("unpayable") or 0) for row in reaffirm_rows)))
-    if not restore_pairs and not retake_pairs and not drop_pairs:
-        _print("                 nothing to pay: neither plan lists that file, so no batch command would change it")
+    if not restore_pairs and not retake_pairs and not drop_pairs and not reanchor_pairs:
+        _print("                 nothing to pay: no plan lists that file, so no batch command would change it")
         return
     if restore_pairs:
         _print("                 paying the withdrawals (%d pair(s), `--settle-restore-file %s`):"
@@ -511,6 +539,11 @@ def _print_what_if(root: Path, target: str, steps: Sequence[str] = ()) -> None:
         _print("                 paying the decisions no re-take can pay (%d pair(s), `--settle-drop-file %s`):"
                % (len(drop_pairs), target))
         for line in _after_preview_lines(root, drop_pairs, kind="drop", origin=target):
+            _print("                   " + line.strip())
+    if reanchor_pairs:
+        _print("                 re-anchoring the decisions whose record moved (%d record(s), "
+               "`--settle-reanchor-file %s`):" % (len(reanchor_pairs), target))
+        for line in _after_preview_lines(root, reanchor_pairs, kind="reanchor", origin=target):
             _print("                   " + line.strip())
     if retake_pairs:
         _print("                 paying the re-takes (%d pair(s), `--settle-reaffirm-file %s`):"
@@ -2023,10 +2056,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         return 2
     if getattr(args, "dry_run", False) and not (getattr(args, "settle_reaffirm_file", None)
                                                 or getattr(args, "settle_restore_file", None)
-                                                or getattr(args, "settle_drop_file", None)):
+                                                or getattr(args, "settle_drop_file", None)
+                                                or getattr(args, "settle_reanchor_file", None)):
         # Round 130: `--dry-run` exists for the two batch commands. Anywhere else it would be silently ignored, and
         # a flag that looks like a safety belt must not be decorative (rounds 103/117/120/127/128, boundary 305).
-        _print("--dry-run previews --settle-reaffirm-file, --settle-restore-file or --settle-drop-file; without "
+        _print("--dry-run previews --settle-reaffirm-file, --settle-restore-file, --settle-drop-file or "
+               "--settle-reanchor-file; without "
                "one of those the "
                "command would go ahead and record nothing you could see first")
         return 2
@@ -3405,23 +3440,77 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         inner.json_out = None
         return cmd_evolve(inner, settings)
 
+    if getattr(args, "settle_reanchor_file", None):
+        # Round 139: a retargeted file owes the same step once per decision. The batch resolves its records from
+        # `reanchor_plan`, so the list the page prints is the list this command runs (round 101), and it recurses into
+        # the single-record branch so refusals, output and the JSON payload stay one implementation (boundary 284).
+        file_target = str(args.settle_reanchor_file or "").strip()
+        if not file_target:
+            _print("--settle-reanchor-file takes the stream file those records were measured on, for example "
+                   "`--settle-reanchor-file data/smd/stream-two.json`")
+            return 2
+        try:
+            plan_rows = reanchor_plan(history(root, include_retired=True), load_settlements(root))
+        except (OSError, ValueError) as error:
+            _print("cannot read the re-anchor plan: %s" % error)
+            return 2
+        match = [row for row in plan_rows if same_stream_path(str(row.get("origin") or ""), file_target)]
+        if not match:
+            _print("no decision on %s still names a successor its record has left: `brian evolve --campaign` "
+                   "lists the files that hold one" % file_target)
+            return 2
+        row = match[0]
+        records = [str(item.get("record") or "") for item in row.get("pairs") or []]
+        dry = bool(getattr(args, "dry_run", False))
+        _print("%s  %d decision(s) on %s in one %s"
+               % ("would re-anchor" if dry else "re-anchoring  ", len(records), row.get("origin") or file_target,
+                  "dry run: nothing was recorded" if dry else "command"))
+        if dry:
+            for item in row.get("pairs") or []:
+                _print("  %s  (%s -> %s)" % (str(item.get("record") or ""), str(item.get("from") or "?"),
+                                             str(item.get("to") or "?")))
+            _print("nothing was written; drop --dry-run to re-anchor them (boundary 304).")
+            _print_after_preview(root, records, kind="reanchor", origin=str(row.get("origin") or file_target))
+            return 0
+        inner = argparse.Namespace(**vars(args))
+        inner.settle_reanchor_file = None
+        inner.settle_reanchor = records
+        inner.json_out = None
+        inner.dry_run = False
+        return cmd_evolve(inner, settings)
+
     if getattr(args, "settle_reanchor", None):
         # Round 138: round 133 stops counting a pair whose record names another successor, and round 137 makes the
         # restore door refuse it. Both are right, and together they left the decision with no forward step: the old
         # target stayed unpairable for ever and the only alternatives were "make a brand-new decision" (which leaves
         # the old one behind) or "drop it" (which throws the decision away). This moves the decision to the successor
         # the ledger says the record's measurement went to, keeping the old target in `successor_history`.
-        record = str(args.settle_reanchor or "").strip()
-        plan_before = repair_plan(root)
-        try:
-            change = reanchor_settlement(root, record, why=args.settle_why, by=args.settle_by)
-        except (OSError, ValueError) as error:
-            _print("cannot re-anchor that decision: %s" % error)
+        # Round 139: several records in one command, one reason for the batch, and a refused record does not stop the
+        # rest -- the same shape the other batches took (boundaries 277/303/316).
+        raw_reanchor = getattr(args, "settle_reanchor", None)
+        wanted = [str(item).strip() for item in
+                  (raw_reanchor if isinstance(raw_reanchor, (list, tuple)) else [raw_reanchor])
+                  if str(item).strip()]
+        if not wanted:
+            _print("--settle-reanchor takes the record whose decision moved, for example "
+                   "`--settle-reanchor round-old.json`")
             return 2
-        if not change["changed"]:
-            _print("re-anchored    %s already names %s, which is what the record names: nothing to change"
-                   % (change["record"], change["to"]))
-        else:
+        plan_before = repair_plan(root)
+        done: List[Dict[str, Any]] = []
+        refused = 0
+        for record in wanted:
+            try:
+                change = reanchor_settlement(root, record, why=str(args.settle_why or ""),
+                                             by=str(getattr(args, "settle_by", "") or ""))
+            except (OSError, ValueError) as error:
+                _print("cannot re-anchor that decision: %s" % error)
+                refused += 1
+                continue
+            done.append(change)
+            if not change["changed"]:
+                _print("re-anchored    %s already names %s, which is what the record names: nothing to change"
+                       % (change["record"], change["to"]))
+                continue
             _print("re-anchored    %s  %s -> %s" % (change["record"], change["from"], change["to"]))
             _print("                the decision now names what the record names, and the earlier target stays in "
                    "successor_history")
@@ -3430,13 +3519,19 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    % (str(args.settle_by or "").strip() or "(not recorded -- pass --settle-by NAME)"))
             _print("                a re-anchored decision was not taken on the new successor: the page says so, "
                    "and only a check can measure it there (boundary 203)")
+        if len(wanted) > 1:
+            _print("re-anchored    %d of %d decision(s), %d needed no change, %d refused"
+                   % (sum(1 for item in done if item["changed"]), len(wanted),
+                      sum(1 for item in done if not item["changed"]), refused))
+        if done and any(item["changed"] for item in done):
             _print_repair_delta(record_repair(root, "settle-reanchor", plan_before, repair_plan(root)))
         out = getattr(args, "json_out", None)
         if out:
             with open(out, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump({"reanchored": change}, handle, indent=2, sort_keys=False, ensure_ascii=False)
+                json.dump({"reanchored": done, "reanchor_refused": refused}, handle, indent=2,
+                          sort_keys=False, ensure_ascii=False)
                 handle.write("\n")
-        return 0
+        return 2 if refused else 0
 
     if getattr(args, "settle_drop", None):
         # Round 125: round 124 names the decisions that keep needing a re-take, and the honest answer to one of them
@@ -5690,9 +5785,12 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-drop-file", default=None, metavar="STREAM",
                         help="withdraw every decision on STREAM that cannot be re-taken in one command, resolved "
                              "from the same plan --campaign prints; needs --settle-why")
-    evolve.add_argument("--settle-reanchor", default=None, metavar="RECORD",
-                        help="move a decision to the successor its record now names, keeping the earlier target "
-                             "in successor_history")
+    evolve.add_argument("--settle-reanchor", default=None, metavar="RECORD", nargs="+",
+                        help="move one or more decisions to the successor their record now names, keeping the "
+                             "earlier target in successor_history")
+    evolve.add_argument("--settle-reanchor-file", default=None, metavar="STREAM",
+                        help="re-anchor every decision on that stream file that still names a successor its record "
+                             "has left")
     evolve.add_argument("--settle-drop", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="withdraw a recorded decision: it keeps its date and gains the reason it stopped "
                              "standing, and the contradiction it settled is charged again; needs --settle-why")

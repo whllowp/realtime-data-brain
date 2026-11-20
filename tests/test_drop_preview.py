@@ -101,4 +101,4 @@ def test_the_dry_run_guard_names_the_third_family(tmp_path, monkeypatch, capsys)
     monkeypatch.chdir(root)
     assert cli.main(["evolve", "--audit", "--dry-run"]) == 2
     printed = " ".join(capsys.readouterr().out.split())
-    assert "or --settle-drop-file" in printed
+    assert "--settle-drop-file or --settle-reanchor-file" in printed

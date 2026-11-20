@@ -7542,6 +7542,68 @@ links             a re-anchored decision was not taken on its new successor: onl
 字段，那是另一类命令（第 93 轮），"判断"与"证据"必须各走各的门，否则一条裁定就能改写它自己被检验的那份材料。
 
 
+### 3.145 一条命令付一整个文件的"目标搬家"：第四族也要进预览
+
+第 138 轮给了单条裁定"跟着记录走"的那一步。可是被改过目标的文件不是欠一步，是欠 N 步，而手打 N 次正是漏掉一次的办法——
+这正是第 128/129/137 轮让"按文件"成为命令形态的理由。第 139 轮把这条腿补齐，并且顺手把"什么是可付的"问到了第四族：
+
+```
+def reanchor_plan(rounds, settlements) -> List[Dict[str, Any]]:
+    """仍然指向记录已经不指的那一支的裁定，按记录的文件分组。"""
+    for item in active_settlements(settlements):          # 只有"还站着"的裁定欠这一步
+        named = _named_successor(by_name.get(record))
+        if not named or named == item["successor"]:       # 记录没有了目标，或者两边已经一致
+            continue
+        bucket = buckets.setdefault(origin, {"origin": origin, "records": [], "pairs": [], "batch": ""})
+```
+
+三条约束落在这里：
+
+1. **清单先于命令。** `--settle-reanchor-file STREAM` 的记录不从参数里来，从 `reanchor_plan` 来——页面印哪几行，命令就付哪几行
+   （第 101 轮的规矩）；它随后递归进单条命令那一段，于是拒绝语、`repair plan` 行、JSON 载荷都只有一份实现（边界 284）。
+2. **一次理由，一条命令。** `--settle-reanchor` 改成 `nargs="+"`，一条 `--settle-why` 覆盖整批（第 277/303/316 轮同一个形状）；
+   被拒的一条记 `refused` 并继续下一条，整批退出 2；JSON 载荷从字典改成**列表**加一个 `reanchor_refused` 计数（边界 278）。
+3. **页面没有第四族就还是旧的答案。** `--campaign --what-if-records` 曾经问三族：撤回、不可付（删掉）、重开。改锚改变"可付"的构成
+   却一条都不付，所以预览必须同时印出两个数——这一批做完还能付多少、还有多少仍指向旧目标：
+
+```
+$ brian evolve --settle-reanchor-file data/smd/stream-two.json \
+      --settle-why "the record was retargeted to round-seventh.json" --settle-by carol --dry-run
+would re-anchor  1 decision(s) on data/smd/stream-two.json in one dry run: nothing was recorded
+  round-sixth.json  (round-new.json -> round-seventh.json)
+nothing was written; drop --dry-run to re-anchor them (boundary 304).
+after this run  data/smd/stream-two.json would owe 0 decision(s) no re-take can pay, and 0 decision(s) would still
+                name a successor their record has left (the ledger goes from 1 to 0)
+                a re-anchored decision was not taken on its new successor: the page says so, and only a check
+                measures it there (boundary 203)
+```
+
+实测（`var/demo138`，第 138 轮的演示根）：改锚前 `--campaign` 只印一行指路
+
+```
+links             1 decision(s) still name a successor their record has left: round-sixth.json round-new.json -> round-seventh.json -- brian evolve --settle-reanchor-file data/smd/stream-two.json --settle-why TEXT --settle-by NAME
+```
+
+真跑之后那一行消失，换成 `2 decision(s) were re-anchored to the successor the record now names: round-other.json
+round-new.json -> round-elsewhere.json; round-sixth.json round-new.json -> round-seventh.json`；`--history` 第 7 行同时挂着
+`[retired, re-measured as round-seventh.json]`、`[settled with round-seventh.json by a recorded decision]`、
+`[re-anchored on 2026-11-20T06:41:09+00:00: round-new.json -> round-seventh.json]` 三条标记；`--campaign --json-out` 里
+`reanchorable` 变成 `[]`，那条裁定的 `successor_history` 长度 1。
+
+顺带记一条**静默**：文件级命令的 `--json-out` 什么都不写（`inner.json_out = None`，与 `--settle-drop-file`、`--settle-restore-file`
+一致）。批量没有唯一的一条可命名的记录，所以载荷留给单条命令——这个决定本身没错，但一个看起来会产出文件的标志静默地不产出，
+就是"装饰性标志"的同一个毛病（边界 305），所以它进了 §6 第 126 项。
+
+**边界 330：改锚改变"可付"的构成，却一条都不付，所以它的预览必须印两个数。** 一个是"还能付多少"，一个是"还有多少仍指向旧目标"；
+只印前者，读者会把"欠账换了形态"读成"欠账少了一半"，而后者才是这一族真正在移动的账。
+
+**边界 331："我把这些全付了会怎样"必须问能改变答案的每一族。** 家族是会长的：第 132 轮问两族、第 135 轮补到三族、这一轮补到四族。
+每补一族，之前那句"没有可付的了"就多一次可能是错的——所以它必须由四族共同决定，而不是"我认识的那几族"。
+
+**边界 332：文件级命令的记录只能来自页面印出来的那份清单。** 命令付的东西若不在读者刚看过的那几行里，这一条命令就是一次
+没有预告的写入；反过来，页面印了却没人付，那行就是一条永远发不出的催款单（第 261 轮的同一个错误）。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8082,6 +8144,10 @@ missing for the next level
      `--campaign` 单列"被重新锚定的裁定"，`--history` 在那一行标 `[re-anchored on …: old -> new]`，
      `settlement_summary["reanchored"]` 计数。原文请的 `--settle-link --repoint` 没有做：那条命令写的是"新裁定"，
      把"旧裁定改锚"塞进同一个入口会让两种语义共用一个开关（第 226 轮边界的形状）。
-125. 让 `--settle-reanchor` 也接受多条记录（`--settle-reanchor-file STREAM`，与其余三个文件命令同形），
-     并让 `--campaign --what-if-records` 把"重新锚定之后有多少条会变成可付"作为第四族算进去——改锚会改变
-     "可付"的构成却一条都不付，正是第 135 轮那条"what if 必须回答全集"的下一格。
+125. 已实现（第 139 轮）：`reanchor_plan` 按记录的文件分组（只收还站着的裁定），`--settle-reanchor-file STREAM` 从清单取记录、
+      `--dry-run` 先印每一对与"做完还剩几个可付、几个仍指向旧目标"，真跑递归进单条那一段（拒绝语/JSON 都只有一份实现）；
+      `--settle-reanchor` 改成多条，一条理由覆盖整批，被拒的一条不停整批、整批退出 2；`--campaign` 多一行
+      `N decision(s) still name a successor their record has left: … -- <batch>`，`Campaign.reanchorable` 进 `--json-out`；
+      `--campaign --what-if-records` 把改锚作为第四族算进去，"没有可付的了"必须四族都说没有。见 §3.145。
+126. 让三个文件级命令对 `--json-out` 说同一句话：要么整批写一个 `{"records": [...]}` 载荷，要么明确印出"批量不写载荷"——
+     现在它是静默忽略，而静默的标志就是装饰（边界 305）。
