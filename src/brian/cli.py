@@ -494,6 +494,73 @@ BATCH_PREVIEWS: Tuple[Tuple[str, str], ...] = (
 )
 
 
+# Round 164 (item 150): round 163 pinned the number of payload writers in a test, which keeps the rule honest for
+# whoever runs the suite. This table is the same inventory as a page: which command writes what, and whether the
+# shared writer's failure sentence may say "the record is already in the store" (boundaries 392/395).
+PAYLOAD_WRITERS: Tuple[Tuple[str, str, str], ...] = (
+    ("--set-domain-limit / --set-domain-drain", '{"recorded", "cleared", "in_force", "files"}', "records"),
+    ("--history",
+     '{"rounds", "links", "in_force_clearings", "stream_path_moves", "ceilings", "claim_counts"}', "reports"),
+    ("--claim-round-file", '{"claimed", "claim_refused"}', "records, unless --dry-run"),
+    ("--backfill-claims", '{"filled", "dry_run"}', "records, unless --dry-run"),
+    ("--unrecorded", '{"rounds", "unattributed", "matters", "payable", "out_of_reach", "ceilings"}', "reports"),
+    ("--campaign", "the campaign report (drift, debt, queue, claims, offer)", "reports"),
+    ("--sensitivity", "the sensitivity ladder", "reports"),
+    ("--withheld", '{"bar", "withheld"}', "reports"),
+    ("--audit", '{"limits", "ceiling_drift", "rules_hash", "moved", "entries", ...}', "reports"),
+    ("--set-stream-path", '{"stream_path"}', "records"),
+    ("--settle-link", '{"settled"}', "records"),
+    ("--settle-note", '{"noted"}', "records"),
+    ("--settle-reanchor", '{"reanchored", "reanchor_refused"}', "records"),
+    ("--settle-drop", '{"withdrawn", "drop_refused", "drop_skipped"}', "records"),
+    ("--settle-restore", '{"restored", "restore_refused"}', "records"),
+    ("--settle-reaffirm", '{"reaffirmed", "reaffirm_refused", "reaffirm_skipped"}', "records"),
+    ("--repair-links --apply", '{"repairs"}', "records"),
+    ("--from-queue (a walk that measured nothing)", '{"store", "walks"}', "records"),
+    ("--from-queue (a walk)", '{"store", "walks"}', "records"),
+    ("run", '{"summary", "windows_judged", "rca_report_ids"}', "records"),
+    ("evaluate", "the evaluation report plus its recommendation", "records"),
+    ("dataset --summary-out", "the dataset summary", "reports"),
+)
+
+# A file-level command hands its records to the single form, which writes the one payload (round 141's rule): they
+# belong to that row, not to an extra writer -- and the page must say so, or the inventory looks incomplete.
+PAYLOAD_BATCH_FORMS: Tuple[str, ...] = (
+    "--settle-reaffirm-file", "--settle-restore-file", "--settle-drop-file", "--settle-reanchor-file",
+)
+
+# Found by writing the table (round 164): `--backfill-walks` takes `--dry-run` and prints what it did, but has no
+# `--json-out` at all -- so its sibling `--backfill-claims` can be scripted and it cannot. The inventory names the
+# gap instead of quietly leaving it out, and --history/--campaign/--audit stay the only pages a caller can read.
+PAYLOAD_NONE: Tuple[str, ...] = ("--backfill-walks",)
+
+
+def format_payload_writers() -> str:
+    """The inventory as a page: what each command exports, and what the one writer says when it cannot write."""
+    lines = ["brian payload writers: %d command(s), one writer" % len(PAYLOAD_WRITERS)]
+    lines.append("")
+    for command, payload, kind in PAYLOAD_WRITERS:
+        lines.append("  %-42s %-23s %s" % (command, kind, payload))
+    lines.append("")
+    lines.append("the file-level forms %s write" % ", ".join(PAYLOAD_BATCH_FORMS))
+    lines.append("the record list of their single form: one writer, because the single form is the one that writes it.")
+    lines.append("")
+    lines.append("%s takes --dry-run and exports nothing: it writes no payload at all, so a caller cannot" %
+                 " ".join(PAYLOAD_NONE))
+    lines.append("script it the way it can script --backfill-claims (round 164 found this by writing the table).")
+    lines.append("")
+    lines.append("Every one of them goes through _write_payload: the parent directory is created, the file is renamed")
+    lines.append("into place, and the page says `wrote <path>` (boundary 336). A write that fails exits 2 and says which")
+    lines.append("kind of failure it was (boundaries 390/394):")
+    lines.append("  changed a book  what this command recorded is already in the store: only the payload is missing")
+    lines.append("  only reported   nothing was recorded: this command only reports, so only its export is missing")
+    lines.append("                  -- also what a `records, unless --dry-run` row says while it previews (boundary 395)")
+    lines.append("")
+    lines.append("A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this")
+    lines.append("table and its count move together (boundary 392).")
+    return "\n".join(lines)
+
+
 def previewing_flags(args: argparse.Namespace) -> List[str]:
     """Which batch commands this invocation asked for, in the table's own order (round 148)."""
     return [flag for flag, attribute in BATCH_PREVIEWS if getattr(args, attribute, None)]
@@ -2377,6 +2444,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 return 2
         return 0
 
+    if getattr(args, "payload_writers", False):
+        # Round 164 (item 150): the inventory round 163 pinned in a test, on a page -- so the rule lives where a
+        # reader looks for it, not only where the suite runs (boundary 392).
+        _print(format_payload_writers())
+        return 0
+
     if args.history:
         # Round 127: a withdrawal with no answer is the debt the gate charges, so the page that shows the ledger
         # must show it -- with the age, and with the command, because "somebody withdrew this" alone is a rumour.
@@ -2865,7 +2938,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                    "stream_path_history, so the repair is visible in the record (boundary 369)."
                    % sum(1 for item in claims if item.get("changed")))
         if getattr(args, "json_out", None) and not _write_payload(
-                args.json_out, {"claimed": claims, "claim_refused": refused}):
+                args.json_out, {"claimed": claims, "claim_refused": refused},
+                # Round 164: a preview of a repairing command still repairs nothing, so the failure sentence must
+                # follow this branch's own behaviour rather than the command's category (boundary 395).
+                recorded=not getattr(args, "dry_run", False)):
             return 2
         return 2 if refused else 0
 
@@ -2896,7 +2972,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("nothing to backfill: every claim chain already carries its origin, its first moment and "
                    "its hop count")
         if getattr(args, "json_out", None) and not _write_payload(
-                args.json_out, {"filled": rows, "dry_run": dry}):
+                args.json_out, {"filled": rows, "dry_run": dry}, recorded=not dry):
             return 2
         return 0
 
@@ -6372,6 +6448,8 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--strict", action="store_true",
                         help="with --audit or --campaign: exit 1 when a recorded verdict would be decided "
                              "differently today, 2 when part of the ledger cannot be replayed at all")
+    evolve.add_argument("--payload-writers", dest="payload_writers", action="store_true",
+                        help="list the commands that export a payload, and what the writer says when it cannot")
     evolve.add_argument("--json-out", help="write the round to this file as well")
     evolve.set_defaults(func=cmd_evolve)
 

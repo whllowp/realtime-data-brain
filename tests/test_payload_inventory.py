@@ -56,3 +56,75 @@ def test_a_report_payload_finds_its_directory(tmp_path, monkeypatch):
 
     payload = json.loads((tmp_path / "deep" / "nested" / "a.json").read_text(encoding="utf-8"))
     assert "rules_hash" in payload and "moved" in payload
+
+
+# Round 164 (item 150): the count above keeps the rule honest for whoever runs the suite; the page keeps it honest
+# for the reader. They have to be the same inventory, or the test proves a number about a table nobody can see.
+
+
+def test_the_page_and_the_count_are_the_same_inventory():
+    calls = [line for line in SOURCE.splitlines()
+             if "_write_payload(" in line and "def _write_payload" not in line]
+    assert len(cli.PAYLOAD_WRITERS) == EXPECTED_PAYLOAD_WRITERS
+    assert len(cli.PAYLOAD_WRITERS) == len(calls), (
+        "the page lists %d writer(s) and the source has %d: the table must move with the calls"
+        % (len(cli.PAYLOAD_WRITERS), len(calls)))
+
+
+def test_the_table_names_every_previewable_batch_command():
+    """A family member that `--dry-run` accepts must be on the page: as a row, a file-level form, or a named gap."""
+    named = " ".join(command for command, _payload, _kind in cli.PAYLOAD_WRITERS)
+    named += " " + " ".join(cli.PAYLOAD_BATCH_FORMS) + " " + " ".join(cli.PAYLOAD_NONE)
+    missing = [flag for flag, _attribute in cli.BATCH_PREVIEWS if flag not in named]
+    assert missing == [], "the inventory does not name %s" % missing
+
+
+def test_the_page_names_the_batch_command_that_exports_nothing():
+    """Writing the table is what found it: `--backfill-walks` has no `--json-out`, unlike `--backfill-claims`."""
+    printed = cli.format_payload_writers()
+
+    assert cli.PAYLOAD_NONE == ("--backfill-walks",)
+    assert "--backfill-walks takes --dry-run and exports nothing" in printed
+    assert "script it the way it can script --backfill-claims" in printed
+
+
+def test_every_row_says_whether_the_command_records_something():
+    """`recorded=` decides which of the two failure sentences is true (boundaries 390/393)."""
+    kinds = {kind for _command, _payload, kind in cli.PAYLOAD_WRITERS}
+    assert kinds == {"records", "reports", "records, unless --dry-run"}
+    assert sum(1 for _c, _p, kind in cli.PAYLOAD_WRITERS if kind == "reports") == 7
+
+
+def test_the_page_says_what_the_writer_says_when_it_cannot_write():
+    printed = cli.format_payload_writers()
+
+    assert "brian payload writers: %d command(s), one writer" % len(cli.PAYLOAD_WRITERS) in printed
+    assert "what this command recorded is already in the store: only the payload is missing" in printed
+    assert "nothing was recorded: this command only reports, so only its export is missing" in printed
+    assert "wrote <path>" in printed
+    for boundary in ("336", "390", "392", "394", "395"):
+        assert "boundar" in printed and boundary in printed
+
+
+def test_the_page_needs_no_ledger(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["evolve", "--payload-writers"]) == 0
+
+    printed = capsys.readouterr().out
+    assert "brian payload writers: 22 command(s), one writer" in printed
+    assert "--settle-reaffirm" in printed
+    assert not (tmp_path / "var").exists(), "the page is a report: it must not create a book"
+
+
+def test_a_preview_of_a_repairing_command_says_it_recorded_nothing(tmp_path, monkeypatch, capsys):
+    """Round 164: a dry run of a repairing command records nothing, so the *report* sentence is the true one."""
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["evolve", "--claim-round-file", "nope.json=data/smd/stream-one.json",
+                     "--dry-run", "--json-out", "."]) == 2
+
+    printed = capsys.readouterr().out
+    assert "nothing was written; drop --dry-run to record the claim" in printed
+    assert "nothing was recorded: this command only reports" in printed
+    assert "what this command recorded is already in the store" not in printed

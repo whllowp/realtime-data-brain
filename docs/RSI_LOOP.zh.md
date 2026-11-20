@@ -8788,6 +8788,76 @@ exit=2
 **边界 394**：只做报告的命令失败时，非零退出说的是"导出没写成"，不是"没干活"；这两件事必须分别说清，否则下一次
 读日志的人会把一张已经印完的报告当成一次失败的运行。
 
+### 3.170 清单要能印出来：哪条命令导出什么，失败时说的是哪一句
+
+第 163 轮把"只有一个导出器"这条规则做成了一个**计数**：源码里 `_write_payload(` 的调用点必须是 22 个，多一个
+少一个都让测试红。这守住了"下一个写 payload 的人会知道"，但守不住**读**的人：一条规则如果只活在一次
+`pytest` 里，那么它是给跑测试的人看的，不是给要用这些命令的人看的。这一轮把同一份清单做成一个页面。
+
+```
+$ brian evolve --payload-writers
+brian payload writers: 22 command(s), one writer
+
+  --set-domain-limit / --set-domain-drain    records                 {"recorded", "cleared", "in_force", "files"}
+  --history                                  reports                 {"rounds", "links", "in_force_clearings", ...}
+  --claim-round-file                         records, unless --dry-run {"claimed", "claim_refused"}
+  --backfill-claims                          records, unless --dry-run {"filled", "dry_run"}
+  --unrecorded                               reports                 {"rounds", "unattributed", "matters", ...}
+  --campaign                                 reports                 the campaign report (drift, debt, queue, claims, offer)
+  ...
+  --settle-reaffirm                          records                 {"reaffirmed", "reaffirm_refused", "reaffirm_skipped"}
+  --repair-links --apply                     records                 {"repairs"}
+  run                                        records                 {"summary", "windows_judged", "rca_report_ids"}
+  evaluate                                   records                 the evaluation report plus its recommendation
+  dataset --summary-out                      reports                 the dataset summary
+
+the file-level forms --settle-reaffirm-file, --settle-restore-file, --settle-drop-file, --settle-reanchor-file write
+the record list of their single form: one writer, because the single form is the one that writes it.
+
+--backfill-walks takes --dry-run and exports nothing: it writes no payload at all, so a caller cannot
+script it the way it can script --backfill-claims (round 164 found this by writing the table).
+
+Every one of them goes through _write_payload: the parent directory is created, the file is renamed
+into place, and the page says `wrote <path>` (boundary 336). A write that fails exits 2 and says which
+kind of failure it was (boundaries 390/394):
+  changed a book  what this command recorded is already in the store: only the payload is missing
+  only reported   nothing was recorded: this command only reports, so only its export is missing
+                  -- also what a `records, unless --dry-run` row says while it previews (boundary 395)
+
+A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this
+table and its count move together (boundary 392).
+```
+
+这一页只有 22 行，但它把三件事同时钉住了：
+
+1. **同一份清单的两个读者。** 表格、测试里的 `EXPECTED_PAYLOAD_WRITERS` 和源码里的调用点必须是同一个数
+   （`test_the_page_and_the_count_are_the_same_inventory` 三个一起比）。谁加了一条命令却只改了一处，页面和
+   测试里总有一处会说谎。
+2. **`recorded=` 不是命令的属性，是分支的属性。** 写这一页时发现 `--claim-round-file` 和
+   `--backfill-claims` 在 `--dry-run` 下**什么都没记**，但它们传的是默认的 `recorded=True`——于是导出失败时
+   页面会告诉用户"命令改动已经写进账本了，只差导出文件"，而实际上什么也没写。改成 `recorded=not dry`：
+   一句话的真假要看**这一次执行**做了什么，不是看这条命令归哪一类（边界 395）。实测：
+
+   ```
+   $ brian evolve --claim-round-file nope.json=data/smd/stream-one.json --dry-run --json-out .
+   cannot claim that record: no round record for nope.json: var\evolve\nope.json
+   nothing was written; drop --dry-run to record the claim (boundary 304).
+   cannot write the payload to .: [WinError 5] ...
+                   nothing was recorded: this command only reports, so only its export is missing
+   ```
+3. **写清单本身会找到清单里没有的东西。** 表里必须覆盖 `--dry-run` 接受的每一个家族成员，测试逐个比对
+   `BATCH_PREVIEWS`。写到这里就卡住了：`--backfill-walks`（第 147 轮）根本没有 `--json-out`——它可以预览、
+   可以打印，但脚本拿不到它的结果，而它的姊妹命令 `--backfill-claims` 有。这个缺口不是读代码读出来的，是
+   **填表填出来的**（和"取一次清单才知道规则从未被数过"是同一件事，边界 389）。缺口写进页面，也写进下一项。
+
+四个家族成员（`--settle-*-file`）单独一行说明：它们把自己那一组记录交给单条形式，由单条形式写唯一的那份
+payload——所以它们是那一行的读者，不是第二十二个之后的新导出器。**文件级命令的导出，是单条命令的导出。**
+
+**边界 395**：共享导出器的 `recorded` 必须跟着**这一次执行**的行为走，而不是跟着命令的分类走——一次预览
+什么都没记，就不能说"改动已经在账本里了"。
+**边界 396**：只钉在测试里的规则，对需要它的人是隐形的；把清单印在命令旁边，它才同时是约束和说明书。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9408,5 +9478,10 @@ missing for the next level
 149. **已完成（见 §3.169）** 盘点结果：8 处自己写盘的 payload 全部改走 `_write_payload`（`recorded` 区分
      改库与报告），现在是 0 处裸写、22 处调用点；`tests/test_payload_inventory.py` 把这两个数字钉成常量，
      并禁止源码里再出现 `write_text(_json` / `Path(args.json_out).write_text`。
-150. 让写手的**清单本身**可打印：`--payload-writers`（或 `--audit` 的一行）列出"哪条命令、写哪种 payload、
-     失败时说的是哪一句"，这样第 392 条"按动作扫描"就不只活在测试里，也活在页面上。
+150. ~~让"导出清单"能印出来：`brian evolve --payload-writers` 说明每条命令导出什么、失败时用哪一句。~~
+     第 164 轮完成（§3.170）：`PAYLOAD_WRITERS` 22 行 + `format_payload_writers()`，与测试里的计数、源码里的
+     调用点三处同数；顺带修正 `--claim-round-file`/`--backfill-claims` 在 `--dry-run` 下的 `recorded=`，
+     并把"`--backfill-walks` 根本没有 `--json-out`"这个缺口印在页面上。
+151. 给 `--backfill-walks` 补上姊妹命令已有的导出（`--json-out` 一份 `{"backfilled": [...]}`），并让
+     `brian evolve --payload-writers --check` 在表格与源码不一致时以退出码 2 结束——今天这份一致性只有
+     `pytest` 读得到，CI 里其它检查读不到（边界 392/396）。
