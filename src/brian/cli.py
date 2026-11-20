@@ -2693,7 +2693,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         record, successor = pair.split("=", 1)
         plan_before = repair_plan(root)
         try:
-            decision = settle_link(root, record.strip(), successor.strip(), why=str(args.settle_why or ""))
+            decision = settle_link(root, record.strip(), successor.strip(),
+                                   why=str(args.settle_why or ""), by=str(getattr(args, "settle_by", "") or ""))
         except (OSError, ValueError) as error:
             _print("cannot settle that link: %s" % error)
             return 2
@@ -2704,8 +2705,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("settled         %s -> %s" % (decision["record"], decision["successor"]))
             _print("                recorded in var/evolve/settlements.json: this is a decision, not a measurement,")
             _print("                and `--audit` prints it apart from the links that agree by checking.")
-            if decision.get("why"):
-                _print("                because: %s" % decision["why"])
+            _print("                because: %s" % decision["why"])
+            # Round 113: the record names a decider only when the caller did. A machine account is not a person,
+            # so the empty case is printed as empty and the flag that fills it is named.
+            _print("                decided by: %s"
+                   % (decision["by"] if decision.get("by")
+                      else "(not recorded -- pass --settle-by NAME to attribute this decision)"))
             _print_repair_delta(record_repair(root, "settle-link", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
@@ -4683,7 +4688,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="record that RECORD's measurement went into SUCCESSOR, so `--audit` stops charging "
                              "that pair as a contradiction; a decision, not a measurement")
     evolve.add_argument("--settle-why", metavar="TEXT", default="",
-                        help="with --settle-link: why the pair was decided, stored with the settlement")
+                        help="with --settle-link: why the pair was decided; required for a new settlement")
+    # Round 113: who decided. Optional on purpose -- an empty decider is printed as "not recorded" rather than
+    # filled with the local account, which is shared by whoever is at the keyboard (boundary 254).
+    evolve.add_argument("--settle-by", default="", metavar="NAME",
+                        help="with --settle-link: who made the decision (recorded in settlements.json)")
     evolve.add_argument("--repair-links", action="store_true",
                         help="write the missing end of a legacy replacement link; plan only without --apply")
     evolve.add_argument("--history", action="store_true",

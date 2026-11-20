@@ -1161,6 +1161,15 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                      % (len(result.settlements),
                         ", ".join("%s -> %s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
                                   for item in result.settlements)))
+        # Round 113: a decision is reviewed by asking who made it, so the campaign counts them by decider. The
+        # empty case is its own bucket, named for what it is rather than dropped (boundary 166).
+        by = {}
+        for item in result.settlements:
+            who = str(item.get("by") or "").strip()
+            by[who] = by.get(who, 0) + 1
+        parts = ["%s %d" % (who if who else "and no decider recorded", count)
+                 for who, count in sorted(by.items(), key=lambda pair: (-pair[1], pair[0]))]
+        lines.append("links             decided by: %s" % ", ".join(parts))
     # Round 111: the ranking said which file to open first; this says whether last time's opening helped.
     last = (result.repair_history or {}).get("last") or {}
     if isinstance(last, Mapping) and last.get("at"):

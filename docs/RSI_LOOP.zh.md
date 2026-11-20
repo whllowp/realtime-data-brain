@@ -6048,6 +6048,73 @@ links             1 pair(s) were settled by a recorded decision, not by agreemen
 **边界 253：顺序里的 `remedy` 必须是能清掉它的命令**——`--audit` 只是诊断；一个 plan 若把诊断排成第一动作，
 它就在给没人做得到的工作排序。第 111 轮的记录之所以只能说"什么都没变"，是因为当时没有任何命令能改变它。
 
+### 3.119 一条决定要有人、有理由：从"存下来了"到"能被复核"
+
+第 112 轮把裁定写成一条记录，`--audit` 也印了一句 `A settlement says who decided`。跑完演示才发现这句话是空的：
+`settlements.json` 里只有 `{record, successor, at, why}`，**根本没有"谁"这个字段**——页面在声称一个记录里不存在
+的事实，正是这整轮 campaign 反复抓到的那一类错（边界 173 的邻居）。同时 `--settle-why` 是可选的，于是可以存下
+一条没有任何解释的决定，而"没人能解释的决定"正是三个月后没人敢复核的那条。
+
+第 113 轮把这两件事分开处理，因为它们的性质不同：
+
+- **理由：新决定必填。** `settle_link` 在写入一条新记录前要求非空的 `why`，否则抛
+  `a settlement needs a reason: --settle-why TEXT. A decision nobody can explain is the record nobody dares review`，
+  CLI 以 2 退出且一个字节都不写。**已经存在的同一对**仍然幂等（返回 `changed: false` 与原时间），否则重复执行
+  一条命令会开始索要它当初没要求的字段。
+- **裁定者：默认空，但必须说成空。** `--settle-by NAME` 填 `by` 字段；不给就存空。这里刻意**不**用本机账户名填
+  默认值——同一台机器谁在键盘前都可能，把 `DESKTOP\13423` 写成"决定者"是拿环境冒充人。
+
+```
+$ brian evolve --settle-link round-old.json=round-new.json \
+      --settle-why "队列付的是 round-other.json；round-old 的声称已经过时" --settle-by alice
+settled         round-old.json -> round-new.json
+                recorded in var/evolve/settlements.json: this is a decision, not a measurement,
+                and `--audit` prints it apart from the links that agree by checking.
+                because: 队列付的是 round-other.json；round-old 的声称已经过时
+                decided by: alice
+repair plan      1 file(s) off the table: data/smd/stream-real.json -- cost 1 -> 0
+
+$ brian evolve --settle-link round-other.json=round-new.json        # 新的一对，没给理由
+cannot settle that link: a settlement needs a reason: --settle-why TEXT. A decision nobody can
+explain is the record nobody dares review
+（退出码 2，settlements.json 不变）
+```
+
+页面随之分成"有人"和"没人"两种读法：
+
+```
+$ brian evolve --audit
+1 replacement link(s) were settled by a recorded decision, not by agreement:
+  round-old.json             -> round-new.json              (2026-11-20T01:50:09.708367+00:00, by alice)
+
+$ brian evolve --campaign
+links             1 pair(s) were settled by a recorded decision, not by agreement: round-old.json -> round-new.json
+links             decided by: alice 1
+```
+
+而第 112 轮留下的那条（有理由、没有裁定者）现在被如实说成空：
+
+```
+  round-old.json             -> round-new.json              (2026-11-20T01:37:35.544754+00:00, and no decider was recorded)
+1 of them were recorded without --settle-by: the decision is dated but not attributed,
+and a decision nobody is named for is the one nobody can be asked to defend.
+links             decided by: and no decider recorded 1
+```
+
+`by` 缺失不是缺陷而是事实，所以它进自己的桶（边界 166），而不是被并进某个值里。第 113 轮还顺手加了一句：**理由**
+缺失的旧记录（第 112 轮允许的形态）也会被点名 `N of them carry no reason at all: written before --settle-why was
+required, and this build can only report them`——本构建没有"给已存决定补理由"的命令，而手工改 store 正是第 83/112
+轮在防的事，所以这半件留给第 100 项。
+
+**边界 254：句子声称的字段必须真的存在。** `A settlement says who decided` 在 `by` 出现之前是无据之言；一条记录
+要能被复核，就得有人（或明确写"没人"）、有理由、有时间。
+
+**边界 255：必填字段只对新记录必填。** 否则幂等重跑会开始索要它当初没要求的东西；一个命令的历史契约不能因为
+新增字段而反过来追责旧的调用者。
+
+**边界 256：默认值不能拿环境冒充人。** 本机账户是"谁在键盘前"，不是"谁做的决定"；把它填进 `by` 会让一条决定
+看起来有归属，而实际上没有人可以被问。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6493,5 +6560,6 @@ missing for the next level
     `--campaign` 打"最后一个修复把哪个文件推出了表、代价从 X 降到 Y"，`--campaign --json-out` 给出
     `repair_history`。这一轮的第一个实测结论是反面的：两条修复命令改的都是"另一本书"，清不掉正在拒绝的那本，
     所以每一次可执行的修复都只说"什么也没离开这张表"——账本拒绝只有诊断（`--audit`），没有可执行的修法。98. **已完成（第 112 轮）**。`brian evolve --settle-link RECORD=SUCCESSOR [--settle-why TEXT]` 把"哪一条声称已经过时"记成一条决定：`var/evolve/settlements.json` 存 `{record, successor, at, why}`，重复执行幂等并说出原时间；`replacement_links(rounds, settled)` 只让被裁定的那一个声称退出候选，**不改账本**（`queue.paid_round` 原样保留）；`--audit` 把结算单独打印（"not by agreement…it is not a second witness"），`--strict` 因此从 2 回到 0；`provenance_block` 读同一份结算，`--verify` 不再拒绝叠承诺；`--history` 用同一份结算读（`every replacement link that no decision settled agrees…`、`[settled with … by a recorded decision]`），`--campaign` 页面与 `--json-out` 都带 `settlements`；`repair_plan` 的 `remedy` 改为 `brian evolve --settle-link …`，第 111 轮那句"changed nothing in the plan"第一次能打印出"1 file(s) off the table"。实测：`--audit --strict` 2 → 0，`repair plan      1 file(s) off the table: data/smd/stream-real.json -- cost 1 -> 0`，campaign JSON `settlements` 带理由与时间。测试 1617 → 1652（`tests/test_settle_link.py` 17，新）。
+99. **已完成（第 113 轮）**。`--settle-why` 对新决定必填（`settle_link` 抛 `a settlement needs a reason…`，CLI 退出 2 且不写文件；已成对的重复执行仍幂等）；新增 `--settle-by NAME` 把裁定者写进 `by` 字段，不给就存空、并由 `--audit` 明确说 `and no decider was recorded` / `N of them were recorded without --settle-by`，`--campaign` 则按裁定者计数（`decided by: alice 1` / `decided by: and no decider recorded 1`）；第 112 轮留下的"有理由无裁定者"记录被如实标出；第 112 轮之前允许的"无理由"记录也被点名，但本构建只能报告、不能补写。演示：`--settle-by alice` → `decided by: alice` + `repair plan 1 file(s) off the table … cost 1 -> 0`；新对不给理由 → 退出 2 且 store 不变；`--audit` 对旧记录打印 `and no decider was recorded`。测试 1653 → 1664（`tests/test_settle_link.py` 28）。
 
-99. 结算现在只终止"这一个声称者"的收费。下一步让 `--settle-link` 也能表达"谁的后继才是真的"（`--settle-link --prefer SUCCESSOR`），并在 `--campaign` 里把"被裁定的链接"按裁定者与时间分组，这样一个人一年后回头看，能知道自己当时在多少处做了决定、有没有重复裁定同一对。另外：`--settle-why` 目前是可选的，让它在裁定第一对时成为必填——一条没有理由的决定，正是三个月后没人敢复核的那种记录。
+100. 给已经有记录的决定补上理由与裁定者：新增 `--settle-note RECORD=SUCCESSOR --settle-why … --settle-by …`，它**只追加**一条 note（`notes: [{at, why, by}]`），不改原有的 `at`/`successor`，并把"补写"这件事本身也记进 `repair_history`；同时让 `--campaign` 把"补写过理由的决定"与"一开始就有理由的决定"分开数——否则补写会把一条旧记录洗成看起来当时就说清楚了的样子（边界 174 在裁定上的版本）。

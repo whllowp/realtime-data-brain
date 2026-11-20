@@ -2684,7 +2684,7 @@ def load_settlements(root: Path) -> List[Dict[str, Any]]:
     return [dict(item) for item in rows or [] if isinstance(item, Mapping)]
 
 
-def settle_link(root: Path, record: str, successor: str, why: str = "",
+def settle_link(root: Path, record: str, successor: str, why: str = "", by: str = "",
                 now: Optional[datetime] = None) -> Dict[str, Any]:
     """Record that `record`'s measurement went into `successor`, and that a person decided it (round 112).
 
@@ -2692,6 +2692,11 @@ def settle_link(root: Path, record: str, successor: str, why: str = "",
     it recorded, and the audit keeps showing both ends on separate lines. What changes is that the *pair* is
     no longer a contradiction -- it is a decision, dated and attributed, and a reader can see that agreement
     came from somebody rather than from two witnesses (round 83's rule, applied to a contradiction).
+
+    Round 113: `why` is required for a *new* settlement. The store is a record of judgement, and a judgement
+    nobody can explain is the one nobody dares review; an already-recorded pair stays idempotent so re-running a
+    command does not demand the reason again. `by` is stored as given and may be empty -- a machine account is not
+    a person, so an unattributed decision is printed as unattributed rather than filled in here (boundary 254).
     """
     name = str(record or "").strip()
     to = str(successor or "").strip()
@@ -2708,11 +2713,18 @@ def settle_link(root: Path, record: str, successor: str, why: str = "",
     existing = [item for item in store["settlements"]
                 if str(item.get("record") or "") == name and str(item.get("successor") or "") == to]
     if existing:
-        return {"record": name, "successor": to, "at": str(existing[0].get("at") or ""), "changed": False}
+        return {"record": name, "successor": to, "at": str(existing[0].get("at") or ""),
+                "why": str(existing[0].get("why") or ""), "by": str(existing[0].get("by") or ""),
+                "changed": False}
+    reason = str(why or "").strip()
+    if not reason:
+        raise ValueError("a settlement needs a reason: --settle-why TEXT. "
+                         "A decision nobody can explain is the record nobody dares review")
     # `evolve` owns no clock helper of its own: `promote._stamp_moment` is on the other side of the import
     # cycle, so the moment is normalised here (round 112).
     moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
-    entry = {"record": name, "successor": to, "at": moment.isoformat(), "why": str(why or "")}
+    entry = {"record": name, "successor": to, "at": moment.isoformat(), "why": reason,
+             "by": str(by or "").strip()}
     store["settlements"].append(entry)
     path = root / EVOLVE_DIR / SETTLEMENTS
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3794,13 +3806,33 @@ def _link_lines(result: Audit) -> List[str]:
         # not produce evidence, and "every link agrees" must never quietly include a decision (boundary 174).
         lines.append("%d replacement link(s) were settled by a recorded decision, not by agreement:"
                      % len(result.settled))
+        unattributed = 0
+        unexplained = 0
         for item in result.settled:
-            lines.append("  %-26s -> %-26s  (%s)"
+            by = str(item.get("by") or "").strip()
+            if not by:
+                unattributed += 1
+            if not str(item.get("why") or "").strip():
+                unexplained += 1
+            lines.append("  %-26s -> %-26s  (%s%s)"
                          % (str(item.get("record") or ""), str(item.get("successor") or ""),
-                            str(item.get("at") or "")))
+                            str(item.get("at") or ""),
+                            ", by %s" % by if by else ", and no decider was recorded"))
         lines.append("A settlement says who decided; it is not a second witness. `--audit` no longer charges "
                      "these pairs,")
         lines.append("and `brian evolve --history` still prints both ends where they disagree.")
+        if unattributed:
+            # Round 113: the sentence above claims attribution, so a store without one has to say so rather than
+            # let a reader assume a person signed it (boundary 254).
+            lines.append("%d of them were recorded without --settle-by: the decision is dated but not attributed,"
+                         % unattributed)
+            lines.append("and a decision nobody is named for is the one nobody can be asked to defend.")
+        if unexplained:
+            # Round 113: rounds before this one accepted a settlement with no reason at all, so a real store can
+            # hold one. Reporting it is all this build can do -- there is no command yet that adds a reason to an
+            # existing decision, and editing the store by hand is what rounds 83/112 are about (item 100).
+            lines.append("%d of them carry no reason at all: written before --settle-why was required, and this "
+                         "build can only report them" % unexplained)
     if result.in_force:
         # Round 85: round 84 could refuse to stack a promise, because a version that is not yet in force can
         # simply not be applied. A version that is already applied is running; the refusal is gone, and what
