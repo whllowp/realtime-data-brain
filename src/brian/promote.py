@@ -1914,6 +1914,61 @@ def finish_rerun_run(root: Path, walk: int, run: Mapping[str, Any],
 
 
 
+def backfill_walks(root: Path, pairs: Sequence[Any], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Write the payments the ledger records but the store never saw (round 147).
+
+    Every retirement that names a successor is a payment: somebody re-measured the round and wrote the new one.
+    The re-run store only started keeping those in round 144, so the whole history before it is invisible to
+    `--campaign` -- the page said "0 by the queue, 0 typed by hand", which is not "nobody paid", it is "nobody was
+    keeping the book".
+
+    Two limits, and both are why the entry carries flags rather than passing for a walk:
+
+    * `backfilled: True` -- this entry was written today for a payment made earlier. The `at` is the retirement's
+      own moment, because that is when the work happened; the fact that the record is younger belongs in the flag.
+    * one entry per **successor**, not per round -- a batch retirement names one re-measurement for several rounds,
+      and billing it once per round would say the loop paid three times for one measurement.
+    """
+    held = rerun_runs(root)
+    runs = list(held["runs"])
+    trimmed = int(held.get("trimmed") or 0)
+    known = {str(item) for run in runs for item in (run.get("rounds") or [])}
+    written: List[Dict[str, Any]] = []
+    fallback = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
+    for pair in pairs:
+        successor = str(pair[1] if len(pair) > 1 else "")
+        if not successor or successor in known:
+            continue
+        moment = _parse_moment(pair[2] if len(pair) > 2 else None) or fallback
+        ordinal = trimmed + len(runs) + 1
+        entry = {
+            "walk": ordinal,
+            "hand": True,
+            "backfilled": True,
+            "at": moment.isoformat(),
+            "started": moment.isoformat(),
+            "finished": moment.isoformat(),
+            "limit": 0,
+            "ceiling_limit": None,
+            "families": [],
+            "with_ceilings": False,
+            "paid": 1,
+            "paid_ceilings": 0,
+            "failures": 0,
+            "stopped": False,
+            "rounds": [successor],
+        }
+        runs.append(entry)
+        known.add(successor)
+        written.append(dict(entry))
+        if len(runs) > RERUN_RUN_LIMIT:
+            trimmed += len(runs) - RERUN_RUN_LIMIT
+            runs = runs[-RERUN_RUN_LIMIT:]
+    if written:
+        _write_rerun_runs(root, runs, trimmed)
+    return written
+
+
 def rerun_walks(root: Path) -> Dict[str, Any]:
     """How often the re-run queue has been walked, and how much of that paid anything (round 145).
 
@@ -1926,10 +1981,12 @@ def rerun_walks(root: Path) -> Dict[str, Any]:
     paid = sum(int(run.get("paid") or 0) for run in runs)
     empty = sum(1 for run in runs if not int(run.get("paid") or 0))
     hand = sum(1 for run in runs if run.get("hand"))
+    backfilled = sum(1 for run in runs if run.get("backfilled"))
     return {
         "walks": len(runs),
         "empty": empty,
         "hand": hand,
+        "backfilled": backfilled,
         "queued": len(runs) - hand,
         "paid": paid,
         "trimmed": int(held.get("trimmed") or 0),
@@ -1964,6 +2021,12 @@ def format_rerun_walks(summary: Mapping[str, Any]) -> Optional[str]:
             "paid in all; the last was walk %d at %s"
             % (walks, queued, hand, int(summary.get("empty") or 0), int(summary.get("paid") or 0),
                int(summary.get("last_walk") or 0), str(summary.get("last_at") or "")))
+    backfilled = int(summary.get("backfilled") or 0)
+    if backfilled:
+        # Round 147: a walk written today for a payment made weeks ago is not the same record as one written while
+        # the queue ran. Saying the count without saying this would make the store's age look like the loop's.
+        text += ("; %d of them were written after the fact from the ledger's retirement marks, so they say when the "
+                 "payment happened, not when it was recorded" % backfilled)
     trimmed = int(summary.get("trimmed") or 0)
     if trimmed:
         text += ("; %d earlier walk(s) were trimmed out of the store, so a round naming one of them names a record "

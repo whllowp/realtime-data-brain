@@ -133,6 +133,7 @@ from .promote import (
     promotions_for_domain,
     provenance_block,
     record_clearing,
+    backfill_walks,
     begin_rerun_run,
     finish_rerun_run,
     walk_held,
@@ -2145,11 +2146,14 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     if getattr(args, "dry_run", False) and not (getattr(args, "settle_reaffirm_file", None)
                                                 or getattr(args, "settle_restore_file", None)
                                                 or getattr(args, "settle_drop_file", None)
-                                                or getattr(args, "settle_reanchor_file", None)):
-        # Round 130: `--dry-run` exists for the two batch commands. Anywhere else it would be silently ignored, and
+                                                or getattr(args, "settle_reanchor_file", None)
+                                                or getattr(args, "backfill_walks", False)):
+        # Round 130: `--dry-run` exists for the batch commands. Anywhere else it would be silently ignored, and
         # a flag that looks like a safety belt must not be decorative (rounds 103/117/120/127/128, boundary 305).
-        _print("--dry-run previews --settle-reaffirm-file, --settle-restore-file, --settle-drop-file or "
-               "--settle-reanchor-file; without "
+        # Round 147: the list grows with the family; a guard that names four of five commands refuses the fifth's
+        # own preview (round 135's defect, in a third place).
+        _print("--dry-run previews --settle-reaffirm-file, --settle-restore-file, --settle-drop-file, "
+               "--settle-reanchor-file or --backfill-walks; without "
                "one of those the "
                "command would go ahead and record nothing you could see first")
         return 2
@@ -2947,6 +2951,42 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("The re-run measures the candidates the record names, on the file it names: the totals move")
             _print("from one sampling to a named one without changing the question. Nothing is deployed by it.")
         return 2 if failures else 0
+
+    if getattr(args, "backfill_walks", False):
+        # Round 147: the ledger's retirement marks are the only record of the payments made before the store
+        # existed. Reading them back is not the same as having recorded them, and the entry says which it is.
+        pairs: List[Any] = []
+        for record in history(root, include_retired=True):
+            retired_block = record.get("retired") if isinstance(record, dict) else None
+            if not isinstance(retired_block, dict):
+                continue
+            successor = str(retired_block.get("re_measured_as") or "")
+            if successor:
+                pairs.append((str(record.get("round") or ""), successor,
+                              str(retired_block.get("at") or "")))
+        if not pairs:
+            _print("nothing to backfill: no round in the ledger names the re-run that replaced it")
+            return 0
+        if getattr(args, "dry_run", False):
+            for record, successor, at in pairs:
+                _print("would backfill    %s -> %s (the payment is dated %s)"
+                       % (record, successor, at or "unknown"))
+            _print("nothing was written; drop --dry-run to write the walks the ledger already names (boundary 304).")
+            return 0
+        try:
+            written = backfill_walks(root, pairs)
+        except OSError as error:
+            _print("cannot write the re-run store: %s" % error)
+            return 2
+        if not written:
+            _print("nothing to backfill: every payment the ledger names already has a walk in the store")
+            return 0
+        for entry in written:
+            _print("backfilled        %s -> walk %d, dated %s"
+                   % (entry["rounds"][0], entry["walk"], entry["at"]))
+        _print("backfilled        %d payment(s) the ledger recorded and the store never saw; each entry says so, "
+               "and each keeps the moment of the payment (boundary 354)" % len(written))
+        return 0
 
     if args.retire:
         names = _retire_names(args.retire)
@@ -5996,6 +6036,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="re-decide a recorded round file under today's rules and exit")
     evolve.add_argument("--audit", action="store_true",
                         help="re-decide every recorded round under today's rules and exit")
+    evolve.add_argument("--backfill-walks", dest="backfill_walks", action="store_true",
+                        help="write a walk for every payment the ledger records but the re-run store never saw "
+                             "(rounds retired before the store existed; each entry says it was written after the "
+                             "fact)")
     evolve.add_argument("--retire", default=[], action="append", metavar="ROUND",
                         help="mark a recorded round superseded by a re-measurement and exit; its record "
                              "stays as written, the checks stop asking the mechanism to answer for it. "

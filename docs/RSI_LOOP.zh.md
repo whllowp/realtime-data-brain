@@ -7970,6 +7970,48 @@ re-run walks      1 invocation(s) of the re-run queue: 0 by the queue, 1 typed b
 多说更难被发现。
 
 
+## 3.153 补记的付款：账本早就说了，仓库才开始记
+
+第 146 轮让重跑仓库开始收"人打的那一笔"，但真账本依旧只印 `0 by the queue, 0 typed by hand`。这不是没人付过，
+而是那些付款全发生在 144 轮开始记账之前。这一轮把账本里已经写下的退休标记读回仓库：
+
+```
+would backfill    round-20261118T020401Z.json -> round-20261118T043911Z.json (the payment is dated 2026-11-18T04:39:39Z)
+backfilled        round-20261118T043939Z.json -> walk 17, dated 2026-11-18T04:39:56+00:00
+backfilled        17 payment(s) the ledger recorded and the store never saw; each entry says so, and each keeps the
+                  moment of the payment (boundary 354)
+```
+
+`--backfill-walks` 只读一处：`ledger.jsonl` 里 `retired.re_measured_as`（"这一轮被哪一次重测取代"）。18 份轮记录
+带后继，去重后 **17 笔付款**（有一次批量退休用同一个后继替掉了两轮——一笔重测只付一次，按轮记就会说循环付了两遍）。
+每条补记的条目带三个字段：`hand: true`、`backfilled: true`、`at` 是**付款发生的那一刻**而不是今天。页面于是能说：
+
+```
+re-run walks      17 invocation(s) of the re-run queue: 0 by the queue, 17 typed by hand; 0 paid no round;
+                  17 round(s) paid in all; the last was walk 17 at 2026-11-18T04:39:56+00:00;
+                  17 of them were written after the fact from the ledger's retirement marks, so they say when the
+                  payment happened, not when it was recorded
+```
+
+**这一轮最不客气的数字**：补记之后，真账本的 17 笔付款里，**队列付了 0 笔**。第 100 轮到第 146 轮修的整套队列
+（`--rerun-unrecorded`、`--with-ceilings`、行走仓库、序号、连"空手而归"的计数）在这台机器的真实账本上一次也没
+用过，它只活在测试与演示里。"循环能自己付账"这件事，到今天为止仍然是一个关于代码的性质，不是一个关于这台机器的
+事实。这句话必须写下来，因为页面上"17 invocation(s)"很容易被读成"队列跑了 17 次"——这正是分两半印的理由。
+
+**顺手修掉一个第三次出现的缺陷**：`--dry-run` 的守卫里手写着一张家族清单，这一轮加了 `--backfill-walks`，守卫
+就把它的预览当成"在没有预览的场合用了 --dry-run"拒掉（第 135 轮第三次出现同一形态：**枚举**才是病，漏掉一项只是
+症状）。句子与判断都补上了第五项——但真正的修法（把清单收敛成一张表）留给第 134 条。
+
+**边界 354：事后补记的记录必须自报，并保留事情原本发生的时刻。**记录的年龄和工作的日期是两个事实，只写一个
+就会被读成另一个。
+
+**边界 355：把历史读回来记进仓库，不等于当初记下了它。**页面上"17 次"若不带"其中 17 次是事后补记"，读者会以为
+这 17 次是循环自己走出来的——那正是这一轮要避免的误读。
+
+**边界 356：一张枚举家族的守卫清单，必须由添加家族的同一次改动更新；更好的做法是让句子和判断都从同一张表生成。**
+清单越长，漏掉一项的机会越多，而漏掉的那一项恰恰是新命令——它最需要预览。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8538,6 +8580,9 @@ missing for the next level
 132. ~~让人手付的那一轮也在重跑仓库里留下一条行走（今天 `queue.walk = 0` 既表示"不是队列付的"，也表示
      "没记"），`--campaign` 因此能说"这台机器上的重跑，队列占到了几成"。~~ 已完成（§3.152）：条目带
      `hand`，页面分成"队列几次 / 人手几次"，没有后继不记、队列已付不重复记。
-133. 把真账本里那 74 份记录的退休补记成"人手行走"（它们都发生在重跑仓库出现之前），好让 `--campaign`
-     的"队列占几成"覆盖整本账，而不是只覆盖开始记账之后的那几天；补记必须自报（`backfilled`），不能冒充
-     当时记下的。
+133. ~~把真账本里那 74 份记录的退休补记成"人手行走"，好让 `--campaign` 的"队列占几成"覆盖整本账；补记必须
+     自报（`backfilled`），不能冒充当时记下的。~~ 已完成（§3.153）：`--backfill-walks`（含 `--dry-run`）读
+     `retired.re_measured_as`，去重后写出 17 笔，条目带 `hand`/`backfilled` 与付款本身的时刻；页面分两半印并
+     说明"事后补记"。真账本结论：队列付了 0 笔。
+134. 把 `--dry-run` 的家族清单收敛成一张表（一个 `BATCH_FLAGS` 注册表），句子与判断都从它生成——这是同一
+     形态第三次出现（第 135、147 轮），下一次加批量命令不该再靠"记得改两处"。
