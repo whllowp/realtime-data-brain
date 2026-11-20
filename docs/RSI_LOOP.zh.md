@@ -9652,6 +9652,57 @@ builder 应该报「这条没被验」，不是安静地跳过。
 **遗留**：`--campaign` 的 68 个键仍然只有"键出现在源码里"这一层（它来自 `Campaign.to_dict()` 加 9 处赋值，
 类构造需要 12 个参数）。下一项把它也纳入，用「类 + 分支赋值」两段式比对，而不是构造整个 `Campaign`。
 
+### 3.185 一个 payload 的键来自两处：类和分支都得读
+
+第 174 轮给 3 个 payload 声明了键，第 177 轮补齐到 24 行，第 178 轮让 `--check` 直接**构造**那三个键来自类或函数的对象。
+`--campaign` 一直留在外面，理由很实在：它的 68 个键里 59 个来自 `Campaign.to_dict()`, 9 个来自 `cmd_evolve`
+里 `if args.campaign:` 分支的 `payload["..."] = ` 赋值，而构造一个完整的 `Campaign` 要 12 个参数。
+构造不出来，就只好**读两处源码**——但"只读了一处"和"读了两处"在页面上长得一模一样。
+
+真跑一次（`var/prove_179.py`，往 `Campaign.to_dict()` 里插一个字段、跑 `--check`、原样还原）：
+
+```
+campaign keys from source: 68
+declared:                  68
+in source, not declared:   []
+declared, not in source:   []
+equal: True
+exit: 2
+inconsistent      --campaign has the key(s) a_field_added_by_this_proof and the declaration does not list them
+checked           1 problem(s): the page does not describe this source (boundary 392)
+restored: True
+```
+
+页面也随之改口：`--check` 现在写 `4 verified shape(s)`，并点明三种是"构造出来的"、一种是"读出来的"：
+`three are built from a class or a function; --campaign is read from Campaign.to_dict() and the nine assignments
+in its branch, because constructing one needs twelve arguments (boundaries 426/428)`。
+
+**跑一次就被教了两次，两次都是"这份检查只在我自己的工作目录里成立"。**
+
+其一，**行尾**。`--campaign` 的第一版读 `cli.py` 用的是 `read_bytes().decode("utf-8")`，而 `src/brian/cli.py`
+在磁盘上是 **CRLF**——切片锚点 `"\n        return gate_code\n"` 永远匹配不上，于是 `--check` 报
+`the keys of --campaign cannot be read here (substring not found)`。改成 `read_text(encoding="utf-8")`
+（通用换行）后立刻通过。**任何读源码的检查都得先统一行尾**，因为这个仓库里恰好有一个文件不是 LF。
+
+其二，**路径**。第一版用相对路径 `Path("src/brian/campaign.py")` 读类源码。在本仓库根目录跑没问题，可
+`--check` 是每次 `evolve` 都会跑的（第 166 轮把它接进了 `--strict` 闸门），而整套测试都 `monkeypatch.chdir(tmp_path)`
+到临时账本里跑——于是 43 个闸门测试同时变成 exit 2，页面写着 `payload page 1 problem(s)`，
+真实原因却是"我在别人的工作目录里找不到自己的源码"。改成按模块定位
+（`Path(__file__).resolve().parent / "campaign.py"`）后 2337 个测试全绿。
+**检查自己读什么文件，就得相对于自己定位，不能相对于调用者的当前目录**——否则这条检查会随
+"谁在哪个目录里跑"而变红，而它报出来的原因是假的。
+
+**措辞也跟着对象改了。** 三个成员是构造出来的，一个成员是读出来的；"built" 对这个成员就是假话，而假话恰好
+在 `--campaign` 出问题的那天才需要被读懂。所以三句话一起改了：`the keys of %s cannot be read here (%s)` /
+`%s has the key(s) %s and the declaration does not list them` / `the declaration of %s lists the key(s) %s and no
+source here has them`。`tests/test_payload_sources.py` 里三处断言跟着改——它们原本断言的是旧措辞，
+改措辞时它们会红，正好逼我确认"改的是一个循环的说法，不是一条特例"。
+
+**边界 428**：一个 payload 的键来自两处时，两处都得读；只读容易构造的那一处，得到的是一份看起来完整、
+实际只覆盖一半的检查——它会把"类加了字段"报出来，却对"分支加了字段"彻底沉默。
+**边界 429**：一个循环里既有"构造"又有"解析"，那它的措辞必须对每个成员都成立；"built" 对解析成员是假话，
+而这类假话只在那个成员真的出事时才浮出水面。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -10327,4 +10378,6 @@ missing for the next level
      对象后逐键比对，`--check` 说 `3 built shape(s)`；往 `RcaReport.to_dict()` 加一个字段即报
      `evaluate builds the key(s) … and the declaration does not list them` 并退出 2（`var/prove_178.py` 证明过、
      还原后字节一致）。builder 编不出来时报「这条没被验」而不是跳过——构造器是权威（§3.184）。
-165. 把 `--campaign` 的 68 个键也纳入 builder 式的检查：它来自 `Campaign.to_dict()` 加分支里 9 处赋值，构造整个 `Campaign` 需要 12 个参数，所以改成「类源码的键集合 ∪ 分支赋值的键集合」两段式比对，让 `--check` 也能发现这个类加了字段。
+165. ✅ 把 `--campaign` 的 68 个键也纳入 builder 式的检查（第 179 轮）。`PAYLOAD_BUILDERS` 里新增 `_campaign_keys()`：读 `Campaign.to_dict()` 的返回字面量（按 12 空格缩进只取顶层键，用构造函数自己的 `\n        }\n` 收口）再并上 `cmd_evolve` 的 `if args.campaign:` 分支里 `payload["..."] = ` 的赋值，68 个键逐一对齐；`--check` 因此报 `4 verified shape(s)`。跑一次教了两件事：读 `cli.py` 必须走通用换行（这个文件是 CRLF），读源码必须按模块定位（相对路径让 43 个 chdir 到临时账本的闸门测试变红）。三个 `built` 措辞一并改成 `read/has`。
+
+166. 让 `payload_writer_problems` 与 `_campaign_keys` 共用一处**文件定位**与**读失败说明**：现在一处按模块定位、一处按 `Path(__file__)`，而读不到时只报 `the keys of --campaign cannot be read here (…)`，不说读的是哪个文件。把「哪个文件、哪一行、什么错」一起报出来，并让两个读源码的检查走同一个 resolver。

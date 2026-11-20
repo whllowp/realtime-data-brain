@@ -14,7 +14,7 @@ def test_the_check_passes_on_the_real_tree_and_names_the_third_kind(capsys):
     assert cli.main(["evolve", "--payload-writers", "--check"]) == 0
 
     printed = " ".join(capsys.readouterr().out.split())
-    assert "3 built shape(s)" in printed
+    assert "4 verified shape(s)" in printed
 
 
 @pytest.mark.parametrize("command", sorted(cli.PAYLOAD_BUILDERS))
@@ -31,7 +31,7 @@ def test_a_key_the_class_builds_and_the_declaration_omits_is_a_problem(monkeypat
 
     problems = cli.payload_writer_problems()
 
-    assert any("--sensitivity builds the key(s) gate" in problem for problem in problems)
+    assert any("--sensitivity has the key(s) gate" in problem for problem in problems)
 
 
 def test_a_declared_key_nothing_builds_is_a_problem(monkeypatch):
@@ -42,7 +42,7 @@ def test_a_declared_key_nothing_builds_is_a_problem(monkeypatch):
 
     problems = cli.payload_writer_problems()
 
-    assert any("lists the key(s) ghost and nothing builds them" in problem for problem in problems)
+    assert any("lists the key(s) ghost and no source here has them" in problem for problem in problems)
 
 
 def test_a_builder_that_cannot_run_is_a_finding_not_a_crash(monkeypatch):
@@ -53,7 +53,7 @@ def test_a_builder_that_cannot_run_is_a_finding_not_a_crash(monkeypatch):
 
     problems = cli.payload_writer_problems()
 
-    assert any("cannot be built here (the constructor moved)" in problem for problem in problems)
+    assert any("cannot be read here (the constructor moved)" in problem for problem in problems)
 
 
 def test_a_builder_without_a_declaration_is_a_problem(monkeypatch):
@@ -68,6 +68,6 @@ def test_the_page_says_which_rows_are_verified_by_building_them(capsys):
     assert cli.main(["evolve", "--payload-writers"]) == 0
 
     printed = " ".join(capsys.readouterr().out.split())
-    assert "also builds 3 of them and compares each key for key" in printed
+    assert "also verifies 4 of them" in printed
     for command in cli.PAYLOAD_BUILDERS:
         assert command in printed

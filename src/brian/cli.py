@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
@@ -656,10 +657,31 @@ def _dataset_summary_keys() -> Iterable[str]:
     return set(summarise([example]))
 
 
+def _campaign_keys() -> Iterable[str]:
+    """`Campaign.to_dict()`'s keys plus the nine the campaign branch assigns.
+
+    Constructing a `Campaign` needs twelve arguments, and a builder that guessed them would check the guess
+    (boundary 427). So this reads the two places that decide the keys instead: the class's own return literal and
+    the `payload["..."] = ` assignments inside `if args.campaign:` (boundary 428).
+    """
+    class_text = (Path(__file__).resolve().parent / "campaign.py").read_text(encoding="utf-8")
+    start = class_text.index("\nclass Campaign:")
+    method = class_text[start:].index("    def to_dict(self)")
+    literal = class_text[start + method:]
+    literal = literal[literal.index("return {"):]
+    literal = literal[: literal.index("\n        }\n") + 1]
+    class_keys = set(re.findall(r'\n {12}"([a-z_0-9]+)":', literal))
+    branch = Path(__file__).read_text(encoding="utf-8")
+    branch = branch[branch.index("    if args.campaign:"):]
+    branch = branch[: branch.index("\n        return gate_code\n")]
+    return class_keys | set(re.findall(r'\n\s+payload\["([a-z_0-9]+)"\] = ', branch))
+
+
 PAYLOAD_BUILDERS: Dict[str, Callable[[], Iterable[str]]] = {
     "--sensitivity": _sensitivity_keys,
     "evaluate": _evaluate_keys,
     "dataset --summary-out": _dataset_summary_keys,
+    "--campaign": _campaign_keys,
 }
 
 
@@ -758,11 +780,14 @@ def format_payload_writers() -> str:
         lines.append("payload is built, and a payload that drops one is refused there too (boundary 424).")
         # Round 178 (item 164): a declaration checked only when its branch runs is unchecked in CI, so three of
         # them are compared against the object that builds them (boundary 426).
-        lines.append("`--check` also builds %d of them and compares each key for key:" % len(PAYLOAD_BUILDERS))
+        lines.append("`--check` also verifies %d of them, each against the thing that decides its keys:"
+                     % len(PAYLOAD_BUILDERS))
         for chunk in _wrap_items(sorted(PAYLOAD_BUILDERS)):
             lines.append("  " + chunk)
-        lines.append("a field added to one of those classes or functions is found without running the pipeline,")
-        lines.append("so a declaration whose branch no test drives is still checked (boundary 426).")
+        lines.append("three are built from a class or a function; `--campaign` is read from `Campaign.to_dict()`")
+        lines.append("and the nine assignments in its branch, because constructing one needs twelve arguments")
+        lines.append("(boundaries 426/428). A field added to any of those sources is found without running the")
+        lines.append("pipeline, so a declaration whose branch no test drives is still checked.")
     lines.append("")
     lines.append("A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this")
     lines.append("table and its count move together (boundary 392).")
@@ -840,17 +865,17 @@ def payload_writer_problems(source: Optional[str] = None) -> List[str]:
     for command, builder in sorted(PAYLOAD_BUILDERS.items()):
         declared = set(PAYLOAD_KEYS.get(command, ()))
         try:
-            built = set(builder())
-        except Exception as error:  # noqa: BLE001 - a builder that cannot run is a finding, not a crash
-            problems.append("the %s payload cannot be built here (%s), so its declaration is unchecked"
+            resolved = set(builder())
+        except Exception as error:  # noqa: BLE001 - a verifier that cannot run is a finding, not a crash
+            problems.append("the keys of %s cannot be read here (%s), so its declaration is unchecked"
                             % (command, error))
             continue
-        if built - declared:
-            problems.append("%s builds the key(s) %s and the declaration does not list them"
-                            % (command, ", ".join(sorted(built - declared))))
-        if declared - built:
-            problems.append("the declaration of %s lists the key(s) %s and nothing builds them"
-                            % (command, ", ".join(sorted(declared - built))))
+        if resolved - declared:
+            problems.append("%s has the key(s) %s and the declaration does not list them"
+                            % (command, ", ".join(sorted(resolved - declared))))
+        if declared - resolved:
+            problems.append("the declaration of %s lists the key(s) %s and no source here has them"
+                            % (command, ", ".join(sorted(declared - resolved))))
     for command in sorted(PAYLOAD_BUILDERS):
         if command not in PAYLOAD_KEYS:
             problems.append("%s has a builder and no declared shape, so nothing compares them" % command)
@@ -2883,7 +2908,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        % len(problems))
                 return 2
             _print("checked           the page and the source agree: %d writer(s), %d file-level form(s), "
-                   "%d named gap(s), %d why_empty value(s), %d built shape(s)"
+                   "%d named gap(s), %d why_empty value(s), %d verified shape(s)"
                    % (len(PAYLOAD_WRITERS), len(PAYLOAD_BATCH_FORMS), len(PAYLOAD_NONE),
                       len(WHY_EMPTY_REASONS), len(PAYLOAD_BUILDERS)))
             return 0
