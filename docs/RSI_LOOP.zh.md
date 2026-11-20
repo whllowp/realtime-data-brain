@@ -5948,6 +5948,48 @@ repair order     data/smd/stream-real.json costs 2 walk(s) of refusals and holds
 **边界 247：说出故障的页面必须说出第一个动作，而且要排序；一份没有顺序的清单，是让读者自己重算一遍。**
 
 
+### 3.117 修完之后，要能说出它动了表没有
+
+第 110 轮给了"先修哪个文件"的排序，代价是 `walks_blocked × max(1, held)`。这一轮的问题是：修完之后呢？排序是从账本
+每次现算的，所以它自己答不了"上一次那个修复到底帮没帮上忙"——两份读数只在修复发生的那一刻同时存在。所以对比必须
+当场记下来（边界 248），并且写进两份账：`var/evolve/repairs.json` 与 `repair_history()`。
+
+```
+$ python -m brian.cli evolve --set-stream-path v020=data/smd/stream-real.json
+stream path     v020  data/smd/stream-moved.json -> data/smd/stream-real.json
+                this one is a return: the record is back on the file the promise was
+                born with, while the evidence it holds was measured on the substitute.
+repair plan      nothing left the table: cost 1 -> 1, 1 file(s) still owing
+
+$ python -m brian.cli evolve --campaign
+links             repair next: data/smd/stream-real.json -- 1 walk(s) of refusals, 1 promise(s) held behind it (brian evolve --audit)
+links             the last repair (2026-11-20T01:26:30.115979+00:00, set-stream-path) changed nothing in the plan: cost 1 -> 1, 1 file(s) still owing
+```
+
+"什么也没离开这张表"是一句结论，不是沉默（第 102 轮的零要打出来的规矩）。写入的记录是
+`{"at", "action", "before", "after", "freed", "cost_fell"}`；`freed` 只装"修复后不再需要修的文件"，一个仍然在表里、
+只是代价变低的文件不算解放——那是两件事，混在一起读者会以为它已经好了。
+
+这一轮的实测结果，值得如实写下来：两条修复命令都没有让任何一个文件离开这张表，连一次都没有。原因是清楚的——
+队列的拒绝来自 `replacement_links` 的**矛盾**（mismatch / unretired / dangling），而 `--repair-links` 只补
+**legacy** 那一端（第 83 轮），`--set-stream-path` 改的是记录里的路径。它们修的是另外的书：
+
+```
+$ python -m brian.cli evolve --repair-links --apply
+no legacy link: every retired round either has a successor that named it back, or none
+$ python -m brian.cli evolve --set-stream-path v020=data/smd/stream-moved.json
+stream path     v020 already says data/smd/stream-moved.json; nothing to change
+```
+
+所以第 110 轮那句 `remedy: brian evolve --audit` 说的是实话：**账本矛盾只有诊断，没有可执行的修法**。这正是这一轮
+最有用的产出——记录机制一落地，第一件报告出来的事就是"你给的第一动作修不好它"（边界 249、250）。下一项因此是把
+这件事补上：一条能明确判定继承人的命令，让表能真的空出来。
+
+**边界 248：两份读数只在动作发生的那一刻同时存在，所以对比必须当场记下来；一个每次从账本现算的计划，说得出"该修哪个"，说不出"上次修了有没有用"。**
+**边界 249：修复的结论要用它自己的两个数字（代价、还有几个文件欠着），并且"什么也没变"也要打出来——一次看不见效果的修复，和一次没跑的修复，在页面上长得一样。**
+**边界 250：一个只列诊断命令作为补救的计划，等于没有补救；机制落地后报告的第一件事往往是"给你的第一动作修不好它"，那不是失败，那是这一层账本该干的事。**
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6388,6 +6430,12 @@ missing for the next level
     `remedy`；排序按代价、再按趟数、最后按文件名（两次运行不能给出两个顺序）。`--verify --from-queue 0` 末尾打
     `repair order`，"没有可量的承诺"分支也打；`--campaign` 打 `repair next:`，`--campaign --json-out` 的
     `repair_plan` 让脚本不必解析句子。1606 → 1617 tests。
-97. 让修复本身也留下账：`--repair-links` 与 `--set-stream-path` 之后重算 `repair_plan` 并对比"修之前/修之后"
-    （哪个文件退出了这张表、代价降了多少），把这份对比写进 `--campaign` 页与 JSON，让"花一轮修账本值不值"
-    有事后答案，而不只是事前排序。
+97. 已完成：让修复本身留下账（第 111 轮）。`--repair-links` 与 `--set-stream-path` 在动手前后各取一次
+    `repair_plan()`，把 `before` / `after` / `freed` / `cost_fell` 写进 `var/evolve/repairs.json`，
+    `--campaign` 打"最后一个修复把哪个文件推出了表、代价从 X 降到 Y"，`--campaign --json-out` 给出
+    `repair_history`。这一轮的第一个实测结论是反面的：两条修复命令改的都是"另一本书"，清不掉正在拒绝的那本，
+    所以每一次可执行的修复都只说"什么也没离开这张表"——账本拒绝只有诊断（`--audit`），没有可执行的修法。
+98. 给拒绝那本书一条修复命令：`--settle-link VERSION=SUCCESSOR`。它不改历史，只写一条"这一版的继承人按记录判定为
+    X"的决定（带 `settled.at` / `settled.by` / `settled.why`），让 `replacement_links` 读到两个端一致；
+    同时让 `repair_plan` 的 `remedy` 从 `brian evolve --audit` 变成这条命令，于是 `--repair-links` /
+    `--settle-link` 之后 `repair_history` 里终于会出现"freed"的那一种结果，而不只是"什么都没有离开"。

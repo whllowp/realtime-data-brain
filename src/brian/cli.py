@@ -117,6 +117,7 @@ from .promote import (
     set_state_budget,
     repaired_paths,
     repair_plan,
+    record_repair,
     evidence_split,
     prior_evidence,
     same_stream_path,
@@ -286,6 +287,19 @@ def _evolve_streams(args: argparse.Namespace, settings: Settings
     streams = [Stream(name=args.service, windows=list(windows),
                       meta={"service": args.service, "seed": args.seed})]
     return settings, streams, "demo", {}
+
+
+def _print_repair_delta(entry: Mapping[str, Any]) -> None:
+    """Say what one repair changed about the repair plan, in the two numbers the plan is ranked by (round 111)."""
+    before = entry.get("before") or {}
+    after = entry.get("after") or {}
+    freed = [str(item) for item in entry.get("freed") or [] if str(item)]
+    if freed:
+        _print("repair plan      %d file(s) off the table: %s -- cost %d -> %d"
+               % (len(freed), ", ".join(freed), int(before.get("cost") or 0), int(after.get("cost") or 0)))
+    else:
+        _print("repair plan      nothing left the table: cost %d -> %d, %d file(s) still owing"
+               % (int(before.get("cost") or 0), int(after.get("cost") or 0), int(after.get("files") or 0)))
 
 
 def _print_repair_plan(plan: List[Dict[str, Any]]) -> None:
@@ -2612,6 +2626,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if not digits:
             _print("--set-stream-path needs a version number in the label, not %r" % label)
             return 2
+        plan_before = repair_plan(root)
         try:
             change = set_stream_path(root, int(digits), target)
         except ValueError as error:
@@ -2632,6 +2647,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # on the file the record now names (boundary 211).
                 _print("                this one is a return: the record is back on the file the promise was")
                 _print("                born with, while the evidence it holds was measured on the substitute.")
+        if change["changed"]:
+            # Round 111: a repair that cannot say whether it moved the plan leaves the reader ranking twice.
+            _print_repair_delta(record_repair(root, "set-stream-path", plan_before, repair_plan(root)))
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps({"stream_path": change}, indent=2, sort_keys=False) + "\n")
@@ -2642,6 +2660,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # Without `--apply` this only prints what it would write: a command that edits recorded history has
         # to be able to show the edit first (boundary 175).
         rounds = history(root, include_retired=True)
+        plan_before = repair_plan(root)
         try:
             rows = repair_legacy(root, dry_run=not args.apply)
         except (OSError, ValueError) as error:
@@ -2658,6 +2677,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         # A repaired end is not evidence: say so on the same page, so the next `--audit` line is not read as
         # "the ledger corroborates itself". This is the whole point of the mark (boundary 174).
         if written:
+            # Round 111: the same before/after the other repair writes, because "did it help" is the same question.
+            _print_repair_delta(record_repair(root, "repair-links", plan_before, repair_plan(root)))
             _print("")
             _print("a repaired end records `%s`, so the two ends agree by copying; --audit counts these"
                    % BACKFILL_KEY)

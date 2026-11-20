@@ -2012,6 +2012,67 @@ def origin_queue(root: Path) -> List[Dict[str, Any]]:
     return list(never_tested_at_origin(repaired_paths(root))["versions"])
 
 
+REPAIRS = "repairs.json"
+REPAIR_FORMAT = "brian.repairs/1"
+REPAIR_LIMIT = 20
+
+
+def _plan_totals(plan: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The two numbers a repair is judged by: what the refusals cost, and how many files owed it."""
+    rows = [row for row in plan if isinstance(row, Mapping)]
+    return {"files": len(rows),
+            "cost": sum(int(row.get("cost") or 0) for row in rows),
+            "held": sum(int(row.get("held") or 0) for row in rows),
+            "walks_blocked": sum(int(row.get("walks_blocked") or 0) for row in rows)}
+
+
+def record_repair(root: Path, action: str, before: Sequence[Mapping[str, Any]],
+                  after: Sequence[Mapping[str, Any]], now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Write down what one repair changed about the repair plan (round 111).
+
+    Round 110 ranked the books to repair; nothing said whether running the command helped. The plan is recomputed
+    from the ledger every time, so it cannot answer that on its own -- the comparison has to be captured at the
+    moment the repair happens, which is the only time both readings exist (boundary 248).
+    """
+    moment = now if isinstance(now, datetime) else _stamp_moment(now)
+    rows_before = _plan_totals(before)
+    rows_after = _plan_totals(after)
+    freed = sorted({str(row.get("origin") or "") for row in before if isinstance(row, Mapping)}
+                   - {str(row.get("origin") or "") for row in after if isinstance(row, Mapping)})
+    entry = {"at": moment.isoformat(), "action": str(action),
+             "before": rows_before, "after": rows_after, "freed": freed,
+             "cost_fell": rows_before["cost"] - rows_after["cost"]}
+    path = _evolve_dir(root) / REPAIRS
+    held = {"format": REPAIR_FORMAT, "runs": [], "trimmed": 0}
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stored = None
+    if isinstance(stored, Mapping):
+        held["runs"] = [dict(item) for item in stored.get("runs") or [] if isinstance(item, Mapping)]
+        held["trimmed"] = int(stored.get("trimmed") or 0)
+    held["runs"].append(entry)
+    if len(held["runs"]) > REPAIR_LIMIT:
+        held["trimmed"] += len(held["runs"]) - REPAIR_LIMIT
+        held["runs"] = held["runs"][-REPAIR_LIMIT:]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(held, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    return entry
+
+
+def repair_history(root: Path) -> Dict[str, Any]:
+    """The repairs the store still remembers, newest last (round 111). Windowed, like every other history here."""
+    path = _evolve_dir(root) / REPAIRS
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"format": REPAIR_FORMAT, "runs": [], "trimmed": 0, "last": {}}
+    runs = [dict(item) for item in (stored.get("runs") or []) if isinstance(item, Mapping)] \
+        if isinstance(stored, Mapping) else []
+    return {"format": REPAIR_FORMAT, "runs": runs, "trimmed": int(stored.get("trimmed") or 0) if
+            isinstance(stored, Mapping) else 0, "last": runs[-1] if runs else {}}
+
+
 def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
     """Which origin file stands behind the promises the ledger keeps refusing, and how often (round 105).
 
