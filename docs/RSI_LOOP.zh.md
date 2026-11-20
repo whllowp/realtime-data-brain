@@ -7604,6 +7604,50 @@ round-new.json -> round-elsewhere.json; round-sixth.json round-new.json -> round
 没有预告的写入；反过来，页面印了却没人付，那行就是一条永远发不出的催款单（第 261 轮的同一个错误）。
 
 
+### 3.146 同一个开关，四种回答：批量到底写不写载荷
+
+第 126 条要的是一件小事：四个"一条命令付一整个文件"的命令，对 `--json-out` 说同一句话。查下来它们说了四种话——
+`--settle-reaffirm-file` 与 `--settle-restore-file` 把 `args.json_out` 原样递归进去，单条那段写一个列表；而
+`--settle-drop-file` 与 `--settle-reanchor-file` 在递归前把 `inner.json_out = None`，于是这个开关**什么都不写，也不说**。
+空的标志就是装饰（边界 305 的原话），只不过这次空在另一头：不是"没这道闸门"，是"闸门在，门后没有东西"。
+
+两条路里选了"写整批"而不是"印一句'批量不写载荷'"。理由不是省事：单条那一段本来就支持多条（`--settle-reanchor`
+第 139 轮起是 `nargs="+"`，`done` 是累加的），所以批量要的载荷在它手里已经齐了，把 `json_out` 传进去就是整批的答案——
+一条命令、一份实现（边界 284/304 的同一条理由）。选"印一句不写"，等于给同一族留一条只好不用的分支。
+
+```
+$ python -m brian.cli evolve --settle-reanchor-file data/smd/stream-two.json --settle-why "the record was retargeted" \
+      --settle-by carol --json-out p140.json --dry-run
+would re-anchor  2 decision(s) on data/smd/stream-two.json in one dry run: nothing was recorded
+  round-other.json  (round-new.json -> round-elsewhere.json)
+  round-fifth.json  (round-new.json -> round-elsewhere.json)
+nothing was written; drop --dry-run to re-anchor them (boundary 304).
+no payload      a preview writes nothing, not even the file --json-out names (boundary 304).
+
+$ ... 去掉 --dry-run，同一份载荷就在 p140.json 里：
+{"reanchored": [{"record": "round-other.json", "from": "round-new.json", "to": "round-elsewhere.json", ...},
+                {"record": "round-fifth.json", "from": "round-new.json", "to": "round-elsewhere.json", ...}],
+ "reanchor_refused": 0}
+```
+
+`--settle-drop-file` 现在写 `{"withdrawn": [...], "drop_refused": 0, "drop_skipped": 0}`，两条都在里面。四个命令因此
+是同一个形状：`{"<族名>": [...], "<族名>_refused": N}`，列表在前——照着写脚本的人不必为哪个文件命令特判。
+
+预览那一侧补了一行：四条 dry-run 分支在"nothing was written"之后印
+`no payload      a preview writes nothing, not even the file --json-out names (boundary 304).`。不印这一句，
+`--json-out` 在预览下就是被忽略；而"被忽略"与"做了但结果为空"在读者那里长得一模一样。
+
+最后一处是拒绝：一条都没付的批量（清单说这个文件没有欠账）退出 2，**不写**载荷。空载荷会被读成"跑过了，谁也没付"，
+而真相是"这次运行没有可付的东西"——两种事实不该共用一个文件（边界 155 的老问题换了个位置）。
+
+**边界 333：同一族的命令对同一个开关只能有一种回答。** 四种回答里只要有一种是"静默"，读者就只能靠猜，而猜错的
+代价是他以为写好了。
+
+**边界 334：预览不写任何东西，包括它自己的载荷；所以预览必须明说这一点。** "没写"是行为，"说了没写"是承诺。
+
+**边界 335：拒绝不是付款。** 一次什么都没付的批量不写载荷——空的列表会被读成"付过，付了零个"。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -8149,5 +8193,10 @@ missing for the next level
       `--settle-reanchor` 改成多条，一条理由覆盖整批，被拒的一条不停整批、整批退出 2；`--campaign` 多一行
       `N decision(s) still name a successor their record has left: … -- <batch>`，`Campaign.reanchorable` 进 `--json-out`；
       `--campaign --what-if-records` 把改锚作为第四族算进去，"没有可付的了"必须四族都说没有。见 §3.145。
-126. 让三个文件级命令对 `--json-out` 说同一句话：要么整批写一个 `{"records": [...]}` 载荷，要么明确印出"批量不写载荷"——
-     现在它是静默忽略，而静默的标志就是装饰（边界 305）。
+126. 已实现（第 140 轮）：`--settle-drop-file` 与 `--settle-reanchor-file` 不再把 `inner.json_out` 置空，批量写的就是
+      单条那段写的那个载荷（`{"reanchored": [...]}` / `{"withdrawn": [...], "drop_refused", "drop_skipped"}`），
+      四个文件命令因此同形；四条 dry-run 分支各印 `no payload      a preview writes nothing …`；一条都没付的批量
+      退出 2 且不写载荷。见 §3.146。
+127. 让写法统一到"写没写"这件事上：`--settle-link`/`--settle-note`/`--settle-restore` 这边写载荷时不吭声，而
+      `--json-out` 的别处（如 `evolve --json-out`）会印 `wrote <path>`。要么每个写载荷的地方都印一行 `payload  <path>`，
+      要么统一不印——现在同一个标志在两条线上有两种可见性（边界 333 的同族问题）。

@@ -3395,6 +3395,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 entry = next((item for item in wanted if str(item.get("record") or "") == record), {})
                 _print("  %s  (%s)" % (pair, str(entry.get("kind") or "never")))
             _print("nothing was written; drop --dry-run to re-take them (boundary 304).")
+            _print("no payload      a preview writes nothing, not even the file --json-out names (boundary 304).")
             _print_after_preview(root, pairs, kind="reaffirm", origin=str(row.get("origin") or target))
             return 0
         inner = argparse.Namespace(**vars(args))
@@ -3432,12 +3433,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             for line in _after_preview_lines(root, pairs, kind="drop", origin=target):
                 _print("  " + line.strip())
             _print("nothing was written; drop --dry-run to withdraw them (boundary 304).")
+            _print("no payload      a preview writes nothing, not even the file --json-out names (boundary 304).")
             return 0
         _print("dropping       %d decision(s) on %s in one command" % (len(pairs), match[0].get("origin") or target))
         inner = argparse.Namespace(**vars(args))
         inner.settle_drop_file = None
         inner.settle_drop = pairs
-        inner.json_out = None
+        # Round 140: a batch writes the payload its single form writes, naming every pair it withdrew, and says so when
+        # it writes none. Round 134 had nulled `json_out` here, so the flag produced nothing in silence while
+        # `--settle-restore-file` produced a list -- one family, two answers (boundary 333).
+        inner.json_out = getattr(args, "json_out", None)
         return cmd_evolve(inner, settings)
 
     if getattr(args, "settle_reanchor_file", None):
@@ -3470,12 +3475,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("  %s  (%s -> %s)" % (str(item.get("record") or ""), str(item.get("from") or "?"),
                                              str(item.get("to") or "?")))
             _print("nothing was written; drop --dry-run to re-anchor them (boundary 304).")
+            _print("no payload      a preview writes nothing, not even the file --json-out names (boundary 304).")
             _print_after_preview(root, records, kind="reanchor", origin=str(row.get("origin") or file_target))
             return 0
         inner = argparse.Namespace(**vars(args))
         inner.settle_reanchor_file = None
         inner.settle_reanchor = records
-        inner.json_out = None
+        # Round 140: same rule as the other batches -- the payload the single command writes, carrying every record
+        # this one paid, and a preview that writes none says so instead of going quiet (boundary 333).
+        inner.json_out = getattr(args, "json_out", None)
         inner.dry_run = False
         return cmd_evolve(inner, settings)
 
@@ -3640,6 +3648,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        % (pair, str(entry.get("at") or "?"), float(entry.get("age_days") or 0.0)))
             _print("nothing was written; afterwards that file would owe no unanswered withdrawal. Drop --dry-run to "
                    "take them up again (boundary 304).")
+            _print("no payload      a preview writes nothing, not even the file --json-out names (boundary 304).")
             _print_after_preview(root, pairs, kind="restore", origin=str(match[0].get("origin") or target))
             return 0
         inner = argparse.Namespace(**vars(args))
