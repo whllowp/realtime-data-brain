@@ -8428,6 +8428,67 @@ claims            1 round(s) name a file a person claimed, and the geometry neve
 **边界 374**：继承来的事实带两个日期——它发生过的时刻、和它被再断言一次的时刻；只记其中一个，都会让读者
 把旧断言当成新证据（或把新测量当成旧结论）。
 
+### 3.161 断言的年龄：同一句话被继承两次之后，`at` 已经不是它的出生日
+
+第 154 轮把断言复制到了重测写出的新记录上，但那条拷贝只记得**一跳**（`inherited_from`），而 `at` 永远
+被刷新成新记录的时刻。于是连着重测两次之后，"这条断言是什么时候第一次被记下的"就查不到了：一条越来越老的
+断言，看起来和这一轮刚确认的一样新。
+
+这一轮让它带上自己的年龄：`claim_origin`（最初记下这条断言的轮）、`claim_since`（那一刻）、
+`claim_hops`（被继承了几次）。
+
+真跑第二次继承（`var/demo155`，先把上一轮的继承记录补上 `claim_*` 三个字段——见下面的"遗留"）：
+
+```
+---- re-running round-20261120T090613Z.json on data/smd/stream-one.json
+  careful: the file data/smd/stream-one.json was claimed by a person, and its geometry disagrees with the
+  ones the round recorded -- what this measures is evidence about that file, not about the one the round
+  first measured (boundary 371)
+recorded round var\evolve\round-20261120T091408Z.json
+retired round-20261120T090613Z.json (re-measured as round-20261120T091408Z.json)
+```
+
+新记录的条目：
+
+```
+{"from": "data/smd/stream-one.json", "to": "data/smd/stream-one.json",
+ "at": "2026-11-20T09:14:08.985899+00:00",           <- 这一轮量它的时刻
+ "geometry": "disagrees", "why": "the record named no file; this one was claimed by hand",
+ "inherited_from": "round-20261120T090613Z.json",    <- 上一跳
+ "claim_origin": "round-out-of-reach.json",          <- 最初那条断言
+ "claim_since": "2026-11-20T09:06:13.294446+00:00",  <- 没有被刷新
+ "claim_hops": 2}
+```
+
+页面：
+
+```
+claims            1 round(s) name a file a person claimed, and the geometry never confirmed it:
+                  round-20261120T091408Z.json data/smd/stream-one.json (disagrees)
+claims            the one on round-20261120T091408Z.json was inherited 2 time(s) and was first recorded on
+                  round-out-of-reach.json at 2026-11-20T09:06:13.294446+00:00
+```
+
+**两个指针，不是两个字段的重复。** `inherited_from` 回答"这条记录重测的是哪一条"，`claim_origin` 回答
+"这条断言最初记在哪儿"。第二次继承之后两者不同（前者是上一跳，后者是最初那条），一个字段不可能同时是这两个
+答案——这就是为什么必须两个都留。
+
+**`claim_since` 不能跟着 `at` 走。** 每次重测都会刷新 `at`（那是测量的时刻），而断言的年龄不是测量的年龄。
+只要有一次把 `claim_since` 换成 `at`，"这条断言从第 N 轮起就没被几何确认过"就永久丢了（第 153 轮记 `at`
+时，`boundaries 374` 说的是同一件事的另一半：一个事实带两个日期，混用哪个都会让读者读错）。
+
+**页面上的句子只在真的继承过时才出现。** `hops == 0`（断言就是这一轮自己记的）时不多说一句——多一句"它是
+这一轮记下的"只是把读者已经知道的事重复一遍，而且会让真的继承（那一句）看起来像套话。
+
+**遗留（写进下一项）**：第 154 轮写出的记录没有这三个字段，从现在开始重测才会写。所以旧的继承记录在页面上
+读成 `hops = 0`——它们的链从 155 轮才开始数。这一轮只能靠 `inherited_from` 推出一跳的 `claim_origin`，
+`claim_since` 则会误取那次重测的时刻。下一轮给这些记录补一次（自报 `backfilled`，与第 147 轮同形）。
+
+**边界 375**：被复制的事实必须带上自己的年龄；如果记录里的时刻每次都被刷新，一条旧断言就会读得像刚被确认的，
+而这正是"没有外部信号时自我确认"最省力的一种形态。
+**边界 376**：一条链需要两个指针——上一跳（"这条重测了什么"）与原点（"这句话最早是谁、在哪一轮说的"）；
+一个字段同时承担两种语义，迟早会被后来的代码按其中一种解读。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9024,5 +9085,8 @@ missing for the next level
 140. **已完成（见 §3.160）** 一次重测现在是"踩在谁的断言上"完成的：`RoundResult` 多了 `stream_path_history`，
      队列重跑把被继承的条目（`inherited_from`、原来那条 `why`、新记录自己的 `at`）写进它写出的新记录，
      于是 `claim_note`、`claimed_rounds` 与 `--campaign` 在新记录上仍然数得到那条断言。
-141. 让继承也能链式读：一条断言连着被继承几次之后，要说出它最初是哪一轮记下的（`claim_origin`）与已经站了多少轮，
-     否则越老的断言看起来越像这一轮刚确认的。
+141. **已完成（见 §3.161）** 被继承的断言带上了自己的年龄：`claim_origin`（最初记下它的轮）、
+     `claim_since`（那一刻，不随重测刷新）、`claim_hops`（继承了几次）；`claimed_rounds` 与 `--campaign` 说得出
+     "这条断言被继承过几次、最初记在哪一轮"。
+142. 给第 154 轮写出的继承记录补上 `claim_origin` / `claim_since` / `claim_hops`（自报 `backfilled`，与第 147 轮
+     同形）：现在是"旧记录的链从 155 轮才开始数"，`claim_since` 会误取那次重测的时刻。

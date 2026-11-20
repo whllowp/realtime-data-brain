@@ -2515,12 +2515,22 @@ def inherit_claim(record: Dict[str, Any], target_file: str,
     if entry is None or str(entry.get("to") or "") != str(target_file or ""):
         return []
     moment = now or datetime.now(timezone.utc)
+    # Round 155: an inherited entry is the same assertion, not a new one. Its origin and its first moment
+    # travel with it, so a claim that has been re-measured three times does not read like one confirmed
+    # today (boundary 375). A claim recorded by hand is its own origin.
+    origin = str(entry.get("claim_origin") or entry.get("inherited_from")
+                 or record.get("round") or "")
+    since = str(entry.get("claim_since") or entry.get("at") or "")
+    hops = int(entry.get("claim_hops") or 0) + 1
     return [{"from": str(record.get("stream_path") or ""),
              "to": str(target_file or ""),
              "at": moment.isoformat(),
              "geometry": str(entry.get("geometry") or "unknown"),
              "why": str(entry.get("why") or ""),
-             "inherited_from": str(record.get("round") or "")}]
+             "inherited_from": str(record.get("round") or ""),
+             "claim_origin": origin,
+             "claim_since": since,
+             "claim_hops": hops}]
 
 
 def claim_note(record: Dict[str, Any]) -> Optional[str]:
@@ -2556,10 +2566,15 @@ def claimed_rounds(rounds: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         entry = [item for item in (record.get("stream_path_history") or []) if isinstance(item, dict)]
         last = entry[-1] if entry else {}
+        # Round 155: `at` is when this record was measured; the claim itself is older whenever it was
+        # inherited, and the page has to be able to say how much older (boundary 375).
         rows.append({"round": str(record.get("round") or ""),
                      "stream_path": str(record.get("stream_path") or ""),
                      "geometry": str(last.get("geometry") or "unknown"),
-                     "at": str(last.get("at") or "")})
+                     "at": str(last.get("at") or ""),
+                     "origin": str(last.get("claim_origin") or last.get("inherited_from") or ""),
+                     "since": str(last.get("claim_since") or last.get("at") or ""),
+                     "hops": int(last.get("claim_hops") or 0)})
     return rows
 
 

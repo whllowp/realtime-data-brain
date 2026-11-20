@@ -1032,6 +1032,14 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                                                                row["geometry"]) for row in claims)))
         lines.append("claims            a re-measurement on such a round is evidence about that file, not about "
                      "the one the round first measured (boundary 371)")
+        # Round 155: how old the assertion is, asked once for the page rather than left to a reader who
+        # would have to walk `inherited_from` back through the ledger by hand (boundary 375).
+        aged = [row for row in claims if int(row.get("hops") or 0)]
+        if aged:
+            lines.append("claims            %s" % "; ".join(
+                "the one on %s was inherited %d time(s) and was first recorded on %s at %s"
+                % (row["round"], int(row["hops"]), row.get("origin") or "?", row.get("since") or "?")
+                for row in aged))
     if result.broken_links:
         # Round 82: round 81 counted these so `--strict` could exit 2, and printed them only on `--audit`.
         # A reader who runs the campaign page and sees a non-zero exit with no line to explain it has to
