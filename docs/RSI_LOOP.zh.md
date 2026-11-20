@@ -5730,6 +5730,51 @@ links             blocked by the books: data/smd/stream-real.json 1 promise(s) (
 ```
 
 
+### 3.112 账本修好了，拒绝就该自己失效
+
+第 105 轮让每一次拒绝都说出了挡住它的那句话，那句话却是**每次读的时候现算的**：`--retry-blocked` 因此成了唯一的
+出口，哪怕调用者刚刚把账本修好、现算的句子已经变了。第 106 轮把"拒绝的原因"存进走过的那一趟，并让页面和队列都
+只认今天的那句话。
+
+三类数字先分开（边界 236）。第 105 轮把一次阻截记成 `{"version": 20, "code": 2}`，再在页面上汇总成一个 `attempts`：
+"同一个文件被挡了三次"和"这个文件上三条承诺各被挡一次"读起来一模一样，而前者要修的地方和后者完全不同。现在
+`attempted` 每次记 `{"version", "code", "why"}`，档案里多出 `retried` 一份名单：
+
+```
+links             blocked by the books: data/smd/stream-real.json 1 promise(s) (v020), 2 refusal(s) across 1 retried promise(s), last 2026-11-20T00:37:28.706167+00:00 -- round-old.json is one of the records in a mismatch link: …
+```
+
+然后是那句原因（边界 237）。它必须被写下来，不能现算：一份只存 `code` 的账簿永远发现不了"书已经换了"。
+
+```
+links             the refusal of v020 no longer stands: the ledger has changed since 2026-11-20T00:37:28.706167+00:00
+```
+
+于是被挡住的承诺不必再借 `--retry-blocked`（边界 238）——队列自己把它接回来：
+
+```
+from queue       1 of 1 runnable promise(s) hold no verdict on the file they were born with; measuring each on its own origin
+---- v020  <-  data/smd/stream-real.json  (never measured where this promise was made)
+        this is the first verdict taken on the file the promise was born with: all 1 it holds were measured elsewhere (boundary 213)
+  v020  digest.rolling_window = 200  FAILED and reverted: promised recall 0.507 at the 10% budget, re-measured 0.060 (below 0.456)
+```
+
+第四个缺陷是在**跑**的时候才出现的，也是这一轮真正的一课：判断"变了没有"的第一版要求两份句子都非空
+（`bool(stored and current and stored != current)`）。可是把账本**彻底**修好之后 `provenance_block` 返回 `None`，
+今天没有句子了——于是最干净的那种修复反而不算"变了"，被挡的承诺永远挡着，`--retry-blocked` 又成了唯一的路。
+现场证据是 `provenance_block(root, 20) is None` 而 `blocked_versions` 仍拒绝 v020、`changed: False`。改成
+`bool(stored) and stored != current`：**"今天没有这句话"是最强的变化**，不是没有变化。
+
+第五个缺陷同源：同一份拒绝被三趟走各记了一次，页面就把同一句"拒绝不再成立"印了三遍，配三个时间戳，读起来像三件事。
+`stale_refusals` 现在按新到旧去重，一条承诺一行（和这个存储里其他每个列表一致）。
+
+**边界 236**：同一个文件被挡三次、和三条承诺各被挡一次，是两种故障；一个合计把它们读成同一种。
+
+**边界 237**：拒绝必须记下当时拒绝它的那句话，否则"书变了"永远无法被发现。
+
+**边界 238**：账本自己已经答掉的拒绝，必须在没有任何绕行开关的情况下失效；否则 `--retry-blocked` 变成常规入口，
+而常规入口就是没有人去量过的那个入口。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6148,6 +6193,9 @@ missing for the next level
     `blocked by the books: <file> N promise(s) (v020), refused N time(s), last <at> -- <那句话>`，
     `--history` 的行只写 `[refused by the queue on <at>]`：长的矛盾句只印在它所属的那份文件上，不跟着每一行重复。
     （第 105 轮完成。）
-92. 让"原件被反复挡住"和"记录被反复挡住"分开数：同一份文件上，可能是三条不同的承诺各自被挡一次，
+92. （已完成）把一次拒绝和一次重试分开计数，并让修好的账本自己解掉拒绝：`attempted` 记下版本、退出码与原因；`blocked_versions` 丢掉原因已变或已消失的拒绝；`blocked_dossier` 多一份 `retried`；`--campaign` 先报"拒绝不再成立"，再报档案。文档 §3.112，测试 `tests/test_blocked_dossier.py`（12 项）。
     也可以是同一条承诺被挡三次；`attempts` 现在把两者加在一起，读者分不出这是"文件有问题"还是"记录有问题"。
     再让 `--retry-blocked` 只重试那些账本真的变过的记录（比对挡下时的 `provenance_block` 详情与今天的）。
+
+
+93. 给 `--campaign` 一份"拒绝史"：每条被挡过的承诺，第一次被挡在哪一趟、被挡了几趟、最后一次是哪一趟；并让 `--history` 的 `[refused by the queue on …]` 标记能指出是哪一趟走过（用 `at` 连到 `queue_runs.json` 的那一条），这样"这个版本被挡过"和"它已经很久没被挡了"可以分开读。

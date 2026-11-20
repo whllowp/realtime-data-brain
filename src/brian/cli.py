@@ -122,6 +122,7 @@ from .promote import (
     origin_queue,
     queue_history,
     blocked_dossier,
+    stale_refusals,
     state_budgets,
     state_drains,
     version_label,
@@ -2289,7 +2290,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                      in_force=in_force_rows, in_force_cleared=in_force_cleared,
                                      in_force_stale=in_force_stale_rows, in_force_history=in_force_record,
                                      queue_run=last_queue_run(root), queue_history=queue_history(root),
-                                     blocked_dossier=blocked_dossier(root))
+                                     blocked_dossier=blocked_dossier(root),
+                                     stale_refusals=stale_refusals(root))
         except OSError as error:
             _print("cannot read %s: %s" % (root / EVOLVE_DIR, error))
             return 2
@@ -2805,6 +2807,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             worst = 0
             measured_now: List[int] = []
             codes: Dict[int, int] = {}
+            # Round 106: what refused each version, recorded with the walk so a later one can compare the sentence.
+            refused: Dict[int, str] = {}
             stopped_at = 0
             remaining: List[int] = []
             for index, row in enumerate(chosen):
@@ -2825,6 +2829,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 worst = max(worst, code)
                 measured_now.append(version)
                 codes[version] = code
+                if code == 2:
+                    block = provenance_block(root, version)
+                    refused[version] = str(block[1]) if block else ""
                 if worst == 2:
                     # Round 103: exit 2 means the books for this record contradict each other, and that is not a
                     # defect the next promise in the queue can measure away. Stop, name what was left, and let the
@@ -2849,8 +2856,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                     "cleared": max(0, cleared_here),
                     "worst": worst,
                     "stopped_at": stopped_at,
-                    "attempted": [{"version": version, "code": codes.get(version, 0)}
-                                  for version in measured_now],
+                    # Round 106: the refusal carries its reason, so a later walk can tell a refusal that still
+                    # stands from one the ledger has already answered.
+                    "attempted": [{"version": version, "code": codes.get(version, 0),
+                                   "why": refused.get(version, "")} for version in measured_now],
                 })
             except OSError:
                 pass

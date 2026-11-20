@@ -1783,7 +1783,10 @@ def record_queue_run(root: Path, run: Mapping[str, Any], now: Optional[datetime]
         # Round 104: which versions this walk actually attempted, and what the inner check returned for each. Without
         # it the store knows how many were measured but not which ones -- so the next walk cannot tell "nobody has
         # tried this" from "this was tried and the books refused it twice".
-        "attempted": [{"version": int(item.get("version") or 0), "code": int(item.get("code") or 0)}
+        # Round 106: the reason travels with the attempt, so a later walk can tell a refusal that still stands from
+        # one the ledger has already answered. A store that keeps only the code can never notice a repaired book.
+        "attempted": [{"version": int(item.get("version") or 0), "code": int(item.get("code") or 0),
+                       "why": str(item.get("why") or "")}
                       for item in run.get("attempted") or [] if isinstance(item, Mapping)],
     }
     held = queue_runs(root)
@@ -1820,12 +1823,51 @@ def blocked_versions(root: Path) -> Dict[int, Dict[str, Any]]:
                 # Round 105: a refusal is only useful if it says what refused it. `provenance_block` knows which
                 # record's book contradicts this promise; without it the page says "the books disagree" and leaves
                 # the reader with no record to open.
+                # Round 106: the reason is recorded *with the refusal*, and today's answer is compared against it.
+                # A refusal that no longer stands does not have to be re-bought with `--retry-blocked`: the caller
+                # repaired the books, and the ledger can see it. A refusal whose wording changed but whose fault
+                # did not (a different record named) is still a refusal, so the comparison is on the whole sentence.
+                stored = str(item.get("why") or "")
+                current = _blocked_reason(root, version)
+                # Round 106: a refusal that has gone away is at least as changed as one whose sentence moved.
+                # Requiring both sentences meant a fully repaired record stayed refused forever -- exactly the case
+                # this round exists for, since `provenance_block` returning None is the strongest answer there is.
                 blocked[version] = {"version": version, "at": str(run.get("at") or ""), "code": code,
-                                    "why": _blocked_reason(root, version)}
+                                    "why": current or stored, "stored_why": stored,
+                                    "changed": bool(stored) and stored != current}
             else:
                 # A later attempt that did not hit the wall settles the question: the record is not blocked.
                 blocked[version] = {"version": version, "at": "", "code": code}
-    return {version: item for version, item in blocked.items() if item["code"] == 2}
+    return {version: item for version, item in blocked.items()
+            if item["code"] == 2 and not item.get("changed")}
+
+
+def stale_refusals(root: Path) -> List[Dict[str, Any]]:
+    """Refusals whose reason is no longer the reason (round 106).
+
+    A walk records the sentence `provenance_block` gave it. If the ledger has moved since -- repaired, retired,
+    re-nominated -- today's sentence differs, and the promise is no longer refused by the same book. Reporting it
+    apart is what keeps `--retry-blocked` from being the only way out: the caller who repaired the books gets the
+    record back in the queue, and the caller who did not is told the refusal still stands, with its reason.
+    """
+    stale: List[Dict[str, Any]] = []
+    # Newest first, one entry per promise: a refusal recorded by three walks is one refusal that ended, not three.
+    seen: set = set()
+    for run in reversed(queue_runs(root)["runs"]):
+        for item in run.get("attempted") or []:
+            if not isinstance(item, Mapping) or int(item.get("code") or 0) != 2:
+                continue
+            version = int(item.get("version") or 0)
+            if not version:
+                continue
+            stored = str(item.get("why") or "")
+            current = _blocked_reason(root, version)
+            if version in seen:
+                continue
+            if stored and stored != current:
+                seen.add(version)
+                stale.append({"version": version, "at": str(run.get("at") or ""), "was": stored, "now": current})
+    return stale
 
 
 def _blocked_reason(root: Path, version: int) -> str:
@@ -1910,7 +1952,12 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
                                             "reasons": []})
         entry["records"].append(version)
         # A refusal recorded before round 104 has no attempt list, but it was refused at least once.
-        entry["attempts"] += attempts.get(version, 1)
+        tries = attempts.get(version, 1)
+        entry["attempts"] += tries
+        if tries > 1:
+            # Round 106: "this file was blocked three times" and "three promises here were each blocked once" are
+            # different faults on the same file, and one total reads them the same.
+            entry.setdefault("retried", []).append(version)
         entry["last_at"] = max(str(entry.get("last_at") or ""), str(row.get("at") or ""))
         reason = str(row.get("why") or "")
         if reason and reason not in entry["reasons"]:

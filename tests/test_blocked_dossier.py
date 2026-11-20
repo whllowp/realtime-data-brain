@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Round 105 tests: the refusal names the book that refuses it, and the dossier is per origin file."""
 import argparse
+import json
 
 from brian import cli
 from brian.campaign import campaign, format_campaign
@@ -50,7 +51,50 @@ def test_the_dossier_groups_by_the_origin_file(tmp_path):
 def test_the_dossier_counts_each_refusal(tmp_path):
     _blocked(tmp_path)
     _walk(tmp_path, attempted=[{"version": 20, "code": 2}])
-    assert blocked_dossier(tmp_path)[FILE]["attempts"] == 2
+    entry = blocked_dossier(tmp_path)[FILE]
+    assert entry["attempts"] == 2
+    # One promise refused twice is a retried promise, not two broken promises (boundary 236).
+    assert entry["retried"] == [20]
+    assert entry["records"] == [20]
+
+
+def test_a_refusal_of_a_version_with_no_record_is_counted_not_dropped(tmp_path):
+    _blocked(tmp_path)
+    _walk(tmp_path, attempted=[{"version": 20, "code": 2}, {"version": 21, "code": 2}])
+    dossier = blocked_dossier(tmp_path)
+    # v021 has no record in this ledger, so its origin cannot be named; it is still a refused promise and must
+    # appear somewhere rather than vanish from the count (round 47's rule: an unattributable record is reported).
+    assert dossier[FILE]["records"] == [20]
+    assert dossier["(unnamed)"]["records"] == [21]
+
+
+def test_a_refusal_that_no_longer_stands_is_reported_and_dropped(tmp_path):
+    from brian.promote import blocked_versions, stale_refusals
+
+    _blocked(tmp_path)
+    # A walk records the sentence that refused it; the fixture's synthetic attempt has none, so it is written here
+    # as the walk would have written it.
+    why = blocked_versions(tmp_path)[20]["why"]
+    _walk(tmp_path, attempted=[{"version": 20, "code": 2, "why": why}])
+    # The books move: the successor now names the round that retired into it, so the other claimant is the one
+    # left naming it and today's sentence is not the one on file.
+    document = tmp_path / "var" / "evolve" / "round-new.json"
+    payload = json.loads(document.read_text(encoding="utf-8"))
+    payload["queue"] = {"paid": "SMD", "paid_round": "round-old.json", "family": "file"}
+    document.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+    stale = stale_refusals(tmp_path)
+    assert stale and stale[0]["version"] == 20
+    assert stale[0]["was"] != stale[0]["now"]
+    # ... and the queue takes the promise back without `--retry-blocked`.
+    assert 20 not in (blocked_dossier(tmp_path).get(FILE) or {}).get("records", [])
+
+
+def test_a_refusal_that_still_stands_is_not_dropped(tmp_path):
+    from brian.promote import stale_refusals
+
+    _blocked(tmp_path)
+    assert stale_refusals(tmp_path) == []
+    assert 20 in blocked_dossier(tmp_path)[FILE]["records"]
 
 
 def test_no_refusal_no_dossier(tmp_path):
@@ -64,7 +108,9 @@ def test_the_campaign_names_the_file_and_how_often(tmp_path):
     assert FILE in result.blocked_dossier
     page = format_campaign(result)
     assert "blocked by the books: %s 1 promise(s) (v020)" % FILE in page
-    assert "refused 1 time(s)" in page
+    # Round 106: promises, refusals and retries are three numbers, so one block reads as "this file is broken"
+    # and three blocks on one promise reads as "this record is broken".
+    assert "1 refusal(s) across none retried" in page
     # The long contradiction is printed once, here, for the file it belongs to.
     assert "one of the records in a mismatch link" in page
 
