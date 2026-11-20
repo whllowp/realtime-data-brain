@@ -2674,6 +2674,9 @@ def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, An
     came with a reason, one that gained a note later, one that has neither, and -- inside each -- a decider or
     explainer who was named versus one who was not (boundaries 166/260). A page that printed only
     "N settlements" would make four different books read the same (boundary 213 applied to decisions).
+
+    `reaffirmed` counts the decisions that have been re-taken at least once (round 119): "settled once" and
+    "settled and re-confirmed twice" are different amounts of work behind the same word.
     """
     pairs = list(settlements or [])
     explained = sum(1 for item in pairs if str(item.get("why") or "").strip())
@@ -2690,7 +2693,8 @@ def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, An
                 continue
             author = str(note.get("by") or "").strip()
             explainers[author] = explainers.get(author, 0) + 1
-    return {"pairs": len(pairs), "explained": explained, "explained_later": later,
+    return {"reaffirmed": sum(1 for item in pairs if item.get("reaffirmations")),
+            "pairs": len(pairs), "explained": explained, "explained_later": later,
             "unexplained": unexplained,
             "deciders": dict(sorted(deciders.items())), "explainers": dict(sorted(explainers.items())),
             "unattributed": sum(1 for item in pairs if not str(item.get("by") or "").strip())}
@@ -2730,6 +2734,85 @@ def _is_later(moment: str, than: str) -> bool:
         return moment > than
 
 
+def _effective_moment(item: Mapping[str, Any]) -> str:
+    """The moment a decision speaks about: its own date, or a later re-affirmation of it (round 119).
+
+    A re-affirmation is the operator saying "I have read today's books and the decision still stands", so claims
+    that were already in the ledger are covered by it. Without this, re-taking a decision would change nothing:
+    the same claims would go on being "later than" the original date for ever.
+    """
+    moments = [str(item.get("at") or "")]
+    for entry in item.get("reaffirmations") or []:
+        if isinstance(entry, Mapping):
+            moments.append(str(entry.get("at") or ""))
+    dated = [moment for moment in moments if moment]
+    if not dated:
+        return ""
+
+    def _key(moment: str) -> Any:
+        try:
+            return datetime.fromisoformat(moment)
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    return max(dated, key=_key)
+
+
+def reaffirm_link(root: Path, record: str, successor: str, *, why: str = "", by: str = "",
+                  claimants: Sequence[str] = (), now: Optional[Any] = None) -> Dict[str, Any]:
+    """Re-take a decision after reading today's books (round 119).
+
+    The decision keeps its first date -- that is when the question was settled -- and gains a re-affirmation that
+    says when it was last confirmed and what it saw. A re-affirmation is a new decision, so it needs a reason
+    (round 113's rule for `--settle-link`, applied to the second time of asking), and it is refused when the
+    settled record no longer names that successor: re-affirming a pair the ledger denies would assert something
+    false, and the honest remedies there are a new `--settle-link` or dropping the decision (boundary 273).
+    """
+    name = str(record or "").strip()
+    target = str(successor or "").strip()
+    if not name or not target:
+        raise ValueError("a re-affirmation needs a record and a successor, like RECORD=SUCCESSOR")
+    reason = str(why or "").strip()
+    if not reason:
+        raise ValueError("a re-affirmation needs a reason: --settle-why TEXT. Re-taking a decision without saying "
+                         "what changed is how a decision nothing supports stays alive")
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    settlements = load_settlements(root)
+    for item in settlements:
+        if str(item.get("record") or "") != name or str(item.get("successor") or "") != target:
+            continue
+        rounds = history(root, include_retired=True)
+        record_row = next((row for row in rounds if str(row.get("round") or "") == name), None)
+        retired = (record_row or {}).get("retired")
+        named = str(retired.get("re_measured_as") or "") if isinstance(retired, Mapping) else ""
+        if record_row is None:
+            raise ValueError("no recorded round named %s: the decision describes a record the ledger no longer "
+                             "holds, so there is nothing to re-affirm" % name)
+        if named != target:
+            raise ValueError("%s no longer names %s as its successor (%s): a re-affirmation would assert something "
+                             "the ledger denies. Take a new decision with --settle-link, or drop this one"
+                             % (name, target, named or "no retirement mark"))
+        stored = [entry for entry in item.get("reaffirmations") or [] if isinstance(entry, Mapping)]
+        if stored and str(stored[-1].get("at") or "") == moment.isoformat():
+            return {"record": name, "successor": target, "at": moment.isoformat(), "changed": False,
+                    "reaffirmations": len(stored)}
+        stored.append({"at": moment.isoformat(), "why": reason, "by": str(by or ""),
+                       "claimants": sorted(str(claim) for claim in claimants)})
+        item["reaffirmations"] = stored
+        path = root / EVOLVE_DIR / SETTLEMENTS
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"format": SETTLEMENT_FORMAT, "settlements": settlements},
+                                   indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
+        return {"record": name, "successor": target, "at": moment.isoformat(), "changed": True,
+                "reaffirmations": len(stored)}
+    raise ValueError("no settlement recorded for %s -> %s: `--settle-link` records a decision, `--settle-reaffirm` "
+                     "re-takes one" % (name, target))
+
+
+def moved_clearable(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The moved decisions `--settle-reaffirm` can clear: the pair still exists, only a claim arrived later."""
+    return [dict(row) for row in rows if row.get("clearable")]
+
 def moved_settlements(rounds: Sequence[Mapping[str, Any]],
                       settlements: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """Settled decisions whose evidence has changed since they were taken (round 118).
@@ -2742,8 +2825,10 @@ def moved_settlements(rounds: Sequence[Mapping[str, Any]],
     - `new_claimant`: another record now claims the same successor. The decision settled *one* claimant's claim
       (round 112), so a second claimant is not covered by it -- the contradiction is back, one book larger.
 
-    Reported, not charged: nothing in this build can re-open a decision (that is the next command), and a gate
-    that fails on a sentence no command can clear is the gate nobody runs (boundaries 154/171).
+    A decision can be re-taken (`reaffirm_link`, round 119): a re-affirmation moves the date the decision speaks
+    about, so a claim that arrived before it is covered and only a later one moves the evidence again. Two kinds
+    stay uncharged even then -- when the pair itself is gone (`retargeted`/`gone`) there is nothing to re-affirm,
+    so the remedy is a new decision, not a re-dating (boundaries 154/171/271/273).
     """
     by_name = {str(record.get("round") or ""): record for record in rounds}
     claims: Dict[str, List[Dict[str, Any]]] = {}
@@ -2763,6 +2848,11 @@ def moved_settlements(rounds: Sequence[Mapping[str, Any]],
         successor = str(item.get("successor") or "")
         record = by_name.get(name)
         reasons: List[str] = []
+        # The pair the decision describes has to still exist for `reaffirm_link` to have anything to re-take; the
+        # later-claim reasons are exactly what re-taking covers. Tracked as a boolean because the sentences below
+        # both mention the successor, and a substring test cannot tell "the pair moved" from "a claim arrived"
+        # (round 119's own defect, caught by its first test run).
+        pair_gone = record is None
         if record is None:
             reasons.append("the settled record is no longer in the ledger")
         else:
@@ -2770,9 +2860,11 @@ def moved_settlements(rounds: Sequence[Mapping[str, Any]],
             named = str(retired.get("re_measured_as") or "") if isinstance(retired, Mapping) else ""
             if not named:
                 reasons.append("it carries no retirement mark any more")
+                pair_gone = True
             elif named != successor:
                 reasons.append("it now names %s as its successor" % named)
-        own = str(item.get("at") or "")
+                pair_gone = True
+        own = _effective_moment(item)
         later = [claim for claim in claims.get(successor, [])
                  if claim["record"] != name and _is_later(claim["at"], own)]
         if later:
@@ -2782,6 +2874,9 @@ def moved_settlements(rounds: Sequence[Mapping[str, Any]],
         # not move the evidence, and it is never counted as one that does (boundary 272).
         if reasons:
             rows.append({"record": name, "successor": successor, "at": str(item.get("at") or ""),
+                         "effective_at": own,
+                         "reaffirmed": len(item.get("reaffirmations") or []),
+                         "clearable": not pair_gone,
                          "reasons": reasons,
                          "claimants": sorted(str(claim["record"]) for claim in later)})
     rows.sort(key=lambda row: (row["at"] or "", row["record"]))

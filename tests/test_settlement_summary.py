@@ -49,7 +49,7 @@ def test_a_decision_nobody_explained_is_counted_alone(tmp_path):
 
 def test_an_empty_store_summarises_to_zeros(tmp_path):
     summary = settlement_summary([])
-    assert summary == {"pairs": 0, "explained": 0, "explained_later": 0, "unexplained": 0,
+    assert summary == {"pairs": 0, "explained": 0, "explained_later": 0, "unexplained": 0, "reaffirmed": 0,
                        "deciders": {}, "explainers": {}, "unattributed": 0}
 
 

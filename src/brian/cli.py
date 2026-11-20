@@ -81,6 +81,8 @@ from .evolve import (
     moved_settlements,
     settlement_summary,
     repair_legacy,
+    moved_clearable,
+    reaffirm_link,
     settle_link,
     settle_note,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
@@ -361,7 +363,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  broken_links: int = 0, in_force: int = 0,
                  in_force_stale: int = 0, in_force_untested: int = 0,
                  unexplained_stale: int = 0,
-                 unexplained_days: Optional[float] = None) -> int:
+                 unexplained_days: Optional[float] = None,
+                 restaled: int = 0, max_restaled: Optional[int] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -437,6 +440,16 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                "RECORD=SUCCESSOR`")
         _print("  with `--settle-why TEXT --settle-by NAME` is the command that pays it: --strict exits 1 "
                "(boundary 266).")
+    if restaled:
+        # Round 118 reported "the books moved"; round 119 is the command that clears it, so what is left is
+        # chargeable -- and only the clearable kind: a decision whose pair is gone has nothing to re-affirm
+        # (boundaries 271/275).
+        _print("")
+        _print("%d decision(s) rest on books that have moved since they were taken, above the %d asked for:"
+               % (restaled, int(max_restaled or 0)))
+        _print("  a claim arrived on the same successor after the decision, so it covers a pair the ledger no")
+        _print("  longer describes: `--settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME`")
+        _print("  re-takes it against today's books: --strict exits 1 (boundary 273).")
     if broken_links:
         return 2
     if unreconstructable:
@@ -601,7 +614,7 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     ceiling_capped = (max_ceiling_debt is not None and ceiling_missing
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
     return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
-                 or ceiling_capped or in_force_stale or unexplained_stale) else 0
+                 or ceiling_capped or in_force_stale or unexplained_stale or restaled) else 0
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -1618,6 +1631,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # Round 117: a decision nobody explained becomes debt only past the age the caller asked for, because a
     # ledger whose settlements predate --settle-why would otherwise be red on every run (boundary 154's rule).
     _unexplained_cap = getattr(args, "max_unexplained_days", None)
+    # Round 119: round 118's "the books moved" is now clearable, so it is chargeable -- but only the clearable
+    # kind. A decision whose pair was retargeted or deleted cannot be re-affirmed, so charging it would be a gate
+    # nobody can clear (boundaries 154/171/266/271/275).
+    try:
+        _moved_rows = moved_clearable(moved_settlements(history(root, include_retired=True),
+                                                        load_settlements(root)))
+    except (OSError, ValueError):
+        _moved_rows = []
+    _moved_cap = getattr(args, "max_moved", None)
+    _restaled = len(_moved_rows) if (_moved_cap is not None and len(_moved_rows) > int(_moved_cap)) else 0
     unexplained_stale = ([row for row in unexplained_rows
                           if float(row.get("age_days") or 0.0) >= float(_unexplained_cap)]
                          if _unexplained_cap is not None else [])
@@ -1671,6 +1694,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("--max-ceiling-debt caps a --strict charge; without --strict nothing reads it")
         return 2
 
+    if getattr(args, "max_moved", None) is not None and not getattr(args, "strict", False):
+        # Round 119: same rule as --max-unexplained-days -- a cap nobody reads is a flag that looks armed.
+        _print("--max-moved caps a --strict charge; without --strict nothing reads it")
+        return 2
     if getattr(args, "max_unexplained_days", None) is not None and not getattr(args, "strict", False):
         # Round 117: same shape as --max-ceiling-debt. The page prints the ages either way; only the gate fails.
         _print("--max-unexplained-days caps a --strict charge; without --strict nothing reads it")
@@ -1781,9 +1808,16 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             _print("settled         %d decision(s) rest on books that have moved since they were taken:"
                    % len(moved_rows))
             for item in moved_rows:
-                _print("  %-26s -> %-26s  (%s)"
+                # Round 119: the row says whether this decision has ever been re-taken and when. A reader who
+                # cannot tell "never re-confirmed" from "re-confirmed twice" cannot judge the debt.
+                taken = int(item.get("reaffirmed") or 0)
+                if taken:
+                    mark = "  [re-taken %d time(s), last on %s]" % (taken, item.get("effective_at") or "(no date)")
+                else:
+                    mark = "  [never re-taken: only --settle-reaffirm moves the date it speaks about]"
+                _print("  %-26s -> %-26s  (%s)%s"
                        % (item["record"] or "(unrecorded)", item["successor"] or "(unrecorded)",
-                          "; ".join(str(reason) for reason in item.get("reasons") or [])))
+                          "; ".join(str(reason) for reason in item.get("reasons") or []), mark))
             _print("                a decision is a statement about the books as they stood; when they move, "
                    "take it again")
         if unexplained_rows:
@@ -2556,7 +2590,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             in_force_stale=len(in_force_stale_rows),
                             in_force_untested=sum(1 for row in in_force_stale_rows if row.get("untested")),
                             unexplained_stale=len(unexplained_stale),
-                            unexplained_days=_unexplained_cap)
+                            unexplained_days=_unexplained_cap,
+                            restaled=_restaled, max_restaled=_moved_cap)
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -2697,7 +2732,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             in_force_untested=sum(1 for row in in_force_stale_rows
                                                   if row.get("untested")),
                             unexplained_stale=len(unexplained_stale),
-                            unexplained_days=_unexplained_cap)
+                            unexplained_days=_unexplained_cap,
+                            restaled=_restaled, max_restaled=_moved_cap)
 
     if args.grade:
         try:
@@ -2851,6 +2887,48 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         if getattr(args, "json_out", None):
             with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps({"noted": noted}, indent=2, sort_keys=False) + "\n")
+        return 0
+
+    if getattr(args, "settle_reaffirm", None):
+        # Round 119: round 118 can say the books moved under a decision but not re-take it, so the decision stayed
+        # stale for ever and the gate could never charge it. This branch re-reads today's books and records what
+        # it saw -- the claims standing on that successor now -- because a decision that does not name what it
+        # covered is exactly the defect round 118 exists to catch (boundary 274).
+        pair = str(args.settle_reaffirm or "")
+        if "=" not in pair:
+            _print("--settle-reaffirm takes RECORD=SUCCESSOR, for example "
+                   "`--settle-reaffirm round-old.json=round-new.json`")
+            return 2
+        record, successor = pair.split("=", 1)
+        record, successor = record.strip(), successor.strip()
+        seen = sorted(str(row.get("round") or "") for row in history(root, include_retired=True)
+                      if str((row.get("retired") or {}).get("re_measured_as") or "") == successor
+                      and str(row.get("round") or "") != record)
+        plan_before = repair_plan(root)
+        try:
+            again = reaffirm_link(root, record, successor, why=str(args.settle_why or ""),
+                                  by=str(getattr(args, "settle_by", "") or ""), claimants=seen)
+        except (OSError, ValueError) as error:
+            _print("cannot re-affirm that decision: %s" % error)
+            return 2
+        if not again["changed"]:
+            _print("reaffirmed     %s -> %s was already re-taken on %s; nothing to change"
+                   % (again["record"], again["successor"], again["at"]))
+        else:
+            _print("reaffirmed     %s -> %s" % (again["record"], again["successor"]))
+            _print("                the decision keeps its first date; this re-affirmation is on %s"
+                   % again["at"])
+            _print("                what it covered: %s"
+                   % (", ".join(seen) if seen else "no other claim stood on that successor"))
+            _print("                because: %s" % str(args.settle_why or "").strip())
+            _print("                re-affirmed by: %s"
+                   % (str(getattr(args, "settle_by", "") or "").strip()
+                      or "(not recorded -- pass --settle-by NAME)"))
+            _print("                `--audit` stops reporting it as resting on books that have moved.")
+            _print_repair_delta(record_repair(root, "settle-reaffirm", plan_before, repair_plan(root)))
+        if getattr(args, "json_out", None):
+            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps({"reaffirmed": again}, indent=2, sort_keys=False) + "\n")
         return 0
 
     if getattr(args, "repair_links", False):
@@ -4833,6 +4911,12 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-note", metavar="RECORD=SUCCESSOR", default=None,
                         help="append the explanation a recorded settlement lacked: the decision keeps its date "
                              "and successor; needs --settle-why")
+    evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", default=None,
+                        help="re-take a decision against today's books: keeps its first date, records the claims "
+                             "it covered; needs --settle-why")
+    evolve.add_argument("--max-moved", type=int, default=None, metavar="N",
+                        help="with --strict: fail when more than N decisions rest on books that have moved and "
+                             "could be re-taken with --settle-reaffirm")
     evolve.add_argument("--settle-by", default="", metavar="NAME",
                         help="with --settle-link: who made the decision (recorded in settlements.json)")
     evolve.add_argument("--repair-links", action="store_true",

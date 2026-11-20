@@ -6401,6 +6401,61 @@ campaign json:  {"settlements_moved": [{"record": "round-old.json", "successor":
 3. **收不了的债只能报告**：一处缺陷要先有能清掉它的命令，才配进闸门（边界 271）。这条规则在本仓库已经被独立发现过三次（154/171/266），这是第四次。
 
 
+### 3.125 决定可以重开：把「书动了」变成一次重新确认
+
+第 118 轮让页面说出「这条决定所依据的账簿，在决定之后已经动过」，然后什么也不做——因为本版本里没有任何命令能重开一条决定，闸门于是永远不能对这件事收费（边界 271 的第四次出现）。本轮补上那条命令，并且把「什么时候算动过」变成一个可以推进的时刻。
+
+`_effective_moment(item)`：一条决定**现在**说话的时刻，是它的 `at` 和它所有 `reaffirmations[].at` 里最新的那个。这不是装饰——重新确认就是操作者说「我读过今天的账簿了，这条决定仍然成立」；如果不推进这个时刻，第 118 轮的规则会把同一批主张永远算成「后来才到」，重开一次也毫无变化。
+
+`--settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` 调用 `reaffirm_link(...)`：保留第一次的日期（问题是什么时候被裁定的），追加一条 `{at, why, by, claimants}`。四条拒绝，各有各的理由：
+
+- 理由为空：`a re-affirmation needs a reason: --settle-why TEXT. Re-taking a decision without saying what changed is how a decision nothing supports stays alive`
+- 记录不在：`the decision describes a record the ledger no longer holds, so there is nothing to re-affirm`
+- 记录已改指：`a re-affirmation would assert something the ledger denies. Take a new decision with --settle-link, or drop this one`
+- 这条决定根本没记过：`--settle-link` records a decision, `--settle-reaffirm` re-takes one`
+
+**它必须写下自己覆盖了什么**（边界 274）：`what it covered: round-other.json, round-third.json`。读者据此区分「对着三份主张重新读过」和「随手点了一下」。
+
+收费默认关闭，只针对**可清掉**的那一类：`--max-moved N` + `--strict`，而 `moved_clearable` 只留「pair 还在、只是有主张后来才到」的行。记录已经不在、退休标记被撤掉、或已经改指别处的，仍然只报告不收费——那不是重开能解决的，得重新做一条决定（边界 275）。
+
+演示（`var/demo119`，日期挪到真实过去，因为 CLI 的重新确认发生在**现在**）：
+
+```
+$ brian evolve --audit --strict --max-moved 0
+1 of them rest on books that have moved since the decision was taken:
+  round-old.json             -> round-new.json              (1 claim(s) on the same successor arrived after the decision: round-third.json)
+1 decision(s) rest on books that have moved since they were taken, above the 0 asked for:
+  ... `--settle-reaffirm RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME`
+  re-takes it against today's books: --strict exits 1 (boundary 273).
+   exit 1
+
+$ brian evolve --settle-reaffirm round-old.json=round-new.json --settle-why "read today's books" --settle-by alice
+reaffirmed     round-old.json -> round-new.json
+                the decision keeps its first date; this re-affirmation is on 2026-11-20T02:49:36.232874+00:00
+                what it covered: round-other.json, round-third.json
+                re-affirmed by: alice
+   exit 0
+
+$ brian evolve --audit --strict --max-moved 0      # 同一条收费，现在无事可收
+   exit 0
+```
+
+再让一份主张在重新确认之后一小时到达，`--history` 就把两种状态并排摆出来：
+
+```
+settled         2 decision(s) rest on books that have moved since they were taken:
+  round-old.json             -> round-new.json   (...)  [re-taken 1 time(s), last on 2026-11-20T02:49:36.232874+00:00]
+  round-third.json           -> round-new.json   (...)  [never re-taken: only --settle-reaffirm moves the date it speaks about]
+```
+
+两个发现。第一个是自己的：`clearable` 一开始写成「理由里没有 successor / ledger 就算可清掉」，而「后来的主张」那句本身就含 `successor`——于是每一行都成了不可清掉，本轮唯一想收费的那一类恰好被自己的子串判断排除掉；自测第一轮就挂，改成布尔 `pair_gone`。第二个是文档的：第 118 轮的插入脚本从 `\n104. ` 重写到文件末尾并「追加第 105 项」，而第 105 项从未出现在文件里——§6 的尾部从 104 直接结束。只往末尾追加的队列，末尾就是它唯一的锚点，丢了没人会撞上；本轮把 105（本轮）与 106（下一步）补上，边界 274 的另一面：追加本身也要能被检查。
+
+**边界 273：一条决定的日期，是它最后一次被确认的时刻，不是它第一次被做出的时刻。** 重开一条决定必须推进它说话的那个时刻，否则同一批主张永远算「后来才到」，重开等于没开。
+
+**边界 274：一次重新确认必须记下它覆盖了哪些主张。** 否则读者分不清「对着三份主张重新读过」和「随手点了一下」，而这正是这条记录存在的理由。
+
+**边界 275：清不掉的债继续报告，只对能清掉的那一类收费。** 这是 154/171/266/271 的第四次出现：`retargeted`/`gone` 的 pair 没有东西可重新确认，闸门对它收费只会训练人忽略闸门。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6870,3 +6925,7 @@ missing for the next level
 104. **已完成**：让「证据后来又动了」变成一条单独的债。`moved_settlements(rounds, settlements)` 对每条决定检查三个事实——被裁定的记录是否还在账簿里、它的退休标记是否还在、它是否还指向同一个后继——再加上「决定之后才到达的、有自己时间戳的同一后继主张」。`--audit` 打印「其中 N 条所依据的账簿在决定之后已经动过」，`--history` 打印同样的行，`--campaign` 把每行流按 `moved` 单独计数并导出 `settlements_moved`。**不收费**：本版本里没有任何命令能重开一条决定（边界 271），所以 `--audit --strict` 对「证据动了」仍然是 0。测试 `tests/test_settlement_evidence.py`（11 条）。
     - 第 112 轮的前提被这一轮纠正了一次：第一版规则把「任何另一个主张者」都算作证据动了，结果每一次对 `mismatch` 的裁定当场就是陈旧的（11 条测试里 7 条挂在夹子上）——第 112 轮只消掉**一个**主张者的主张，另一个端点是刻意留着的。规则改成「**晚于**决定的、有日期的主张」。
     - 第二次纠正：主张的日期只能取退休标记自己的 `at`。`finished_at` 是那一轮**跑完**的时间，不是退休被写下的时间（第 83/93 轮都是事后补写的），拿它当日期会让一条几十天前就摆在那里的主张看起来「刚刚到达」（边界 272）。
+105. **已完成**：让一条决定可以被重开。`--settle-reaffirm` 保留第一天的日期、追加 `{at, why, by, claimants}`，`_effective_moment` 把「决定现在说话的时刻」推进到最新一次确认，`moved_settlements` 据此判断主张是否「后来才到」；`--max-moved N`（默认关）只对 `moved_clearable` 的那一类收费，`--history` 的行上并排打印 `[re-taken N time(s), last on …]` 与 `[never re-taken: …]`。测试 `tests/test_settlement_reaffirm.py`（15 条）。
+    - 自己的缺陷：`clearable` 起初用子串 `"successor" in reason` 判断，而「后来的主张」那句含 successor，于是每一行都不可清掉——本轮唯一要收费的类别被自己的判断排除。改成布尔 `pair_gone`。
+    - 文档缺陷：第 118 轮说「追加第 105 项」，而文件里没有第 105 项——只在末尾追加的队列，末尾是它唯一的锚点。
+106. 下一步：让 `--campaign` 按来源文件给出「几条决定被重开过、几条仍然是陈旧的」，并让 `--settle-reaffirm` 接受多个 `RECORD=SUCCESSOR`，这样一次走查能把整条队列里的决定重开一遍。
