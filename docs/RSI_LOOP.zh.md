@@ -8982,6 +8982,61 @@ audit-exit=2
 超过政策"，退出 1 并且页面点名能付它的命令。
 
 
+### 3.173 退出码的解释要跟着报告一起走
+
+第 166 轮让闸门为一个不再描述源码的清单页退出 2。那次改动里有个细节当时没在意：**报告是在闸门之前写出去的**。
+于是 CI 读到的是这样一个组合——
+
+```
+$ brian evolve --audit --strict --json-out var\gate167.json
+payload page      1 problem(s): the --payload-writers table does not describe this source
+                  run `brian evolve --payload-writers --check` for the list (boundary 397)
+exit 2
+
+$ python -c "…payload…"
+['ceiling_drift', 'entries', 'gate', 'inconsistent', 'limits', …]
+```
+
+在修之前，那一栏 `gate` 并不存在：文件里每一个字段都说"没什么问题"，而退出码说"有问题"，
+原因只活在那个终端里。**一个只在 stdout 上的理由，对脚本来说就是没有理由**（边界 402）。
+
+修法很小，三处：
+
+```
+writer_problems = payload_writer_problems()
+page_problems = len(writer_problems)
+gate_report = {"asked": bool(getattr(args, "strict", False)),
+               "page_problems": [str(item) for item in writer_problems]}
+```
+
+然后两份报告都写 `payload["gate"] = gate_report`——`--audit` 的那一栏放在 `"entries"` 之前，
+`--campaign` 的那一栏紧跟着 `claim_counts`。真跑两份（同一份账本，同一张清单页）：
+
+```
+$ brian evolve --audit --strict --json-out var\gate167.json
+wrote var\gate167.json
+  → {"asked": true,  "page_problems": []}
+
+$ brian evolve --campaign --json-out var\gate167c.json
+wrote var\gate167c.json
+  → {"asked": false, "page_problems": []}
+```
+
+`asked` 不是结论，是"有没有人要求一个结论"：`--campaign` 没有带 `--strict` 时，同一个计数不该被读成检查
+通过（第 166 轮的边界 401：报告不是检查）。两条命令共用算出来的那一份 `gate_report`，所以它们不可能对同一张
+清单页给出两个答案（第 160 轮"一个量只由一处算"）。
+
+**为什么是列表而不是数字。** 第 166 轮闸门只传了 `len(...)`，因为闸门只需要知道有没有。但机器可读的那一份的
+读者不是闸门——他拿到 `"page_problems": 1` 之后还得回去看终端日志，而那句话可能就是早就滚出屏幕的那一行。
+所以 `page_problems` 里放**条目本身**：读者需要修的就是这些字符串（边界 403）。这也是第 161 轮那条"载荷要能
+逐字重建页面句子"的自然延续——只是这次重建的是理由，而不是计数。
+
+**边界 402**：一个非零退出码，如果它的理由只出现在 stdout，那对脚本来说就没有解释；报告里的每个判断输入
+都必须跟着报告一起走。
+**边界 403**：载荷里的一个计数，当被数的条目正是读者要动手修的东西时，必须连条目一起给出——只给数字等于
+把读者送回日志（第 387 轮的形状：印出来的数要由载荷带着，而不是只带它的来源行）。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9614,6 +9669,9 @@ missing for the next level
 152. ~~让闸门自己读这一页：`--audit --strict` / `--campaign --strict` 在 `payload_writer_problems()` 非空时
      以退出码 2 结束。~~ 第 166 轮完成（§3.172）：`page_problems` 算一次、两个闸门共用，与 `broken_links`
      同级归入"构建缺陷"（退出 2）；不带 `--strict` 时一字不印（报告不是检查）。
-153. 让退出码在机器可读的那一份里也有解释：`--audit --json-out` / `--campaign --json-out` 目前只印
-     `payload page N problem(s)`，payload 里没有任何一栏对应它——CI 拿到退出码 2 却读不到原因，只能去翻日志
-     （边界 401 的另一半：既然闸门为它退出 2，报告就该把它的名字与列表写进 payload）。
+153. ~~让退出码在机器可读的那一份里也有解释：两份报告的 payload 都带 `gate`（`asked` + `page_problems`
+     条目本身）。~~ 第 167 轮完成（§3.173）：报告在闸门之前写出，所以理由必须跟着报告走，否则
+     `--audit --strict` 退出 2 而文件里每个字段都说没事（边界 402）。
+154. 让 `gate` 说出闸门读过的**每一个**计数，而不只是清单页：今天 `moved` / `broken_links` / `due` /
+     `debt` / `minutes` / `drift` / `unanswered` 仍只在终端里，脚本拿到退出码 1 还得去猜是哪一项——把
+     `_strict_exit` 的判断输入收成一个可序列化的结构，让一份报告能自己解释自己的退出码（边界 402 的完整形态）。

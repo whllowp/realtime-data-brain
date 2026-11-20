@@ -2427,7 +2427,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # --unrecorded page and its payload cannot disagree about how the debt splits (boundary 366).
     ceiling_unpayable = max(0, ceiling_missing - ceiling_file_payable - ceiling_named)
     # Round 166: the page's own claim, read by the gate rather than only by whoever remembers --check.
-    page_problems = len(payload_writer_problems())
+    writer_problems = payload_writer_problems()
+    page_problems = len(writer_problems)
+    # Round 167: `asked` is not the verdict -- it says whether a verdict was asked for at all, because a
+    # report command runs the same code without one (boundary 401).
+    gate_report = {"asked": bool(getattr(args, "strict", False)),
+                   "page_problems": [str(item) for item in writer_problems]}
 
     # Round 153: the repairs round 152 made are visible in each record's stream_path_history, and a claim the
     # geometry never confirmed is a fact a reader of the page needs -- the row rests on a person's assertion
@@ -3642,6 +3647,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload["claims"] = claim_rows
             # Round 161 (item 147): the same counts the line above printed, in the form a script reads.
             payload["claim_counts"] = campaign_counts.to_dict()
+            # Round 167 (item 153): the same block as the audit page, from the same value.
+            payload["gate"] = gate_report
             # Round 161 (item 148): the writer prints `wrote <path>` itself; this branch printed it again, so a
             # reader saw the line twice and a failed write raised instead of exiting 2 (boundaries 336/337).
             if not _write_payload(args.json_out, payload, recorded=False):
@@ -3790,6 +3797,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        # Round 116: a decision's account belongs in the machine-readable judgement too; the page
                        # prints four states and a script that sees only `links` would read them as one.
                        "settlements": settlement_summary(load_settlements(root)),
+                       # Round 167 (item 153): an exit code whose reason exists only on stdout is
+                       # unexplained to a script. The gate's own input travels with the report
+                       # (boundary 402).
+                       "gate": gate_report,
                        "entries": result.entries}
             if not _write_payload(args.json_out, payload, recorded=False):
                 return 2
