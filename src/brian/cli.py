@@ -839,7 +839,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  unanswered: int = 0, unanswered_days: Optional[float] = None,
                  per_file_unanswered: int = 0,
                  max_unanswered_per_file: Optional[int] = None,
-                 unanswered_file: str = "") -> int:
+                 unanswered_file: str = "",
+                 into: Optional[Dict[str, Any]] = None) -> int:
     """The exit code is what makes an audit a check rather than a report (round 15).
 
     Four outcomes, three codes: 0 the record still says what today's rules say; 1 a recorded verdict
@@ -862,8 +863,29 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
     different statements and a reader must be able to tell them apart. It exits 1 even when no verdict
     moved: exit 0 may only mean the check ran on every record and passed (boundary 74).
     """
+    charges: List[Dict[str, Any]] = []
+
+    def _charge(rule: str, count: Any, code: int) -> None:
+        charges.append({"rule": rule, "count": int(count or 0), "code": int(code)})
+
+    def _done() -> int:
+        # Round 168 (item 154): the exit code is --exactly-- the list of charges, so a script that reads the
+        # list can compute the code the command will return (boundary 404).
+        if into is not None:
+            into["charges"] = list(charges)
+        if any(item["code"] == 2 for item in charges):
+            return 2
+        return 1 if charges else 0
+
     if not strict:
-        return 0
+        return _done()
+    # Round 168 (item 154): the two counts that are already decided by the caller are recorded first, because a
+    # build defect returns early and would otherwise list itself as the only charge -- a reader would read "one
+    # defect" where the ledger also has a moved verdict (boundary 405).
+    if moved:
+        _charge("moved verdict", moved, 1)
+    if due:
+        _charge("refusal past its horizon", due, 1)
     if broken_links:
         # Round 81: the two ends of a replacement relation are written by two different commands, and
         # neither checks the other. A ledger whose books contradict each other cannot be repaired by
@@ -878,7 +900,8 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("%d comparison(s) cannot be reconstructed in records that carry the geometry and still lack "
                "the reference:" % inconsistent)
         _print("that is a defect in this build, so --strict exits 2.")
-        return 2
+        _charge("unreconstructable comparison", inconsistent, 2)
+        return _done()
     if in_force:
         # Round 85: the same contradiction, one step further along -- a version running on top of it. The exit
         # code is the one `broken_links` already returns; a second `return 2` for the same finding would not
@@ -951,7 +974,10 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("  `--settle-restore RECORD=SUCCESSOR --settle-why TEXT --settle-by NAME` is the command that pays it:")
         _print("  the pair is decided again, and the withdrawal stays on the record (boundary 297).")
     if broken_links:
-        return 2
+        # Round 168 (item 154): the early exit names its charge like every later one, so a report can say which
+        # rule turned the code to 2 (boundary 404).
+        _charge("replacement link", broken_links, 2)
+        return _done()
     if unreconstructable:
         _print("")
         _print("%d comparison(s) predate the geometry field and cannot be replayed; re-running those rounds "
@@ -1121,10 +1147,27 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
         _print("                  run `brian evolve --payload-writers --check` for the list (boundary 397)")
     ceiling_capped = (max_ceiling_debt is not None and ceiling_missing
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
-    return 2 if (page_capped or broken_links) else (
-        1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
-              or ceiling_capped or in_force_stale or unexplained_stale or restaled
-              or per_file_restaled or unanswered or per_file_unanswered) else 0)
+    # Round 168 (item 154): every charge the gate reads, in the order the docstring ranks them. `inconsistent`
+    # is charged above, on its own early exit; the builder defect and the debts share this table.
+    for rule, count, code in (
+            ("replacement link", broken_links, 2),
+            ("version in force on a broken link", in_force, 2),
+            ("payload page", page_problems, 2),
+            ("unrecorded share", capped, 1),
+            ("standing refusal", rose, 1),
+            ("per-domain debt", debt_capped, 1),
+            ("queue minutes", minutes_capped, 1),
+            ("ceiling drift", drift_capped, 1),
+            ("ceiling debt", ceiling_capped, 1),
+            ("copied end in force", in_force_stale, 1),
+            ("unexplained decision", unexplained_stale, 1),
+            ("re-taken decision", restaled, 1),
+            ("re-taken decision on one file", per_file_restaled, 1),
+            ("unanswered withdrawal", unanswered, 1),
+            ("unanswered withdrawal on one file", per_file_unanswered, 1)):
+        if count:
+            _charge(rule, count, code)
+    return _done()
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -3649,11 +3692,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload["claim_counts"] = campaign_counts.to_dict()
             # Round 167 (item 153): the same block as the audit page, from the same value.
             payload["gate"] = gate_report
-            # Round 161 (item 148): the writer prints `wrote <path>` itself; this branch printed it again, so a
-            # reader saw the line twice and a failed write raised instead of exiting 2 (boundaries 336/337).
-            if not _write_payload(args.json_out, payload, recorded=False):
-                return 2
-        return _strict_exit(args.strict, result.moved, result.unreconstructable, result.inconsistent,
+        # Round 168 (item 154): the gate runs first, so the report can carry the verdict it reached -- a file
+        # written before the check says "nothing is wrong" while the exit code says otherwise (boundary 402).
+        gate_code = _strict_exit(args.strict, result.moved, result.unreconstructable, result.inconsistent,
                             page_problems=page_problems,
                             due=result.withheld_due,
                             oldest_days=result.withheld_oldest_days, horizon=horizon,
@@ -3692,7 +3733,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unanswered=len(_unanswered), unanswered_days=_withdrawn_cap,
                             per_file_unanswered=_per_file_charged,
                             max_unanswered_per_file=_withdrawn_per_file,
-                            unanswered_file=str(_worst_withdrawn.get("origin") or ""))
+                            unanswered_file=str(_worst_withdrawn.get("origin") or ""),
+                            into=gate_report)
+        gate_report["exit"] = gate_code
+        if args.json_out and not _write_payload(args.json_out, payload, recorded=False):
+            return 2
+        return gate_code
 
     if args.sensitivity:
         rules = _rules_from_args(args)
@@ -3802,9 +3848,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        # (boundary 402).
                        "gate": gate_report,
                        "entries": result.entries}
-            if not _write_payload(args.json_out, payload, recorded=False):
-                return 2
-        return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
+        # Round 168 (item 154): same order as the campaign page -- check, then export.
+        gate_code = _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
                             page_problems=page_problems,
                             due=due, oldest_days=oldest, horizon=horizon,
                             unrecorded=missing, legacy_unrecorded=legacy, unrecorded_share=share,
@@ -3841,7 +3886,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                             unanswered=len(_unanswered), unanswered_days=_withdrawn_cap,
                             per_file_unanswered=_per_file_charged,
                             max_unanswered_per_file=_withdrawn_per_file,
-                            unanswered_file=str(_worst_withdrawn.get("origin") or ""))
+                            unanswered_file=str(_worst_withdrawn.get("origin") or ""),
+                            into=gate_report)
+        gate_report["exit"] = gate_code
+        if args.json_out and not _write_payload(args.json_out, payload, recorded=False):
+            return 2
+        return gate_code
 
     if args.grade:
         try:

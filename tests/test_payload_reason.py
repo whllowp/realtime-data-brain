@@ -23,7 +23,12 @@ def test_the_audit_payload_says_the_gate_was_asked(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     gate = _gate(tmp_path, "--audit", "--strict")
 
-    assert gate == {"asked": True, "page_problems": []}
+    # Round 168 added the charges and the code; round 167's two keys are still there (item 154 extends the block,
+    # it does not replace it).
+    assert gate["asked"] is True
+    assert gate["page_problems"] == []
+    assert gate["charges"] == []
+    assert gate["exit"] == 0
 
 
 def test_the_campaign_payload_says_when_no_verdict_was_asked_for(tmp_path, monkeypatch):
