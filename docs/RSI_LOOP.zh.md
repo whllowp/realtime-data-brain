@@ -6233,6 +6233,59 @@ exit: 2
 而实际可能只是"有人裁了，没人解释"。说明放在这一段历史的头上，而不是每一行，因为它是分组的属性（边界 241）。
 
 
+### 3.122 一条决定的状态要落在它那一行上
+
+第 115 轮把"有几条决定解释过"放进了页面：一行在结算段上面，一行在 `--history` 的段头。读起来顺，但有一个
+具体的毛病——一个读者看到 `--history` 里某个 round 行，想知道"这条决定解释过没有"，仍然得回到段头去比对记录名。
+状态是**行**的属性，被写在了**段**上。
+
+第 116 轮把它移回行上：行尾的标记从 `[settled with X by a recorded decision]` 变成两种之一，
+
+```
+[settled with round-new.json and no reason was recorded]
+[settled with round-new.json by a recorded decision]
+```
+
+后一种在有人补写过 note 之后出现（补写的说明算解释过，虽然它没跟着决定一起来——边界 257 管的是"什么时候写的"，
+这里管的是"现在有没有")。段头那行"哪几对是被裁定的"保留：配对属于这段历史，状态属于行（边界 241 与 167 各自
+管一半）。
+
+第二件事是让口径只有一个。第 115 轮的解释者统计写在 `--campaign` 的打印里，`--json-out` 没有；这一轮把它抽成
+`settlement_summary(settlements)`，四个状态各自计数：
+
+```json
+{"pairs": 1, "explained": 0, "explained_later": 1, "unexplained": 0,
+ "deciders": {"": 1}, "explainers": {"alice": 2, "carol": 3}, "unattributed": 1}
+```
+
+`--audit --json-out["settlements"]` 与 `--campaign --json-out["settlement_summary"]` 都是这个函数的结果，页面上
+那几行也用它——脚本和读者看到的不是"两次恰好一致的独立计算"，而是同一份账（边界 244）。
+
+第三件事是最小但最像账本的一条：存储按时间排序，所以同一作者在**同一秒**写下两条不同理由时，页面无法说清
+哪条在先。真实命令很难撞上（时间戳到微秒），但回放脚本会给显式的 `now`：
+
+```
+first note written: 5
+refused: two different explanations for round-old.json -> round-new.json carry the same second
+         (2026-11-20T02:00:00) from the same author; a decision read in order needs them to be distinct in time
+notes after the refusal: 5
+```
+
+不同作者在同一秒各写一条是允许的——那是两个人在解释同一件事，不是一个人在自相矛盾。这条规则的第一版按微秒
+比较，结果把这种正常情况也拒了；真正的对象是"作者 × 秒"，边界 263 就是它。
+
+三条边界：
+
+**边界 263：排不出先后的东西不许当成序列。** 存储的时间精度决定了它能排序的最小单位；同一作者在同一精度单位内
+给出两条不同说明时，正确动作是拒绝并说明理由，而不是按写入顺序列出来假装那是过程。
+
+**边界 264：一页的四个状态必须来自一次计算。** 只要页面与 JSON 各自统计，它们迟早会在某个边界条件上分开
+（第 82 轮的"闸门收费的事实必须出现在页面上"是同一个问题的上一版）。统计抽成一个函数，页面和载荷都读它。
+
+**边界 265：状态属于它描述的那一行。** 一个读者在列表里找"这条解释过没有"，不会先读段头再回来比对；把状态
+放在段上等于要求读者做一次手工连接（边界 167 说事实属于它描述的对象，这一条说：对象是行，就不要放在组上）。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -6689,7 +6742,12 @@ missing for the next level
      `--history` 的结算行带上 note 的条数与最后一位说明者，`--settle-link` 因缺理由被拒时两步都说清出路：
      错误文本里点名 `--settle-note`，被拒绝时再按现存记录数打印一行 `hint`。第 115 轮做完了这件
      （1677 → 1687 个测试）。留下的问题见第 102 项。
-102. 让"事后说明"进入 `--audit` 的严格闸门与 `--campaign` 的 JSON：现在一条被补写过的决定只是在页面上多一行
-      文字，`--json-out` 里没有它的条数与说明者，脚本无法据此判断"还有几条决定没人能解释"；另外让
-      `--settle-note` 拒绝覆盖一条已有 note（同一对、同一时刻两条不同理由），并让 `--history` 在结算行上
-      标出"这条决定仍未解释"，把"没有理由"从一句遍在的说明变成每行可查的状态。
+102. 三件事一起收口：`settlement_summary(settlements)` 成为唯一口径（pairs / explained / explained_later /
+      unexplained / deciders / explainers / unattributed），`--audit --json-out["settlements"]` 与
+      `--campaign --json-out["settlement_summary"]` 都读它；同一作者在同一秒里写两条不同理由被拒（存储按时间排序，
+      排不出先后的东西不许当成序列列出来）；`--history` 的行上标出 `[settled with X and no reason was recorded]`。
+      第 116 轮做完了这件事（1687 → 1699 个测试）。留下的问题见第 103 项。
+103. 让"没人能解释的决定"也能被闸门收费：现在 `settlement_summary["unexplained"]` 只出现在页面上与 JSON 里，
+      `--strict` 永远为它返回 0；加 `--max-unexplained-days N`（默认不启用），一条没有理由、没有 note、且已经存在
+      超过 N 天的裁定进闸门，并在 `--history` 里点名是哪几条；同时让 `--campaign --json-out` 的每行带上它对应的
+      裁定状态，脚本才能算出"这个 stream 上有几条决定没人能解释"。

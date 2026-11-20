@@ -77,6 +77,7 @@ from .evolve import (
     backfilled_links,
     format_repairs,
     load_settlements,
+    settlement_summary,
     repair_legacy,
     settle_link,
     settle_note,)
@@ -1982,7 +1983,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 if own_name not in pair:
                     continue
                 other = pair[1] if own_name == pair[0] else pair[0]
-                sentence = "  [settled with %s by a recorded decision]" % other
+                # Round 116: the row says whether the decision was ever explained, so "no reason" stops being a
+                # sentence somewhere above the list and becomes a state a reader can find on the row itself.
+                explained_here = ("and no reason was recorded" if not str(entry.get("why") or "").strip()
+                                  and not entry.get("notes")
+                                  else "by a recorded decision")
+                sentence = "  [settled with %s %s]" % (other, explained_here)
                 if sentence not in mark:
                     mark += sentence
             # Round 107: the row is about what happened to this promise, not only about what is still true of it. A
@@ -2592,6 +2598,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        "trials": result.trials, "retired": result.retired,
                        "moved": result.moved, "relabelled": result.relabelled,
                        "unreconstructable": result.cross, "inconsistent": result.inconsistent,
+                       # Round 116: a decision's account belongs in the machine-readable judgement too; the page
+                       # prints four states and a script that sees only `links` would read them as one.
+                       "settlements": settlement_summary(load_settlements(root)),
                        "entries": result.entries}
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")

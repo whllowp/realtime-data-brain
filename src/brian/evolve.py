@@ -2667,6 +2667,34 @@ BACKFILL_KEY = "backfilled"
 SETTLEMENTS = "settlements.json"
 SETTLEMENT_FORMAT = "brian.settled/1"
 
+def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    """One account of the settlement store, so the pages and the JSON cannot disagree (round 116).
+
+    Four states are kept apart because folding any two of them lets the default pick the answer: a decision that
+    came with a reason, one that gained a note later, one that has neither, and -- inside each -- a decider or
+    explainer who was named versus one who was not (boundaries 166/260). A page that printed only
+    "N settlements" would make four different books read the same (boundary 213 applied to decisions).
+    """
+    pairs = list(settlements or [])
+    explained = sum(1 for item in pairs if str(item.get("why") or "").strip())
+    later = sum(1 for item in pairs if item.get("notes"))
+    unexplained = sum(1 for item in pairs
+                      if not str(item.get("why") or "").strip() and not item.get("notes"))
+    explainers: Dict[str, int] = {}
+    deciders: Dict[str, int] = {}
+    for item in pairs:
+        who = str(item.get("by") or "").strip()
+        deciders[who] = deciders.get(who, 0) + 1
+        for note in item.get("notes") or []:
+            if not isinstance(note, Mapping):
+                continue
+            author = str(note.get("by") or "").strip()
+            explainers[author] = explainers.get(author, 0) + 1
+    return {"pairs": len(pairs), "explained": explained, "explained_later": later,
+            "unexplained": unexplained,
+            "deciders": dict(sorted(deciders.items())), "explainers": dict(sorted(explainers.items())),
+            "unattributed": sum(1 for item in pairs if not str(item.get("by") or "").strip())}
+
 
 def load_settlements(root: Path) -> List[Dict[str, Any]]:
     """The link decisions somebody wrote down, newest last (round 112).
@@ -2767,6 +2795,17 @@ def settle_note(root: Path, record: str, successor: str, why: str = "", by: str 
         return {"record": name, "successor": to, "at": str(entry.get("at") or ""),
                 "notes": len(notes), "changed": False}
     moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    # Round 116: one author cannot have written two different explanations in the same recorded second, so that
+    # pair is refused -- the page would otherwise list a contradiction as a sequence, and the store cannot say
+    # which came first. Two *authors* in one second are two people explaining the same decision (boundary 263).
+    here = moment.isoformat()[:19]
+    clash = [item for item in notes
+             if str(item.get("at") or "")[:19] == here
+             and str(item.get("by") or "").strip() == author
+             and str(item.get("why") or "").strip() != note_why]
+    if clash:
+        raise ValueError("two different explanations for %s -> %s carry the same second (%s) from the same author; "
+                         "a decision read in order needs them to be distinct in time" % (name, to, here))
     note = {"at": moment.isoformat(), "why": note_why, "by": author}
     entry["notes"] = notes + [note]
     path = root / EVOLVE_DIR / SETTLEMENTS

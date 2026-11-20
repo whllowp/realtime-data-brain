@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .evolve import (BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
-                     load_settlements, rejection_provenance, withheld_due, withheld_evidence_age,
+                     load_settlements, rejection_provenance, settlement_summary, withheld_due,
+                     withheld_evidence_age,
                      withheld_records, withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
                       current_state, domain_slug,
@@ -181,6 +182,9 @@ class Campaign:
     # Round 112: pairs a person decided, with the reason and the moment. A settlement ends a charge without
     # producing evidence, so it travels with the books a reader checks (boundaries 251/252).
     settlements: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 116: the counts a script needs are computed once, beside the copies the page prints, so "how many
+    # decisions still have no explanation" is a number in the JSON rather than a sentence to be parsed.
+    settlement_summary: Dict[str, Any] = field(default_factory=dict)
     stale_refusals: List[Dict[str, Any]] = field(default_factory=list)
     # Round 107: per promise, how many of the recorded walks refused it, when the first and the last were, and whether
     # the refusal still stands. `blocked_versions` answers the last question only, so a promise refused twice and then
@@ -289,6 +293,7 @@ class Campaign:
             "repair_plan": [dict(item) for item in self.repair_plan],
             "repair_history": {str(key): value for key, value in self.repair_history.items()},
             "settlements": [dict(item) for item in self.settlements],
+            "settlement_summary": dict(self.settlement_summary),
             "stale_refusals": [dict(item) for item in self.stale_refusals],
             "refusal_history": {str(key): dict(value) for key, value in self.refusal_history.items()},
             "in_force_untested": self.in_force_untested,
@@ -552,6 +557,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.repair_plan = repair_plan(root)
     result.repair_history = repair_history(root)
     result.settlements = load_settlements(root)
+    result.settlement_summary = settlement_summary(result.settlements)
     result.in_force_untested = int((in_force_history or {}).get("untested") or 0)
     # Attribute the audit to the row it belongs to. `audit()` names the stream of each round, and a
     # campaign whose every other number is per domain had one that was not: a reader comparing two
