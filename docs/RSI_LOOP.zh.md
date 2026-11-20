@@ -8585,6 +8585,34 @@ claims   the one on round-20261120T092858Z.json was inherited 2 time(s) and was 
 下一跳就会把修补读成原始记录。
 **边界 380**：一个推导出来的数字，页面必须同时说出它有多少是推导的；否则"完整"和"被补完"在页面上无法区分。
 
+### 3.164 历史页的每一行，也要说出它站在谁的断言上
+
+第 153 轮在重测之前说出来，第 155 轮让它带上年龄，第 157 轮把"修补出来的年龄"标出来——**历史页什么都没说**。
+而读者排错时最先打开的就是这一页：一行看起来和别的行一模一样，实际它测的那个文件是某个人手工指过来的，几何并不认。
+
+这一轮把标记放到行上。`claim_mark(record)` 产出短语，`--history` 把它接在文件标记之后：
+
+```
+ 3  …  [data/smd/stream-one.json]  [rests on a file a person claimed]
+ 5  …  [data/smd/stream-one.json]  [rests on a file a person claimed, inherited 1 time(s)]  [paid by the ceiling queue, walk 2]  [replacing round-out-of-reach.json]
+ 6  …  [data/smd/stream-one.json]  [rests on a file a person claimed, inherited 2 time(s), its age was completed by a repair]  [paid by the ceiling queue, walk 3]  [replacing round-20261120T090613Z.json]
+```
+
+三行正好是三段历史：3 是原始断言（没有继承，也没有被补过），5 继承了一次，6 继承两次、而且年龄是补出来的。
+**读者不需要打开任何 JSON 就能看出这三行不一样。**
+
+**标记必须是最短的短语，而不是一段话。** 行上已经有文件、队列、走次、替换关系；再塞一个段落，"扫行"这件事就没了。
+所以 `claim_mark` 只回答三件是/否：有没有一条人指的断言（`rests on a file a person claimed`）、继承了几次、
+年龄是不是补出来的。**`agrees` 不标**——几何确认过的断言不是警告，是正常的证据。
+
+**标记挂在行上，而不是列表上方的一段说明。** 第 121 轮起，凡是"某一行特殊"的事实都写在行尾；一段总述会让读者
+在总述和行之间来回找，而页面无法保证他先读到总述。
+
+**边界 381**：一个会改变"这一行该怎么读"的事实，必须出现在这一行本身；在产生那一行的终端里说一次，只对当时
+正好在看的那个人生效。
+**边界 382**：会越长的标记（断言、继承次数、修补年龄）要保持为行尾的一个短语；把它写成列表上方的一段话，
+等于要求读者按页面无法强制的顺序阅读。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9190,5 +9218,7 @@ missing for the next level
 143. **已完成（见 §3.163）** 修补出来的年龄带上它的来历：`claim_since_source`（`derived` / `unknown` /
      `backfilled`）随继承一起传；`claimed_rounds` 的行与 `--campaign` 的年龄句都会为 `backfilled` 的那一条加一句
      "这个日期是修补补出来的，不是记录自己带着的"，两跳之后仍然在。
-144. 让 `--history` 的行也标出"这一轮站在一条人的断言上"（含继承了几次）：现在只有 `--campaign` 与重跑时说，
-     而读者排错时最先打开的是历史页。
+144. **已完成（见 §3.164）** `--history` 的行尾标出"这一轮站在一条人的断言上"，以及继承了几次、
+     年龄是不是补出来的（`claim_mark`）；`agrees` 不标。三行 demo 分别是 0 次继承、1 次、2 次且年龄被补过。
+145. 让 `--history` 的 `claims` 头行说出全账本有多少行站在一条人的断言上（现在只有 `--campaign` 数，
+     而历史页是读者排错时的第一站）。

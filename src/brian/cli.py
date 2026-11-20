@@ -43,6 +43,7 @@ from .evolve import (
     Candidate,
     catalogue,
     ceiling_shortfall,
+    claim_mark,
     claim_note,
     inherit_claim,
     claim_round_file,
@@ -2631,6 +2632,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # round at a time, and it is where a reader looks after asking "which file was that?".
             stream_file = str(record.get("stream_path") or "")
             mark += "  [%s]" % (stream_file or "no file recorded")
+            # Round 158: and whether the file was a person's assertion rather than a measured choice. The
+            # re-measurement says it before it runs and `--campaign` counts it; the history page is where a
+            # reader lands after asking "why does this round look like that?", so the mark belongs here too.
+            mark += claim_mark(record)
             # Round 79: which book the queue paid when it produced this round. The record has said so since
             # round 78; without this the fact was only readable by opening the JSON, and a page listing
             # finished rounds is exactly where a reader asks "what paid for this one".

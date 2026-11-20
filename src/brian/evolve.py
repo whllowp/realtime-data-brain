@@ -2639,6 +2639,27 @@ def claim_note(record: Dict[str, Any]) -> Optional[str]:
         named, said)
 
 
+def claim_mark(record: Dict[str, Any]) -> str:
+    """The history row's note that this round rests on a file a person claimed (round 158).
+
+    Round 153 said it before a re-measurement, round 155 carried its age, round 157 kept a repaired age marked
+    as repaired -- and the history page, which is where a reader goes when something is wrong, said nothing at
+    all. A row that stands on a person's assertion instead of on geometry has to say so on the row itself
+    (boundary 381): a note printed once in the terminal that made the measurement is addressed to whoever was
+    looking at that moment.
+    """
+    entry = unconfirmed_claim(record)
+    if entry is None:
+        return ""
+    hops = int(entry.get("claim_hops") or 0)
+    mark = "  [rests on a file a person claimed"
+    if hops:
+        mark += ", inherited %d time(s)" % hops
+    if str(entry.get("claim_since_source") or "") == "backfilled":
+        mark += ", its age was completed by a repair"
+    return mark + "]"
+
+
 def claimed_rounds(rounds: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The rounds whose current file stands on a claim the geometry never confirmed (round 153).
 
