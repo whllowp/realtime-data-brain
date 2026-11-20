@@ -51,8 +51,11 @@ def test_an_empty_store_summarises_to_zeros(tmp_path):
     summary = settlement_summary([])
     # Round 124: `repeated` counts decisions re-taken three times or more -- repeating a re-take says the decision
     # keeps going stale, which is evidence about the decision (boundary 288).
+    # Round 125: `stored` counts every decision the file holds and `withdrawn` the ones a person took back, so a
+    # page can say "3 recorded, 1 withdrawn" without recomputing it from the list (boundary 291).
     assert summary == {"pairs": 0, "explained": 0, "explained_later": 0, "unexplained": 0, "reaffirmed": 0,
-                       "repeated": 0, "deciders": {}, "explainers": {}, "unattributed": 0}
+                       "repeated": 0, "deciders": {}, "explainers": {}, "unattributed": 0,
+                       "stored": 0, "withdrawn": 0}
 
 
 def test_the_audit_json_carries_the_settlement_account(tmp_path, monkeypatch, capsys):

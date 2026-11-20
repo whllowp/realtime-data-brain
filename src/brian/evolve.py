@@ -2577,7 +2577,8 @@ def replacement_links(rounds: Sequence[Mapping[str, Any]],
     operator settled is not a defect any more. The settlement is *not* consulted to pick a winner between two
     contradicting books -- it silences that one claimant's claim, and the successor's own end is still printed.
     """
-    decided = {(str(item.get("record") or ""), str(item.get("successor") or "")) for item in settled}
+    decided = {(str(item.get("record") or ""), str(item.get("successor") or ""))
+               for item in settled if not is_withdrawn(item)}
     names = {str(record.get("round") or "") for record in rounds}
     by_name = {str(record.get("round") or ""): record for record in rounds}
     findings: List[Dict[str, Any]] = []
@@ -2677,8 +2678,13 @@ def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, An
 
     `reaffirmed` counts the decisions that have been re-taken at least once (round 119): "settled once" and
     "settled and re-confirmed twice" are different amounts of work behind the same word.
+
+    Round 125: a withdrawn decision is kept (`stored`) but is not one of the `pairs` any longer, because it is not
+    owed an explanation, a re-take or a note -- it is the record of a decision that stopped standing. Counting it
+    among the standing ones would make a page report debt nobody can pay (boundary 287).
     """
-    pairs = list(settlements or [])
+    stored = list(settlements or [])
+    pairs = active_settlements(stored)
     explained = sum(1 for item in pairs if str(item.get("why") or "").strip())
     later = sum(1 for item in pairs if item.get("notes"))
     unexplained = sum(1 for item in pairs
@@ -2696,7 +2702,8 @@ def settlement_summary(settlements: Sequence[Mapping[str, Any]]) -> Dict[str, An
     repeated = sum(1 for item in pairs if len([note for note in item.get("reaffirmations") or []
                                                 if isinstance(note, Mapping)]) >= 3)
     return {"reaffirmed": sum(1 for item in pairs if item.get("reaffirmations")), "repeated": repeated,
-            "pairs": len(pairs), "explained": explained, "explained_later": later,
+            "pairs": len(pairs), "stored": len(stored), "withdrawn": len(stored) - len(pairs),
+            "explained": explained, "explained_later": later,
             "unexplained": unexplained,
             "deciders": dict(sorted(deciders.items())), "explainers": dict(sorted(explainers.items())),
             "unattributed": sum(1 for item in pairs if not str(item.get("by") or "").strip())}
@@ -2737,8 +2744,12 @@ def frequent_retakes(settlements: Sequence[Mapping[str, Any]],
     decision keeps going stale, which is evidence about the decision, not about the books (boundary 288): the
     answer is a new decision, and the page should name the pairs so a reader can look at the claim itself.
     """
+    gone = {"%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
+            for item in settlements or [] if isinstance(item, Mapping) and is_withdrawn(item)}
     rows: List[Dict[str, Any]] = []
     for key, entries in retake_timeline(settlements).items():
+        if key in gone:
+            continue
         retaken = [entry for entry in entries if entry.get("kind") == "retaken"]
         if len(retaken) < max(1, int(at_least)):
             continue
@@ -2760,6 +2771,8 @@ def unexplained_decisions(settlements: Sequence[Mapping[str, Any]],
     moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
     rows: List[Dict[str, Any]] = []
     for item in settlements or []:
+        if is_withdrawn(item):
+            continue
         if str(item.get("why") or "").strip() or item.get("notes"):
             continue
         taken = item.get("at")
@@ -2844,6 +2857,11 @@ def reaffirm_link(root: Path, record: str, successor: str, *, why: str = "", by:
     for item in settlements:
         if str(item.get("record") or "") != name or str(item.get("successor") or "") != target:
             continue
+        if is_withdrawn(item):
+            taken = (item.get("withdrawn") or [{}])[-1]
+            raise ValueError("the decision on %s -> %s was withdrawn on %s: a re-take would revive something the "
+                             "record says no longer stands. Record a new decision instead"
+                             % (name, target, str(taken.get("at") or "")))
         rounds = history(root, include_retired=True)
         record_row = next((row for row in rounds if str(row.get("round") or "") == name), None)
         retired = (record_row or {}).get("retired")
@@ -3039,6 +3057,71 @@ def load_settlements(root: Path) -> List[Dict[str, Any]]:
     return [dict(item) for item in rows or [] if isinstance(item, Mapping)]
 
 
+def is_withdrawn(item: Mapping[str, Any]) -> bool:
+    """Whether a stored decision has been taken back by a person (round 125).
+
+    A withdrawal is written into the decision it withdraws (`withdrawn: [{at, why, by}]`), so the store keeps what
+    was decided and why it stopped standing. Readers that answer "is this pair decided" must skip withdrawn
+    entries; readers that show the history must not (boundary 291).
+    """
+    return bool([entry for entry in item.get("withdrawn") or [] if isinstance(entry, Mapping)])
+
+
+def withdrawn_settlements(settlements: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The decisions a person took back, newest withdrawal last (round 125)."""
+    rows = [dict(item) for item in settlements or [] if isinstance(item, Mapping) and is_withdrawn(item)]
+    rows.sort(key=lambda item: str((item.get("withdrawn") or [{}])[-1].get("at") or ""))
+    return rows
+
+
+def active_settlements(settlements: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """The decisions still standing: everything a withdrawal has not taken back (round 125)."""
+    return [dict(item) for item in settlements or [] if isinstance(item, Mapping) and not is_withdrawn(item)]
+
+
+def withdraw_settlement(root: Path, record: str, successor: str, why: str = "", by: str = "",
+                        now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Take a decision back, keeping the decision and the reason it stopped standing (round 125).
+
+    Round 124 named the decisions that keep needing a re-take; the honest answer to one of those is often "this
+    decision is wrong", and until now there was no command for it -- the operator could re-take it for ever or edit
+    the store by hand (the thing rounds 83/112 exist to prevent).
+
+    What a withdrawal does **not** do is make the contradiction disappear: `replacement_links` reads only the
+    decisions still standing, so the pair is a defect again and `--audit --strict` charges it until somebody
+    records a new decision. That is the point -- withdrawing a decision says "I no longer claim this", not "this
+    is settled" (boundary 292).
+    """
+    name = str(record or "").strip()
+    target = str(successor or "").strip()
+    if not name or not target:
+        raise ValueError("a withdrawal needs a record and a successor, like RECORD=SUCCESSOR")
+    reason = str(why or "").strip()
+    if not reason:
+        raise ValueError("a withdrawal needs a reason: --settle-why TEXT. Taking a decision back without saying "
+                         "why leaves the next reader unable to tell a correction from a mistake")
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    store = {"format": SETTLEMENT_FORMAT, "settlements": load_settlements(root)}
+    existing = [item for item in store["settlements"]
+                if str(item.get("record") or "") == name and str(item.get("successor") or "") == target]
+    if not existing:
+        raise ValueError("no settlement recorded for %s -> %s: only a recorded decision can be withdrawn" %
+                         (name, target))
+    entry = existing[0]
+    author = str(by or "").strip()
+    taken = [item for item in entry.get("withdrawn") or [] if isinstance(item, Mapping)]
+    if taken and str(taken[-1].get("why") or "") == reason and str(taken[-1].get("by") or "") == author:
+        return {"record": name, "successor": target, "at": str(taken[-1].get("at") or ""),
+                "withdrawals": len(taken), "changed": False}
+    taken.append({"at": moment.isoformat(), "why": reason, "by": author})
+    entry["withdrawn"] = taken
+    path = root / EVOLVE_DIR / SETTLEMENTS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(store, indent=2, sort_keys=False) + "\n", encoding="utf-8", newline="\n")
+    return {"record": name, "successor": target, "at": moment.isoformat(), "withdrawals": len(taken),
+            "changed": True}
+
+
 def settle_link(root: Path, record: str, successor: str, why: str = "", by: str = "",
                 now: Optional[datetime] = None) -> Dict[str, Any]:
     """Record that `record`'s measurement went into `successor`, and that a person decided it (round 112).
@@ -3067,6 +3150,11 @@ def settle_link(root: Path, record: str, successor: str, why: str = "", by: str 
     store = {"format": SETTLEMENT_FORMAT, "settlements": load_settlements(root)}
     existing = [item for item in store["settlements"]
                 if str(item.get("record") or "") == name and str(item.get("successor") or "") == to]
+    if existing and is_withdrawn(existing[0]):
+        taken = (existing[0].get("withdrawn") or [{}])[-1]
+        raise ValueError("the decision on %s -> %s was withdrawn on %s (%s): it no longer stands, so recording it "
+                         "again is a new decision and this build has no command for one yet"
+                         % (name, to, str(taken.get("at") or ""), str(taken.get("why") or "")))
     if existing:
         return {"record": name, "successor": to, "at": str(existing[0].get("at") or ""),
                 "why": str(existing[0].get("why") or ""), "by": str(existing[0].get("by") or ""),
@@ -3786,6 +3874,9 @@ class Audit:
     settled: List[Dict[str, Any]] = field(default_factory=list)
     # Round 118: the decisions that rest on books which have moved since the decision was taken.
     settled_moved: List[Dict[str, Any]] = field(default_factory=list)
+    # Round 125: the decisions a person took back. Kept in `settled`'s place: a withdrawn decision stops silencing
+    # the contradiction, so the pair is back among `links` and `--strict` charges it again (boundary 292).
+    withdrawn: List[Dict[str, Any]] = field(default_factory=list)
     # Round 85: versions the deployment states say are running whose producing record the books dispute or
     # that a repair copied. Round 84 refused to *stack* a promise there; once a version is applied that refusal
     # is not available, so the fact is reported here instead -- and charged when the two books contradict.
@@ -3808,7 +3899,7 @@ class Audit:
         is absent (boundary 184). One property, read by both call sites, is the only place that decides.
         """
         return bool(self.links or self.backfilled or self.in_force or self.in_force_cleared
-                    or self.in_force_stale or self.settled or self.settled_moved)
+                    or self.in_force_stale or self.settled or self.settled_moved or self.withdrawn)
 
     @property
     def broken_links(self) -> int:
@@ -3937,7 +4028,8 @@ def audit(root: Path, rules: Optional[EvolveRules] = None,
     return Audit(rules=active, fingerprint=fingerprint, rounds=rounds, trials=trials,
                  entries=entries, retired=retired,
                  links=replacement_links(history(root, include_retired=True), load_settlements(root)),
-                 settled=load_settlements(root),
+                 settled=active_settlements(load_settlements(root)),
+                 withdrawn=withdrawn_settlements(load_settlements(root)),
             settled_moved=moved_settlements(history(root, include_retired=True), load_settlements(root)),
                  backfilled=backfilled_links(history(root, include_retired=True)),
                  in_force=[dict(item) for item in (in_force or [])],
@@ -4275,6 +4367,20 @@ def _link_lines(result: Audit) -> List[str]:
                                 str(last.get("at") or ""), ", by %s" % author if author else ""))
             lines.append("%d of them were explained after the fact: the decision keeps its date, and the "
                          "explanation came later." % explained_later)
+    if result.withdrawn:
+        # Round 125: printed before the moved block, because a withdrawal is the answer to "this decision is
+        # wrong" and the reader should see it next to the decision it replaced -- and because the pair is back
+        # among the findings above, which would otherwise read as a regression.
+        lines.append("%d decision(s) were withdrawn by a person, and the contradiction each one settled is back:"
+                     % len(result.withdrawn))
+        for item in result.withdrawn:
+            taken = (item.get("withdrawn") or [{}])[-1]
+            who = str(taken.get("by") or "").strip()
+            lines.append("  %-26s -> %-26s  (%s, by %s)"
+                         % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                            str(taken.get("at") or ""), who or "no one named"))
+        lines.append("A withdrawal says the decision no longer stands; it does not settle anything, so the pair "
+                     "is charged again until a new decision is recorded (boundary 291).")
     if result.in_force:
         # Round 85: round 84 could refuse to stack a promise, because a version that is not yet in force can
         # simply not be applied. A version that is already applied is running; the refusal is gone, and what

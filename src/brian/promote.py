@@ -44,7 +44,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from .config import ENV_VARS, Settings
 from .deploy import overrides_from_state
 from .evolve import (EVIDENCE_MISSING, EVIDENCE_PRESENT, EVIDENCE_UNNAMED, LINK_DEFECTS, Candidate,
-                     EvolveRules, Measurement, backfilled_links, history, load_settlements,
+                     EvolveRules, Measurement, active_settlements, backfilled_links, is_withdrawn,
+                     history, load_settlements,
                      replacement_links)
 
 GEOMETRY_TOLERANCE = 0.25
@@ -83,7 +84,7 @@ def provenance_block(root: Path, version: int) -> Optional[Tuple[str, str]]:
             produced.append(str(record.get("round") or ""))
     if not produced:
         return None
-    for item in replacement_links(rounds, load_settlements(root)):
+    for item in replacement_links(rounds, active_settlements(load_settlements(root))):
         if item.get("kind") not in LINK_DEFECTS:
             continue
         participants = {str(item.get("round") or "")}
@@ -1981,7 +1982,7 @@ def blocked_pairs(root: Path, version: int) -> List[Dict[str, str]]:
     operator would have to decide, so `repair_plan` can name `--settle-link` instead of a diagnostic.
     """
     rounds = history(root, include_retired=True)
-    decided = load_settlements(root)
+    decided = active_settlements(load_settlements(root))
     produced = set()
     for record in rounds:
         applied = record.get("applied")
@@ -2169,14 +2170,22 @@ def blocked_dossier(root: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def _settle_command(pairs: Sequence[Mapping[str, Any]]) -> str:
-    """The command that would clear one refusal, or the diagnostic when nobody knows which pair to decide."""
+    """The command that would clear one refusal, or the diagnostic when nobody knows which pair to decide.
+
+    Round 125: a pair whose decision was withdrawn cannot be settled again -- `--settle-link` refuses it, because
+    recording it a second time is a new decision. Naming that refused command would hand the reader an action that
+    cannot run (boundary 261), so the remedy says what is actually missing.
+    """
     for pair in pairs:
-        if not isinstance(pair, Mapping):
+        if not isinstance(pair, Mapping) or pair.get("withdrawn"):
             continue
         record = str(pair.get("record") or "")
         successor = str(pair.get("successor") or "")
         if record and successor:
             return "brian evolve --settle-link %s=%s" % (record, successor)
+    if [pair for pair in pairs if isinstance(pair, Mapping)]:
+        return ("brian evolve --history  (the decision on this pair was withdrawn: this build has no command for a "
+                "new one)")
     return "brian evolve --audit"
 
 
@@ -2195,6 +2204,8 @@ def repair_plan(root: Path) -> List[Dict[str, Any]]:
     dossier = blocked_dossier(root)
     if not dossier:
         return []
+    withdrawn_pairs = {(str(item.get("record") or ""), str(item.get("successor") or ""))
+                       for item in load_settlements(root) if is_withdrawn(item)}
     waiting = {int(row.get("version") or 0) for row in origin_queue(root)}
     plan: List[Dict[str, Any]] = []
     for origin, entry in dossier.items():
@@ -2212,8 +2223,12 @@ def repair_plan(root: Path) -> List[Dict[str, Any]]:
             "cost": walks_blocked * max(1, held),
             # Round 112: the refusing book has a command now. `--audit` only diagnoses, and a plan whose remedy
             # cannot clear anything is a plan that ranks work nobody can do (boundary 250).
-            "pairs": [dict(pair) for pair in entry.get("pairs") or [] if isinstance(pair, Mapping)],
-            "remedy": _settle_command(entry.get("pairs") or []),
+            "pairs": [dict(pair, withdrawn=(str(pair.get("record") or ""),
+                                            str(pair.get("successor") or "")) in withdrawn_pairs)
+                      for pair in entry.get("pairs") or [] if isinstance(pair, Mapping)],
+            "remedy": _settle_command([dict(pair, withdrawn=(str(pair.get("record") or ""),
+                                                             str(pair.get("successor") or "")) in withdrawn_pairs)
+                                       for pair in entry.get("pairs") or [] if isinstance(pair, Mapping)]),
         })
     plan.sort(key=lambda row: (-int(row["cost"]), -int(row["walks_blocked"]), str(row["origin"])))
     return plan

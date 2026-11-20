@@ -18,7 +18,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .evolve import (
     frequent_retakes, retake_timeline, moved_settlements, reaffirm_plan, BACKFILL_KEY, REFUSAL_EXPIRY_DAYS, EvolveRules, audit, history, limit_drift,
-                     load_settlements, rejection_provenance, settlement_summary, withheld_due,
+                     is_withdrawn, load_settlements, rejection_provenance,
+                     settlement_summary, withdrawn_settlements, withheld_due,
                      withheld_evidence_age,
                      withheld_records, withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
@@ -187,6 +188,9 @@ class Campaign:
     # Round 112: pairs a person decided, with the reason and the moment. A settlement ends a charge without
     # producing evidence, so it travels with the books a reader checks (boundaries 251/252).
     settlements: List[Dict[str, Any]] = field(default_factory=list)
+    #: Round 125: the decisions a person took back. They stop applying, so the contradiction each one settled is
+    #: charged again -- kept here so the page can name them and say what the withdrawal was for.
+    settlements_withdrawn: List[Dict[str, Any]] = field(default_factory=list)
     # Round 116: the counts a script needs are computed once, beside the copies the page prints, so "how many
     # decisions still have no explanation" is a number in the JSON rather than a sentence to be parsed.
     settlement_summary: Dict[str, Any] = field(default_factory=dict)
@@ -308,6 +312,7 @@ class Campaign:
             "settlements": [dict(item) for item in self.settlements],
             "settlement_summary": dict(self.settlement_summary),
             "settlements_moved": [dict(item) for item in self.settlement_moved],
+            "settlements_withdrawn": [dict(item) for item in self.settlements_withdrawn],
             "reaffirm_plan": [dict(item) for item in self.reaffirm_plan],
             "retake_timeline": {key: [dict(entry) for entry in value]
                                 for key, value in self.retake_timeline.items()},
@@ -575,6 +580,7 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.repair_plan = repair_plan(root)
     result.repair_history = repair_history(root)
     result.settlements = load_settlements(root)
+    result.settlements_withdrawn = withdrawn_settlements(result.settlements)
     result.settlement_summary = settlement_summary(result.settlements)
     # Round 118: the same reading the audit page prints, from the same two files.
     result.settlement_moved = moved_settlements(everything, result.settlements)
@@ -1220,15 +1226,16 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                                 int(row.get("held") or 0)))
     # Round 112: a decided pair is not an agreement, and the campaign page said nothing about it at all until the
     # repair line arrived as a side effect. It is printed on its own, before the repair it may have paid for.
-    if result.settlements:
+    settled_active = [item for item in result.settlements if not is_withdrawn(item)]
+    if settled_active:
         lines.append("links             %d pair(s) were settled by a recorded decision, not by agreement: %s"
-                     % (len(result.settlements),
+                     % (len(settled_active),
                         ", ".join("%s -> %s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
-                                  for item in result.settlements)))
+                                  for item in settled_active)))
         # Round 113: a decision is reviewed by asking who made it, so the campaign counts them by decider. The
         # empty case is its own bucket, named for what it is rather than dropped (boundary 166).
         by = {}
-        for item in result.settlements:
+        for item in settled_active:
             who = str(item.get("by") or "").strip()
             by[who] = by.get(who, 0) + 1
         parts = ["%s %d" % (who if who else "and no decider recorded", count)
@@ -1236,7 +1243,7 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         lines.append("links             decided by: %s" % ", ".join(parts))
         # Round 114: an explanation added later is not the explanation the decision came with, so the count is
         # printed on its own line rather than folded into the decider total (boundary 257).
-        explained = sum(1 for item in result.settlements if item.get("notes"))
+        explained = sum(1 for item in settled_active if item.get("notes"))
         if explained:
             lines.append("links             %d of those decisions were explained after the fact: the record keeps "
                          "its date, and a later note does not make it explained at the time" % explained)
@@ -1244,7 +1251,7 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
             # fact from three people explaining one each. A note written without --settle-by is its own bucket,
             # never folded into the named ones (boundary 166).
             explainers: Dict[str, int] = {}
-            for item in result.settlements:
+            for item in settled_active:
                 for note in item.get("notes") or []:
                     if not isinstance(note, Mapping):
                         continue
@@ -1274,31 +1281,41 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                                       % (str(item.get("record") or ""), str(item.get("successor") or ""),
                                          int(item.get("retakes") or 0), str(item.get("last_at") or ""))
                                       for item in result.frequent_retakes)))
-        for item in result.reaffirm_plan[:1]:
-            commands = [str(command) for command in item.get("commands") or [] if str(command)]
-            walks = item.get("walks_since")
-            # Round 121: "stale since when" is the other half of "how many are stale". A file re-taken this morning
-            # and walked three times since is a different problem from one nobody has opened in a month (item 107).
-            # "never re-taken" is not printed here: the split below already says how many decisions nobody has
-            # read the books for, and a fact twice on one line reads as noise (boundary 241).
-            when = ("last re-taken %s" % str(item.get("last_retaken") or "")) if item.get("last_retaken") else ""
-            since = "unknown" if walks is None else ("%d walk(s) since" % int(walks))
-            # Round 122: the debt is two debts. `never` is a promise nobody has read the books for; `again` is one
-            # where the books moved after the last reading, which re-stamping would cover while looking like upkeep.
-            kinds = "%d never re-taken, %d re-taken before and moved again" % (int(item.get("never") or 0),
-                                                                               int(item.get("again") or 0))
-            if int(item.get("stale") or 0) > 1 and str(item.get("batch") or ""):
-                # One command for the whole file: the reason belongs to the action, and eleven pasted pairs is how
-                # one gets skipped (boundaries 277/282).
-                command = str(item.get("batch"))
-            else:
-                command = commands[0] if commands else "brian evolve --settle-reaffirm <record>=<successor>"
-            parts = [part for part in (when, since, kinds) if part]
-            lines.append("links             re-take next: %s -- %d stale of %d recorded decision(s)%s, %s -- %s"
-                         % (str(item.get("origin") or "(unnamed stream)"), int(item.get("stale") or 0),
-                            int(item.get("decisions") or 0),
-                            " (%d re-taken)" % int(item.get("retaken") or 0) if item.get("retaken") else "",
-                            ", ".join(parts), command))
+    # Round 125: the other answer to "this decision keeps needing a re-take". Printed after the settled block and
+    # before the plan, because it explains why a pair is back among the charges (boundary 292).
+    if result.settlements_withdrawn:
+        lines.append("links             %d decision(s) were withdrawn by a person, so the contradiction each one "
+                     "settled is charged again: %s"
+                     % (len(result.settlements_withdrawn),
+                        ", ".join("%s -> %s (%s)"
+                                  % (str(item.get("record") or ""), str(item.get("successor") or ""),
+                                     str((item.get("withdrawn") or [{}])[-1].get("at") or ""))
+                                  for item in result.settlements_withdrawn)))
+    for item in result.reaffirm_plan[:1]:
+        commands = [str(command) for command in item.get("commands") or [] if str(command)]
+        walks = item.get("walks_since")
+        # Round 121: "stale since when" is the other half of "how many are stale". A file re-taken this morning
+        # and walked three times since is a different problem from one nobody has opened in a month (item 107).
+        # "never re-taken" is not printed here: the split below already says how many decisions nobody has
+        # read the books for, and a fact twice on one line reads as noise (boundary 241).
+        when = ("last re-taken %s" % str(item.get("last_retaken") or "")) if item.get("last_retaken") else ""
+        since = "unknown" if walks is None else ("%d walk(s) since" % int(walks))
+        # Round 122: the debt is two debts. `never` is a promise nobody has read the books for; `again` is one
+        # where the books moved after the last reading, which re-stamping would cover while looking like upkeep.
+        kinds = "%d never re-taken, %d re-taken before and moved again" % (int(item.get("never") or 0),
+                                                                           int(item.get("again") or 0))
+        if int(item.get("stale") or 0) > 1 and str(item.get("batch") or ""):
+            # One command for the whole file: the reason belongs to the action, and eleven pasted pairs is how
+            # one gets skipped (boundaries 277/282).
+            command = str(item.get("batch"))
+        else:
+            command = commands[0] if commands else "brian evolve --settle-reaffirm <record>=<successor>"
+        parts = [part for part in (when, since, kinds) if part]
+        lines.append("links             re-take next: %s -- %d stale of %d recorded decision(s)%s, %s -- %s"
+                     % (str(item.get("origin") or "(unnamed stream)"), int(item.get("stale") or 0),
+                        int(item.get("decisions") or 0),
+                        " (%d re-taken)" % int(item.get("retaken") or 0) if item.get("retaken") else "",
+                        ", ".join(parts), command))
     # Round 111: the ranking said which file to open first; this says whether last time's opening helped.
     last = (result.repair_history or {}).get("last") or {}
     if isinstance(last, Mapping) and last.get("at"):

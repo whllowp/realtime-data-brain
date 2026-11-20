@@ -82,7 +82,10 @@ def test_the_plan_names_the_settlement_command(tmp_path):
     _mismatch(tmp_path)
     _walk(tmp_path, attempted=[{"version": 20, "code": 2, "why": ""}])
     plan = repair_plan(tmp_path)
-    assert plan and plan[0]["pairs"] == [{"record": RETIRED, "successor": SUCCESSOR}]
+    # Round 125: the pair also says whether its decision was withdrawn -- `--settle-link` refuses a pair a
+    # person took back, and the remedy has to know the difference.
+    assert plan and plan[0]["pairs"] == [{"record": RETIRED, "successor": SUCCESSOR,
+                                         "withdrawn": False}]
     assert plan[0]["remedy"] == "brian evolve --settle-link %s=%s" % (RETIRED, SUCCESSOR)
 
 

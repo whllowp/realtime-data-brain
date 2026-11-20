@@ -6708,6 +6708,93 @@ $ brian evolve --history
 **边界 289：时间线要能读出顺序，并且区分「作出」与「重开」。** 同一对记录的两类条目含义不同（一个是原始决定，一个是复核），混成一条列表读者就无法判断哪条是第一次。
 
 **边界 290：只有次数而没有时刻，读者无法拿它跟账本核对。** 时间线是原始事实，次数是从它派生的；先有可核对的条目，才有可引用的数字。
+### 3.131 撤销一条决定，不能顺手把一个矛盾藏起来
+
+一份结算说的是「这两份记录争同一个后继，我把其中一条按下去」。按下去了，`replacement_links` 就不再报这条矛盾，
+`--verify` 也不再拒它——这是第 251 条边界要的效果。但它同时也说明：**这条决定可能本来就是错的**。第 124 轮把
+「反复重开」挑了出来，说那多半是决定的问题；挑出来之后没有任何命令能处理它：`--settle-reaffirm` 是「再读一遍，
+决定仍然成立」，`--settle-note` 是补理由，两个都假设决定继续站着。于是这个循环里最重要的一句话——「这条决定不算了」
+——只能靠手改 `settlements.json`，而手改不留任何人、任何时间。
+
+第 125 轮加的是一条命令和一个字段。
+
+```
+brian evolve --settle-drop RECORD=SUCCESSOR --settle-why TEXT [--settle-by NAME]
+```
+
+它把 `{at, why, by}` 追加进这条决定自己的 `withdrawn` 列表，决定的 `at`、`successor`、`why` 一个字都不动。保留是
+关键：被撤销的决定仍然是「某人在某时做过的决定」，历史里少一条和记录一条「它后来不算了」不是同一件事。
+
+然后，所有回答「这一对算不算解决了」的地方，都改成只读**还站着的**决定（`active_settlements`）：
+
+```
+active_settlements(settlements)  ->  is_withdrawn(item) 为假的决定
+replacement_links(rounds, settled)  读 active_settlements
+provenance_block / blocked_pairs    读 active_settlements
+summary / dossier / plan            数量只数还站着的
+```
+
+真实的账本上，`var/demo125`（第 124 轮那份三条重开的账，剥掉上次的撤销、把 ledger 里重复的两行收掉、日期全压到过去）：
+
+```
+$ brian evolve --settle-drop round-old.json=round-new.json \
+      --settle-why "the books have said otherwise three times" --settle-by alice
+withdrawn      round-old.json -> round-new.json
+                the decision stays in the store, with this withdrawal on 2026-11-20T04:10:53.521156+00:00
+                because: the books have said otherwise three times
+                withdrawn by: alice
+                the contradiction it settled is back: `--audit` charges it again until a new decision is taken (boundary 292)
+repair plan      nothing left the table: cost 0 -> 1, 1 file(s) still owing
+```
+
+注意最后一行：修完之后计划**变差了**（`cost 0 -> 1`）。这正是要点——撤销不是修复，它是把一笔债重新记回来。撤销
+之前 `--audit --strict` 退 0，撤销之后：
+
+```
+$ brian evolve --audit --strict        # exit 2
+1 replacement link(s) disagree, so the two ends of the relation cannot both be true:
+  round-old.json             mismatch  round-new.json, round-old.json, round-other.json: round-old.json names
+                                       round-new.json as its successor, but round-new.json says it replaced round-other.json
+1 decision(s) were withdrawn by a person, and the contradiction each one settled is back:
+  round-old.json             -> round-new.json              (2026-11-20T04:10:53.521156+00:00, by alice)
+A withdrawal says the decision no longer stands; it does not settle anything, so the pair is charged again
+until a new decision is recorded (boundary 291).
+```
+
+`--history` 的行上是短句，`--campaign` 的 `links` 上是同一条的汇总：
+
+```
+[the decision on round-new.json was withdrawn on 2026-11-20T04:10:53.521156+00:00: the pair is charged again]
+links             1 decision(s) were withdrawn by a person, so the contradiction each one settled is charged again:
+                  round-old.json -> round-new.json (2026-11-20T04:10:53.521156+00:00)
+```
+
+`--campaign --json-out` 里是 `settlements_withdrawn`（每条带着自己完整的 `withdrawn` 列表），`settlement_summary`
+多两个数：`stored`（文件里一共几条）和 `withdrawn`（其中几条被人收回）。这两个数必须都有：「一条都没撤」和「这个字段
+还不存在」要能分开（第 79/166 条边界）。
+
+这一轮有三处是被运行逼出来的：
+
+1. **撤销之后，计划指名的命令会拒绝自己。** `repair_plan` 的 `remedy` 原来是 `brian evolve --settle-link 老记录=后继`，
+   而被撤销的那一对正是 `--settle-link` 拒绝的对象（「再记一次就是一条新决定，这个构建没有那个命令」）。一条指名的
+   补救命令跑不起来，是第 261 条边界的原样重演。现在 pair 带上 `withdrawn`，`_settle_command` 在没有可撤销的对时
+   改说 `brian evolve --history  (the decision on this pair was withdrawn: this build has no command for a new one)`。
+2. **撤销块被塞进了 `if result.settled:` 里面。** `Audit.settled` 现在只放还站着的决定，于是一份「只有一条、而且被
+   撤销了」的账本什么也不打印——页面在最该说话的时候沉默。把它移到同一个函数的下一层，并且顺手把 `settled` 的
+   赋值改成 `active_settlements(...)`：`--audit` 不再一边说「已结算」一边说「已撤销」。
+3. **计划那一段被缩进成了 `if result.settlements_withdrawn:` 的子句。** `campaign.py` 里 `for item in
+   result.reaffirm_plan[:1]:` 原本在更深的一层，插入块写在 4 格缩进处，于是整段 `re-take next` 跑到了新 `if` 里，
+   页面干脆不打印它——四条既有测试一起变红才暴露。插入脚本必须按文件里的真实缩进写锚点，不能凭记忆。
+
+**边界 291：撤销写在被撤销的决定里，并且要和还站着的决定分开打印。** 一条决定被收回，是这条决定自己的历史；它不
+该从文件里消失，也不该混在「仍然有效」的一堆里。读者要能一句话分清：哪些决定还算数，哪些是被谁在什么时候收回的。
+
+**边界 292：撤销一条决定，会把它结算掉的矛盾还回来。** 在有人重新决定之前，那一对重新是矛盾，所以 `--strict` 只会
+更严、不会更松。任何让「收回一条决定」变成「少一个缺陷」的实现，都是在教人用撤销去糊账。
+
+**边界 293：被撤销的决定什么都不欠。** 解释、重开、再确认、删除——都不该再算在它头上。把它算进站着的决定里，页面
+报的就是一笔没人能付的债；`settlement_summary` 因此把 `stored` 和 `withdrawn` 分开，`unexplained_decisions` 直接跳过它。
+
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
@@ -7191,4 +7278,14 @@ missing for the next level
 
 110. ✓（第 124 轮）重开的时间线：`retake_timeline` 给出每条决定的 `taken` / `retaken` 有序条目（含署名与每次覆盖的主张），`frequent_retakes` 点名被重开三次以上的决定，`settlement_summary` 多一栏 `repeated`，两条页面（`--campaign` 的 `links` 行与 `--history` 的行标注）都从这份时间线读。
 
-111. （下一轮）一条反复重开的决定，需要一条「不再重开」的出口：`--settle-drop RECORD=SUCCESSOR --settle-why TEXT` 把它标记为撤销（保留在 `settlements.json` 里，带撤销时刻与理由），页面把它从「欠着重开」里拿掉但仍列在「曾有过的决定」里，并在它撤销后仍被 `replacement_links` 当成候选时给出提示——撤销一条决定不能悄悄让一个矛盾消失。
+
+111. （第 125 轮已做）给被撤销的决定一条出路——现在有了：`--settle-drop RECORD=SUCCESSOR --settle-why TEXT
+     [--settle-by NAME]` 把 `{at, why, by}` 追加进这条决定自己的 `withdrawn`，保留它的日期与后继；`replacement_links`、
+     `provenance_block`、`blocked_pairs`、`settlement_summary`、`unexplained_decisions`、`frequent_retakes` 都只读还站着
+     的决定，于是被它结算掉的矛盾重新成为矛盾（`--strict` 变严而不是变松），而它自己不再欠任何解释或重开。顺带修了三处：
+     `repair_plan` 的 remedy 不再指名会拒绝自己的 `--settle-link`，撤销块从 `if result.settled:` 里搬出来，
+     `Audit.settled` 改为只放站着的决定。
+112. 给被撤销的那一对一条「重新决定」的命令：`--settle-link` 现在拒绝一条已撤销的决定（再记一次就是新决定，而构建里没有
+     新决定的命令），所以读者只能停在「这一对重新矛盾」。需要 `--settle-restore RECORD=SUCCESSOR --settle-why TEXT`
+     （或明确写成 `--settle-link --redecide`），把撤销那条记进 `redecisions`，并把 `--campaign`/`--audit` 里「这条曾是
+     一条被收回的决定」与「这条是一条全新的决定」分开数。

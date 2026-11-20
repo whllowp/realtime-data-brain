@@ -37,7 +37,8 @@ def test_the_plan_names_the_file_the_cost_and_the_remedy(tmp_path):
     assert row["cost"] == 2
     # Round 112: the refusing book has a command, so the plan names the decision rather than the diagnostic --
     # a plan whose remedy only diagnoses ranks work nobody can do (boundary 250).
-    assert row["pairs"] == [{"record": "round-old.json", "successor": "round-new.json"}]
+    assert row["pairs"] == [{"record": "round-old.json", "successor": "round-new.json",
+                            "withdrawn": False}]
     assert row["remedy"] == "brian evolve --settle-link round-old.json=round-new.json"
 
 

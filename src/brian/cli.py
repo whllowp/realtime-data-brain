@@ -85,8 +85,10 @@ from .evolve import (
     reaffirm_link,
     reaffirm_plan,
     settlement_moment,
+    is_withdrawn,
     settle_link,
-    settle_note,)
+    settle_note,
+    withdraw_settlement,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
 from .laya.gate import explain_thresholds
@@ -2105,6 +2107,15 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 if own_name not in pair:
                     continue
                 other = pair[1] if own_name == pair[0] else pair[0]
+                # Round 125: a withdrawn decision no longer stands, so the row must not call it a decision the books
+                # agree with -- and since it will not be re-taken either, neither of the two later marks applies.
+                if is_withdrawn(entry):
+                    taken = (entry.get("withdrawn") or [{}])[-1]
+                    sentence = ("  [the decision on %s was withdrawn on %s: the pair is charged again]"
+                                % (other, str(taken.get("at") or "")))
+                    if sentence not in mark:
+                        mark += sentence
+                    continue
                 # Round 116: the row says whether the decision was ever explained, so "no reason" stops being a
                 # sentence somewhere above the list and becomes a state a reader can find on the row itself.
                 explained_here = ("and no reason was recorded" if not str(entry.get("why") or "").strip()
@@ -2984,6 +2995,51 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         inner.settle_reaffirm = pairs
         inner.settle_reaffirm_skipped = skipped
         return cmd_evolve(inner, settings)
+
+    if getattr(args, "settle_drop", None):
+        # Round 125: round 124 names the decisions that keep needing a re-take, and the honest answer to one of them
+        # is often "this decision is wrong". Until now the only ways out were another re-take or editing the store by
+        # hand, which leaves no trace of who decided. A withdrawal keeps the decision and the reason it stopped
+        # standing -- and it does not make the contradiction disappear, because `replacement_links` reads only the
+        # decisions still standing, so the pair is charged again (boundary 292).
+        raw = str(args.settle_drop or "").strip()
+        if not raw or "=" not in raw:
+            _print("--settle-drop takes RECORD=SUCCESSOR, for example "
+                   "`--settle-drop round-old.json=round-new.json`")
+            return 2
+        record, successor = raw.split("=", 1)
+        record, successor = record.strip(), successor.strip()
+        plan_before = repair_plan(root)
+        try:
+            decision = withdraw_settlement(root, record, successor, why=str(args.settle_why or ""),
+                                           by=str(getattr(args, "settle_by", "") or ""))
+        except (OSError, ValueError) as error:
+            _print("cannot withdraw that decision: %s" % error)
+            return 2
+        if not decision["changed"]:
+            _print("withdrawn      %s -> %s was already withdrawn on %s; nothing to change"
+                   % (record, successor, decision["at"]))
+            return 0
+        _print("withdrawn      %s -> %s" % (record, successor))
+        _print("                the decision stays in the store, with this withdrawal on %s" % decision["at"])
+        _print("                because: %s" % str(args.settle_why or "").strip())
+        _print("                withdrawn by: %s"
+               % (str(getattr(args, "settle_by", "") or "").strip()
+                  or "(not recorded -- pass --settle-by NAME)"))
+        waiting = [item for item in replacement_links(history(root, include_retired=True),
+                                                      load_settlements(root))
+                   if record in {str(item.get("claimant") or ""), str(item.get("round") or "")}]
+        if waiting:
+            _print("                the contradiction it settled is back: `--audit` charges it again until a new "
+                   "decision is taken (boundary 292)")
+        else:
+            _print("                no contradiction is waiting on that pair: the decision simply stops applying")
+        _print_repair_delta(record_repair(root, "settle-drop", plan_before, repair_plan(root)))
+        if getattr(args, "json_out", None):
+            with open(args.json_out, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump({"withdrawn": decision}, handle, indent=2, sort_keys=False)
+                handle.write("\n")
+        return 0
 
     if getattr(args, "settle_reaffirm", None):
         # Round 119: round 118 can say the books moved under a decision but not re-take it, so the decision stayed
@@ -5049,6 +5105,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-kind", default=None,
                         help="with --settle-reaffirm-file: `never` pays only the decisions nobody has read the "
                              "books for, `again` only the ones the books moved under after the last reading")
+    evolve.add_argument("--settle-drop", default=None, metavar="RECORD=SUCCESSOR",
+                        help="withdraw a recorded decision: it keeps its date and gains the reason it stopped "
+                             "standing, and the contradiction it settled is charged again; needs --settle-why")
     evolve.add_argument("--settle-reaffirm", metavar="RECORD=SUCCESSOR", nargs="+", default=None,
                         help="re-take decisions against today's books: keeps each first date, records the claims "
                              "it covered; takes one or more RECORD=SUCCESSOR pairs; needs --settle-why")
