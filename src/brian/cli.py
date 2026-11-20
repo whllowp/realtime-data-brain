@@ -45,10 +45,10 @@ from .evolve import (
     ceiling_shortfall,
     claim_mark,
     claim_note,
+    claimed_rounds,
     inherit_claim,
     claim_round_file,
     backfill_claims,
-    claimed_rounds,
     debt_history,
     format_audit,
     format_ceiling_shortfall,
@@ -2524,6 +2524,23 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                     for entry in annotated)))
         _print("ceilings          %d of %d round(s) record the wait ceilings they were judged under; %d do not"
                % (len(recorded_limits), len(rounds), len(rounds) - len(recorded_limits)))
+        # Round 159: the rows below carry the mark since round 158; a reader who has to scroll the whole list to
+        # count them has been given a detail and not a fact. The header counts, and it counts the retired rows
+        # apart: a retired round's assertion lives on in its successor, so the total is a count of rows that rest
+        # on a claim, not a count of people's assertions (boundary 383).
+        history_claims = claimed_rounds(rounds)
+        if history_claims:
+            inherited = len([row for row in history_claims if int(row.get("hops") or 0)])
+            repaired = len([row for row in history_claims if row.get("backfilled")])
+            _print("claims            %d of %d row(s) rest on a file a person claimed (%d inherited at least once, "
+                   "%d whose claim columns a repair wrote)"
+                   % (len(history_claims), len(rounds), inherited, repaired))
+            retired_names = {str(record.get("round") or "") for record in rounds if record.get("retired")}
+            retired_claims = len([row for row in history_claims
+                                  if str(row.get("round") or "") in retired_names])
+            if retired_claims:
+                _print("claims            %d of them were retired into a successor, which carries the assertion on"
+                       % retired_claims)
         history_rows: List[Dict[str, Any]] = []
         # Round 71: the count above is the ledger's. A reader asking "where does that debt sit" needs it per
         # stream, and a reader deciding whether to run the queue needs to know which of those rounds it could
