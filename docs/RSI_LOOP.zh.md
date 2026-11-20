@@ -8704,6 +8704,46 @@ assert ClaimCounts(**payload).retired_sentence() == printed[1].split("claims    
 **边界 387**：页面印了某个计数，它对应的 payload 就必须带同一个对象；只带底层行，等于把计数交给每个调用方各写一遍。
 **边界 388**：payload 的数字要能原样重建页面上那句话——"同一处算"这件事，只有这样才可测试；字段存在不算证据。
 
+### 3.168 报告页的 payload 也走同一个写手：一句"记录还在库里"对报告是假话
+
+第 141 轮把八处 `--json-out` 写盘收进 `_write_payload`：建父目录、原子替换、印 `wrote <path>`、写不成时说清楚
+并非零退出。但 `--history` 和 `--campaign` 写在那个规则之前，一直自己 `Path.write_text` 再自己印一行 `wrote`。
+于是：
+
+```
+--campaign --json-out nodir\x.json   ->  FileNotFoundError（traceback）
+--campaign --json-out x.json         ->  "wrote x.json" 印两遍
+```
+
+`grep` 一遍 `_write_payload(args.json_out` 会看到**六**处调用——我原本以为只有那一处，实际同一句式在别的命令里也出现，
+所以我第一次的补丁锚点 `assert count == 1` 直接失败（这次失败救了我：说明"一处写手"从来没被盘点过）。
+
+改完之后两页都走同一个写手，`wrote` 只印一次。**但随后又发现第二件事**，是这次真跑出来的：
+
+```
+cannot write the payload to .: [WinError 5] 拒绝访问: '..tmp' -> '.'
+                what this command recorded is already in the store: only the payload is missing
+```
+
+`--history` 什么都没记录——它只是一张报告。第 141 轮那句话是为"已经改了库、只丢了导出"的命令写的，套在报告页上
+就成了**对一件没发生的事作证**。于是 `_write_payload` 多了一个参数 `recorded: bool = True`，两页传 `False`：
+
+```
+cannot write the payload to .: [WinError 5] 拒绝访问: '..tmp' -> '.'
+                nothing was recorded: this command only reports, so only its export is missing
+exit=2
+```
+
+**成功时也验证过**：`--campaign --json-out deep\nested\c162.json` 建了两级目录，输出里 `wrote` 恰好一行
+（测试数的是行数，不是"包含"）。失败时页面已经把报告印完才失败——**报告不是事务**，这是报告页与四条结算命令的
+根本区别，也是这句结尾必须换掉的原因。
+
+**边界 389**：一条写给某一族写手的规则，会被这族之外的写手继续违反；"所有 payload 都走同一个写手"这句话只能靠
+盘点来证明，不能靠记得。
+**边界 390**：失败时的说明必须对**这条命令**为真——"记录还在库里"落在报告页上就是为没发生的事作证；一句关于错
+对象的真话，比一句笼统的话更坏。
+**边界 391**：写手已经印过的输出，调用方不许再印一次；重复的成功行正是"调用方不知道写手做了什么"的证据。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9319,6 +9359,8 @@ missing for the next level
 147. **已完成（见 §3.167）** `--campaign --json-out` 与 `--history --json-out` 都带 `claim_counts`
      （`ClaimCounts.to_dict()`），并且测试用 payload 重建页面那句话：`ClaimCounts(**payload).sentence()` 必须
      等于印出来的那行。
-148. 让两张页面的 payload 也走 `_write_payload`：现在 `--history`/`--campaign` 还是自己 `Path.write_text`
-     再印一行 `wrote <path>`，所以目录不存在时抛 `FileNotFoundError`，而第 141 轮已经规定 payload 是派生物、
-     写不成要说清楚并以非零退出（边界 336/337），两处页面绕过了那条规定。
+148. **已完成（见 §3.168）** `--history`/`--campaign` 的 payload 也走 `_write_payload`（`wrote` 只印一次），
+     并给写手加了 `recorded` 参数：报告页写不成时说"什么都没记录，只丢了导出"，不再套用结算命令那句。
+149. 盘点所有 payload 写手：现在 `--json-out` 的落盘点散在命令分支里，靠"记得用 `_write_payload`"维持；
+      加一个结构性测试——源码里不许再出现 `Path(args.json_out).write_text`/`write_text(_json(`，且
+      `_write_payload(` 的调用数等于 `--json-out` 出现的分支数。

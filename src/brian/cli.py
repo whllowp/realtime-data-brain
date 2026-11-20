@@ -228,14 +228,17 @@ def _walk_store(root: Path, entry: Mapping[str, Any]) -> Dict[str, Any]:
     return {"path": "var/evolve/queue_runs.json", "ordinal": ordinal, "of": len(runs)}
 
 
-def _write_payload(path: str, payload: Any) -> bool:
+def _write_payload(path: str, payload: Any, recorded: bool = True) -> bool:
     """Write a JSON payload the way every command writes it, and say where it went.
 
     Round 141: the settlement commands wrote their payload with a bare `open(...)`, printed nothing, and raised a
     traceback when the path could not be written -- after the decisions had already been recorded. Eight call sites
     did it eight ways. This is the one way: the parent directory is created (round 113 already did this for the round
     record), the file is renamed into place so a half-written payload cannot be mistaken for a whole one, and the
-    page says `wrote <path>` -- the same words the non-settlement commands have always used (boundary 336).
+    the same words the non-settlement commands have always used (boundary 336).
+
+    `recorded=False` is for the report pages (`--history`, `--campaign`, round 162): they change no book, so the
+    failure sentence must say that only the export is missing rather than report a store change that never happened.
     """
     target = Path(path)
     try:
@@ -250,7 +253,12 @@ def _write_payload(path: str, payload: Any) -> bool:
         # The decisions are already recorded: the payload is the only thing missing, and saying so is the whole
         # difference between a half-done command and a lost one (boundary 337).
         _print("cannot write the payload to %s: %s" % (path, error))
-        _print("                what this command recorded is already in the store: only the payload is missing")
+        if recorded:
+            _print("                what this command recorded is already in the store: only the payload is missing")
+        else:
+            # Round 162: a page records nothing, so round 141's sentence would claim a store change that never
+            # happened. The failure is still non-zero (boundary 337), but it must not describe work as done.
+            _print("                nothing was recorded: this command only reports, so only its export is missing")
         return False
     _print("wrote %s" % path)
     return True
@@ -2794,19 +2802,23 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 # family ever paid" should not have to parse this page's marks.
                 "queue": record.get("queue") or None,
             })
-        if getattr(args, "json_out", None):
-            Path(args.json_out).write_text(_json({
+        if getattr(args, "json_out", None) and not _write_payload(args.json_out, recorded=False, payload={
                 "rounds": history_rows,
                 "links": link_rows,
                 "in_force_clearings": clearing_rows,
-            "stream_path_moves": path_moves,
+                "stream_path_moves": path_moves,
                 "ceilings": {"missing": ceiling_missing, "rounds": ceiling_rounds,
                              "payable": ceiling_payable, "by_domain": ceiling_rows},
                 # Round 161 (item 147): the header above counts the claim rows; the payload carried the rows
                 # but not their counts, so a script had to recount them -- and a recount is a second
                 # computation that can disagree with the sentence printed beside it (boundary 385).
                 "claim_counts": history_counts.to_dict(),
-            }), encoding="utf-8")
+            }):
+                # Round 161 (item 148): this page wrote its payload with a bare Path.write_text and printed the
+                # line itself, so a missing directory raised FileNotFoundError -- the exact shape round 141
+                # collected out of the settlement commands (boundaries 336/337). The page is a report, not a
+                # record: if only the payload is missing, say so and leave a non-zero exit.
+                return 2
         return 0
 
     if getattr(args, "claim_round_file", None):
@@ -3474,9 +3486,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload["claims"] = claim_rows
             # Round 161 (item 147): the same counts the line above printed, in the form a script reads.
             payload["claim_counts"] = campaign_counts.to_dict()
-            Path(args.json_out).write_text(_json(payload), encoding="utf-8")
-            _print("")
-            _print("wrote %s" % args.json_out)
+            # Round 161 (item 148): the writer prints `wrote <path>` itself; this branch printed it again, so a
+            # reader saw the line twice and a failed write raised instead of exiting 2 (boundaries 336/337).
+            if not _write_payload(args.json_out, payload, recorded=False):
+                return 2
         return _strict_exit(args.strict, result.moved, result.unreconstructable,
                             result.inconsistent, due=result.withheld_due,
                             oldest_days=result.withheld_oldest_days, horizon=horizon,
