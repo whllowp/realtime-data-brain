@@ -135,6 +135,7 @@ from .promote import (
     record_clearing,
     begin_rerun_run,
     finish_rerun_run,
+    walk_held,
     record_queue_run,
     revert_promotion,
     set_state_budget,
@@ -2501,7 +2502,13 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             queue_entry = record.get("queue")
             if isinstance(queue_entry, Mapping) and queue_entry.get("family"):
                 walk = int(queue_entry.get("walk") or 0)
-                if walk:
+                if walk and walk_held(root, walk) is None:
+                    # Round 145: the store keeps 20 entries, so an older round can name a walk that has been
+                    # trimmed away. The number stays on the row (it is what the record says) and the row says it
+                    # can no longer be opened -- a dangling ordinal that reads like a live one is the defect.
+                    mark += "  [paid by the %s queue, walk %d, no longer in the store]" % (
+                        queue_entry.get("family"), walk)
+                elif walk:
                     # Round 144: "the file queue paid" does not say which run of it, and a queue run twelve
                     # times has twelve entries in `rerun_runs.json`. The ordinal is what makes the sentence
                     # checkable (boundary 342's rule, one book over).

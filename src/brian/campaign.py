@@ -25,8 +25,8 @@ from .evolve import (
                      withheld_records, withheld_staleness)
 from .promote import (CLAIM_EXPIRY_DAYS, IN_FORCE_GRACE_DAYS, UNMEASURABLE, VERIFIED,
                       current_state, domain_slug,
-                      load_promotions, never_tested_at_origin, queue_runs, repair_history, repair_plan,
-                      shape_note, walks_phrase)
+                      format_rerun_walks, load_promotions, never_tested_at_origin, queue_runs,
+                      repair_history, repair_plan, rerun_walks, shape_note, walks_phrase)
 
 __all__ = ["Campaign", "CampaignRow", "budget_text", "campaign", "format_campaign", "span_text"]
 
@@ -183,6 +183,7 @@ class Campaign:
     in_force_history: Dict[str, Any] = field(default_factory=dict)
     queue_run: Optional[Dict[str, Any]] = None
     queue_history: Dict[str, Any] = field(default_factory=dict)
+    reruns: Dict[str, Any] = field(default_factory=dict)
     #: Round 143: every walk the store holds, in its own order, each carrying the ordinal the store gives it. The page
     #: printed the last walk and the summary counted all of them; nothing said *which* record a reader who opened
     #: `var/evolve/queue_runs.json` was looking at (boundary 342).
@@ -320,6 +321,7 @@ class Campaign:
             "queue_run": dict(self.queue_run) if isinstance(self.queue_run, Mapping) else None,
             "queue_history": dict(self.queue_history),
             "walks": [dict(item) for item in self.walks],
+            "reruns": dict(self.reruns),
             "blocked_dossier": {str(key): dict(value) for key, value in self.blocked_dossier.items()},
             "repair_plan": [dict(item) for item in self.repair_plan],
             "repair_history": {str(key): value for key, value in self.repair_history.items()},
@@ -588,6 +590,12 @@ def campaign(root: Path, rules: Optional[EvolveRules] = None,
     result.in_force_stale = len(report.in_force_stale)
     result.in_force_history = dict(in_force_history or {})
     result.queue_run = dict(queue_run) if isinstance(queue_run, Mapping) else None
+    # Round 145: the other queue. Its walks are what a round's `queue.walk` names, and until now no page counted
+    # them, so "how much of this campaign was the queue spending money" had no answer.
+    try:
+        result.reruns = rerun_walks(root)
+    except OSError:
+        result.reruns = {}
     result.queue_history = dict(queue_history or {})
     # Round 143: the store's own order, numbered, so the page and a payload can both name a walk by position instead
     # of by a timestamp a reader has to match by hand. The ordinal is the store's position, never a counter kept
@@ -1465,6 +1473,10 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         if int(run.get("stopped_at") or 0):
             lines.append("links             it stopped at v%03d, which exited 2: a build defect is not something "
                          "the next promise in the queue measures away" % int(run.get("stopped_at") or 0))
+
+    rerun_note = format_rerun_walks(result.reruns) if result.reruns else None
+    if rerun_note:
+        lines.append("re-run walks      %s" % rerun_note)
 
     if result.in_force_history and int(result.in_force_history.get("total") or 0):
         record = result.in_force_history

@@ -1853,7 +1853,13 @@ def begin_rerun_run(root: Path, run: Mapping[str, Any], now: Optional[datetime] 
     """
     moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
     held = rerun_runs(root)
+    trimmed = int(held["trimmed"] or 0)
+    # Round 145: the ordinal is absolute (walks already trimmed + this one), and it is written inside the entry.
+    # A position in the list is not an identity once the store drops its oldest record: the position moves down
+    # while the number a round already recorded stays the same, so the round would name somebody else's walk.
+    ordinal = trimmed + len(held["runs"]) + 1
     runs = held["runs"] + [{
+        "walk": ordinal,
         "at": moment.isoformat(),
         "started": moment.isoformat(),
         "finished": "",
@@ -1867,12 +1873,11 @@ def begin_rerun_run(root: Path, run: Mapping[str, Any], now: Optional[datetime] 
         "stopped": False,
         "rounds": [],
     }]
-    trimmed = int(held["trimmed"] or 0)
     if len(runs) > RERUN_RUN_LIMIT:
         trimmed += len(runs) - RERUN_RUN_LIMIT
         runs = runs[-RERUN_RUN_LIMIT:]
     _write_rerun_runs(root, runs, trimmed)
-    return {"walk": len(runs), "of": len(runs) + trimmed}
+    return {"walk": ordinal, "of": ordinal}
 
 
 def finish_rerun_run(root: Path, walk: int, run: Mapping[str, Any],
@@ -1887,8 +1892,10 @@ def finish_rerun_run(root: Path, walk: int, run: Mapping[str, Any],
     moment = _stamp_moment(now if isinstance(now, datetime) else _parse_moment(now))
     held = rerun_runs(root)
     runs = held["runs"]
-    index = int(walk or 0) - 1
-    if index < 0 or index >= len(runs):
+    # Round 145: by the entry's own ordinal. Position and ordinal agree only until the first trim.
+    index = next((position for position, item in enumerate(runs)
+                  if int(item.get("walk") or 0) == int(walk or 0)), -1)
+    if index < 0:
         return None
     entry = dict(runs[index])
     entry["finished"] = moment.isoformat()
@@ -1902,6 +1909,55 @@ def finish_rerun_run(root: Path, walk: int, run: Mapping[str, Any],
     _write_rerun_runs(root, runs, int(held["trimmed"] or 0))
     return entry
 
+
+
+def rerun_walks(root: Path) -> Dict[str, Any]:
+    """How often the re-run queue has been walked, and how much of that paid anything (round 145).
+
+    Round 144 gave each invocation a record; nothing read it. A queue walked twenty times and a queue walked once
+    read the same on every page, and a walk that paid nothing (every round refused it) counted the same as a walk
+    that retired five.
+    """
+    held = rerun_runs(root)
+    runs = [run for run in held["runs"] if isinstance(run, Mapping)]
+    paid = sum(int(run.get("paid") or 0) for run in runs)
+    empty = sum(1 for run in runs if not int(run.get("paid") or 0))
+    return {
+        "walks": len(runs),
+        "empty": empty,
+        "paid": paid,
+        "trimmed": int(held.get("trimmed") or 0),
+        "last_at": str(runs[-1].get("at") or "") if runs else "",
+        "last_walk": int(runs[-1].get("walk") or 0) if runs else 0,
+        "ordinals": [int(run.get("walk") or 0) for run in runs],
+    }
+
+
+def walk_held(root: Path, walk: int) -> Optional[Dict[str, Any]]:
+    """The store's own record of that walk, or None when it no longer holds it (round 145).
+
+    None is an answer, not a failure: the store keeps `RERUN_RUN_LIMIT` entries, so a round can name a walk that
+    was trimmed away. The page has to say that rather than leave the number dangling.
+    """
+    for run in rerun_runs(root)["runs"]:
+        if int(run.get("walk") or 0) == int(walk or 0):
+            return dict(run)
+    return None
+
+
+def format_rerun_walks(summary: Mapping[str, Any]) -> Optional[str]:
+    """One sentence for the page, or None when the queue has never been walked (round 145)."""
+    walks = int(summary.get("walks") or 0)
+    if not walks:
+        return None
+    text = ("%d invocation(s) of the re-run queue; %d paid no round; %d round(s) paid in all; the last was walk %d "
+            "at %s" % (walks, int(summary.get("empty") or 0), int(summary.get("paid") or 0),
+                       int(summary.get("last_walk") or 0), str(summary.get("last_at") or "")))
+    trimmed = int(summary.get("trimmed") or 0)
+    if trimmed:
+        text += ("; %d earlier walk(s) were trimmed out of the store, so a round naming one of them names a record "
+                 "nobody can open" % trimmed)
+    return text
 
 
 def blocked_versions(root: Path) -> Dict[int, Dict[str, Any]]:
