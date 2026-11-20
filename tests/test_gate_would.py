@@ -33,13 +33,38 @@ def test_both_modes_read_the_same_facts():
     assert report["charges"] == []
 
 
-def test_a_report_that_would_charge_says_nothing_on_the_page(capsys):
-    """The paragraphs are the check's voice; a report that printed them would be a report pretending to be one."""
+def test_a_report_prints_one_line_not_the_checks_paragraphs(capsys):
+    """Round 170: the report names the rule and the command; the check's paragraphs stay the check's voice."""
     box = _box()
-    cli._strict_exit(False, 4, 0, into=box)
+    assert cli._strict_exit(False, 4, 0, into=box) == 0
 
-    assert capsys.readouterr().out == ""
+    printed = capsys.readouterr().out
+    assert "next check        would charge 1 item(s): moved verdict (4)" in printed
+    assert "run the same command with --strict to charge it" in printed
+    assert "would be decided differently now" not in printed
     assert box["would_charge"]
+
+
+def test_a_check_charge_mode_prints_no_would_charge_line(capsys):
+    """Under `--strict` the line would be a second account of the paragraph printed below it."""
+    box = _box()
+    assert cli._strict_exit(True, 4, 0, into=box) == 1
+
+    assert "next check" not in capsys.readouterr().out
+
+
+def test_a_report_with_nothing_to_charge_prints_no_line(capsys):
+    box = _box()
+    assert cli._strict_exit(False, 0, 0, into=box) == 0
+
+    assert "next check" not in capsys.readouterr().out
+
+
+def test_one_charge_prints_its_rule_without_a_count(capsys):
+    box = _box()
+    cli._strict_exit(False, 1, 0, into=box)
+
+    assert "would charge 1 item(s): moved verdict\n" in capsys.readouterr().out
 
 
 def test_the_report_payload_carries_would_charge(tmp_path, monkeypatch):

@@ -880,6 +880,15 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
             into["would_charge"] = list(charges)
             into["charges"] = [] if not strict else list(charges)
         if not strict:
+            # Round 170 (item 156): a reader at a terminal has no JSON to read. One line, from the same list
+            # the payload carries, so the page and `would_charge` cannot disagree (boundaries 406/407).
+            if charges:
+                _print("")
+                _print("next check        would charge %d item(s): %s"
+                       % (len(charges), ", ".join(
+                           "%s (%s)" % (item["rule"], item["count"]) if item["count"] > 1
+                           else str(item["rule"]) for item in charges)))
+                _print("                  run the same command with --strict to charge it")
             return 0
         if any(item["code"] == 2 for item in charges):
             return 2

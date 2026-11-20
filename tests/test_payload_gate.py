@@ -23,14 +23,14 @@ def test_the_gate_charges_a_page_that_does_not_describe_the_source(capsys):
 def test_a_page_that_agrees_charges_nothing(capsys):
     assert cli._strict_exit(True, 0, 0, page_problems=0) == 0
 
-    assert "payload page" not in capsys.readouterr().out
+    assert "problem(s): the --payload-writers table" not in capsys.readouterr().out
 
 
 def test_without_strict_the_page_is_not_read(capsys):
     """`--audit` is a report unless `--strict` asks it to be a check (round 15's rule)."""
     assert cli._strict_exit(False, 0, 0, page_problems=1) == 0
 
-    assert "payload page" not in capsys.readouterr().out
+    assert "problem(s): the --payload-writers table" not in capsys.readouterr().out
 
 
 def test_a_build_defect_outranks_a_moved_verdict(capsys):
@@ -64,7 +64,7 @@ def test_a_report_is_not_a_check(tmp_path, monkeypatch, capsys):
 
     assert cli.main(["evolve", "--audit"]) == 0
 
-    assert "payload page" not in capsys.readouterr().out
+    assert "problem(s): the --payload-writers table" not in capsys.readouterr().out
 
 
 def test_the_real_page_passes_the_real_gate():
