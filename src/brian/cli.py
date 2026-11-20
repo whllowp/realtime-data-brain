@@ -829,6 +829,7 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
                  limit_drift: int = 0, max_limit_drift: Optional[float] = None,
                  ceiling_missing: int = 0, ceiling_rounds: int = 0, ceiling_payable: int = 0,
                  max_ceiling_debt: Optional[float] = None,
+                 page_problems: int = 0,
                  broken_links: int = 0, in_force: int = 0,
                  in_force_stale: int = 0, in_force_untested: int = 0,
                  unexplained_stale: int = 0,
@@ -1110,11 +1111,20 @@ def _strict_exit(strict: bool, moved: int, unreconstructable: int, inconsistent:
             _print("only %d of them can be re-run, so --strict does not charge it: a gate that can never be "
                    "cleared is a gate nobody runs." % max(0, int(ceiling_payable)))
             _print("nothing was charged; the debt is on the page above.")
+    # Round 166 (item 152): `--payload-writers --check` is a command somebody has to remember to run. A gate that
+    # does not call it lets a table that no longer describes the source land on a fully green `--strict`. This is a
+    # build defect, not a debt (round 33's rule): nothing in the ledger can pay it, so it is simply exit 2.
+    page_capped = bool(page_problems)
+    if strict and page_capped:
+        _print("payload page      %d problem(s): the --payload-writers table does not describe this source"
+               % int(page_problems))
+        _print("                  run `brian evolve --payload-writers --check` for the list (boundary 397)")
     ceiling_capped = (max_ceiling_debt is not None and ceiling_missing
                       and ceiling_share > float(max_ceiling_debt) and ceiling_payable >= ceiling_missing)
-    return 1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
-                 or ceiling_capped or in_force_stale or unexplained_stale or restaled
-                 or per_file_restaled or unanswered or per_file_unanswered) else 0
+    return 2 if (page_capped or broken_links) else (
+        1 if (moved or due or capped or rose or debt_capped or minutes_capped or drift_capped
+              or ceiling_capped or in_force_stale or unexplained_stale or restaled
+              or per_file_restaled or unanswered or per_file_unanswered) else 0)
 
 def _limits_view(run_all: Optional[float], run_by_domain: Mapping[str, float],
                  run_from_flag: Mapping[str, float], drain_all: Optional[float],
@@ -2416,6 +2426,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # no longer decide anything. It is computed here, with the other two, so the campaign sentence, the
     # --unrecorded page and its payload cannot disagree about how the debt splits (boundary 366).
     ceiling_unpayable = max(0, ceiling_missing - ceiling_file_payable - ceiling_named)
+    # Round 166: the page's own claim, read by the gate rather than only by whoever remembers --check.
+    page_problems = len(payload_writer_problems())
 
     # Round 153: the repairs round 152 made are visible in each record's stream_path_history, and a claim the
     # geometry never confirmed is a fact a reader of the page needs -- the row rests on a person's assertion
@@ -3634,8 +3646,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             # reader saw the line twice and a failed write raised instead of exiting 2 (boundaries 336/337).
             if not _write_payload(args.json_out, payload, recorded=False):
                 return 2
-        return _strict_exit(args.strict, result.moved, result.unreconstructable,
-                            result.inconsistent, due=result.withheld_due,
+        return _strict_exit(args.strict, result.moved, result.unreconstructable, result.inconsistent,
+                            page_problems=page_problems,
+                            due=result.withheld_due,
                             oldest_days=result.withheld_oldest_days, horizon=horizon,
                             unrecorded=result.unattributable_missing,
                             legacy_unrecorded=result.unattributable_legacy,
@@ -3781,6 +3794,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             if not _write_payload(args.json_out, payload, recorded=False):
                 return 2
         return _strict_exit(args.strict, result.moved, result.cross, result.inconsistent,
+                            page_problems=page_problems,
                             due=due, oldest_days=oldest, horizon=horizon,
                             unrecorded=missing, legacy_unrecorded=legacy, unrecorded_share=share,
                             max_unrecorded=args.max_unrecorded,

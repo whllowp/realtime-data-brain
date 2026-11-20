@@ -8943,6 +8943,45 @@ def pending_walk_backfill(root: Path, pairs: Sequence[Any]) -> List[Any]:
 **边界 399**：两种"没有"（没有提名 / 提名了且已完成）要两句不同的话，否则好消息和一个缺陷读起来一样。
 
 
+### 3.172 闸门自己读这一页：会记着去跑的命令，不是闸门
+
+第 165 轮让清单可以被一条命令检查（`--payload-writers --check`，退出码 2），并且它第一次运行就拒绝了加它的
+那次改动。但那条命令**要有人记得去跑**：表格不再描述源码，仍然可以随一次全绿的 `--audit --strict` 进主干。
+这一轮把同一个问题放进闸门——那里已经收着其它"这一版构建本身有问题"的账（第 33/81 轮的退出码 2）。
+
+```
+$ brian evolve --audit --strict        # 表格与源码一致时，闸门不多说一个字
+...
+audit-exit=1                           # 退出 1 来自账本欠账，与本轮无关
+
+$ brian evolve --audit --strict        # 表格不再描述源码时（这里的 1 由检查本身给出）
+payload page      1 problem(s): the --payload-writers table does not describe this source
+                  run `brian evolve --payload-writers --check` for the list (boundary 397)
+audit-exit=2
+```
+
+三处设计，都沿用了闸门已经有的规矩：
+
+1. **同一份判断，两处读者。** `cmd_evolve` 在分支之前算一次 `page_problems = len(payload_writer_problems())`，
+   和天花板欠账那几个计数放在一起；两个闸门（`--audit`、`--campaign`）把它传给 `_strict_exit`。闸门不自己
+   重新判断，所以它和 `--check` 不可能对同一张表给出两个答案。
+2. **构建缺陷不是欠账。** `page_capped` 直接是 `2`：账本里没有任何东西能把它付掉，它不是"检查了、但比政策
+   更老"，而是"检查不了"（第 33 轮：2 压过 1）。它排在最后返回处，与 `broken_links` 同级——两者都是
+   "这一版构建与它自己的记录互相矛盾"。
+3. **报告不是检查。** 不带 `--strict` 时一句都不打印（`_strict_exit` 在 `not strict` 时提前返回 0），因为
+   `--audit` 默认是报告；只有 `--strict` 把它变成检查（第 15 轮的规矩）。
+
+**写这一轮时自己踩的坑，值得记下来**：第一版把 `page_problems=page_problems` 插在 `_strict_exit(...)` 调用
+的**位置参数之间**，于是 `positional argument follows keyword argument`，`pyflakes` 立刻报，103 个测试文件
+收集失败。关键字参数必须落在最后一个位置参数之后——这不是风格问题，是把 `result.inconsistent` 顶到关键字
+后面去的语法错误。
+
+**边界 400**：一条"要记得去跑"的检查不是闸门；同一个问题必须由那条已经在决定通过/不通过的命令来收费，
+否则一致性只是某个人昨天的勤快。
+**边界 401**：构建缺陷与欠账是两种结局——前者是"检查不了"，与谁能付它无关，一律退出 2；后者是"检查了、
+超过政策"，退出 1 并且页面点名能付它的命令。
+
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -9572,7 +9611,9 @@ missing for the next level
      表格 24 行、`EXPECTED_PAYLOAD_WRITERS` 24、`--check` 推导验证；顺带发现预览在真实账本上承诺 27 笔、
      真跑写 0 笔（补进去的都已存在），改成两边共用 `pending_walk_backfill()`，并把"没有提名"与"提名了且
      已完成"分成两句。
-152. 让闸门自己读这一页：`--audit --strict` / `--campaign --strict` 在 `payload_writer_problems()` 非空时
-     以退出码 2 结束——今天 `--check` 是一条要人记得去跑的命令，闸门（第 33/56/58/72/101/108/135/147 轮的
-     `--strict` 家族）并不看它，所以"表格和源码不一致"仍然可以随一次 `--strict` 全绿的提交进主干
-     （边界 397 的直接后果）。
+152. ~~让闸门自己读这一页：`--audit --strict` / `--campaign --strict` 在 `payload_writer_problems()` 非空时
+     以退出码 2 结束。~~ 第 166 轮完成（§3.172）：`page_problems` 算一次、两个闸门共用，与 `broken_links`
+     同级归入"构建缺陷"（退出 2）；不带 `--strict` 时一字不印（报告不是检查）。
+153. 让退出码在机器可读的那一份里也有解释：`--audit --json-out` / `--campaign --json-out` 目前只印
+     `payload page N problem(s)`，payload 里没有任何一栏对应它——CI 拿到退出码 2 却读不到原因，只能去翻日志
+     （边界 401 的另一半：既然闸门为它退出 2，报告就该把它的名字与列表写进 payload）。
