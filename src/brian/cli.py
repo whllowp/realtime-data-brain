@@ -43,7 +43,9 @@ from .evolve import (
     Candidate,
     catalogue,
     ceiling_shortfall,
+    claim_note,
     claim_round_file,
+    claimed_rounds,
     debt_history,
     format_audit,
     format_ceiling_shortfall,
@@ -187,6 +189,20 @@ def _stamp() -> str:
 
 def _json(payload: Any) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+
+
+def _claim_note_line(record: Dict[str, Any]) -> str:
+    """The sentence printed before a re-measurement on a file a person claimed (round 153).
+
+    It exists as its own function because the sentence has to be checked without Laya: the round that
+    exposed the first cut printed this warning and then measured nothing, so the order of "warn" and
+    "measure" is part of what the test holds (boundary 372).
+    """
+    note = claim_note(record)
+    if not note:
+        return ""
+    return ("  careful: %s -- what this measures is evidence about that file, not about the one the round "
+            "first measured (boundary 371)" % note)
 
 
 def _walk_store(root: Path, entry: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2287,6 +2303,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
     # --unrecorded page and its payload cannot disagree about how the debt splits (boundary 366).
     ceiling_unpayable = max(0, ceiling_missing - ceiling_file_payable - ceiling_named)
 
+    # Round 153: the repairs round 152 made are visible in each record's stream_path_history, and a claim the
+    # geometry never confirmed is a fact a reader of the page needs -- the row rests on a person's assertion
+    # (boundary 371). Computed with the other pre-branch counts for the same reason.
+    claim_rows = claimed_rounds(live_records)
+
     if getattr(args, "set_domain_limit", None) or getattr(args, "set_domain_drain", None):
         written: List[Tuple[str, Optional[float], Optional[float], bool, bool]] = []
         for entry, flag in [(item, "--set-domain-limit") for item in
@@ -2943,6 +2964,12 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 _print("  this record keeps no candidate definitions, so there is nothing to measure again; "
                        "its totals stay where they are")
                 return False, False
+            # Round 153: only after the record is known to be re-measurable. A warning
+            # about a measurement that will not happen is a page describing work it is
+            # not doing (boundary 372).
+            note = _claim_note_line(record)
+            if note:
+                _print(note)
             clone = argparse.Namespace(**vars(args))
             clone.stream_file = target_file
             # A re-run is a measurement, not a deployment: it writes a round that names its file, and nothing
@@ -3354,7 +3381,8 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                refusal_expiry_days=horizon, queue=_rerun_progress(root),
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
                                budget=budget, limits=_limits_text(limits_view),
-                               ceiling_note=ceiling_note, rerun_offer=rerun_offer))
+                               ceiling_note=ceiling_note, rerun_offer=rerun_offer,
+                               claims=claim_rows))
         if getattr(args, "what_if_records", None):
             # Round 132: a reader looking at "this file owes two" should not have to conjure the batch commands to
             # ask what paying them would leave. The block is a recomputation, never a write.
@@ -3376,6 +3404,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
             payload["origin_queue"] = origin_queue_state
             # Round 149: what the queue could pay today travels with the page that printed it.
             payload["rerun_offer"] = rerun_offer
+            # Round 153: which rows rest on a person's claim, and what the
+            # geometry said about it, travels with the page.
+            payload["claims"] = claim_rows
             Path(args.json_out).write_text(_json(payload), encoding="utf-8")
             _print("")
             _print("wrote %s" % args.json_out)

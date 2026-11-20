@@ -853,7 +853,8 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
                     budget: Optional[Mapping[str, Any]] = None,
                     limits: Optional[str] = None,
                     ceiling_note: Optional[str] = None,
-                    rerun_offer: Optional[Mapping[str, Any]] = None) -> str:
+                    rerun_offer: Optional[Mapping[str, Any]] = None,
+                    claims: Optional[Sequence[Mapping[str, Any]]] = None) -> str:
     # The rules are needed even though nothing is re-decided here: the withheld line has to name the bar it
     # is comparing the recorded loss against, and a bar read from a default nobody passed would be the
     # page lying about which assumption it used (round 42).
@@ -1020,6 +1021,17 @@ def format_campaign(result: Campaign, expiry_days: float = CLAIM_EXPIRY_DAYS,
         # all, and whether the re-run queue could change that. A warning nobody can clear and a warning one
         # command could clear look identical on the page otherwise (boundary 151).
         lines.append("ceiling debt      %s" % ceiling_note)
+    if claims:
+        # Round 153: round 152 recorded which verdict each repair rested on, and printed it once, in the
+        # terminal that made it. A page that later counts the round as one the queue paid is describing a row
+        # whose file a person chose; saying so is the difference between evidence and bookkeeping (boundary
+        # 371).
+        lines.append("claims            %d round(s) name a file a person claimed, and the geometry never "
+                     "confirmed it: %s"
+                     % (len(claims), ", ".join("%s %s (%s)" % (row["round"], row["stream_path"],
+                                                               row["geometry"]) for row in claims)))
+        lines.append("claims            a re-measurement on such a round is evidence about that file, not about "
+                     "the one the round first measured (boundary 371)")
     if result.broken_links:
         # Round 82: round 81 counted these so `--strict` could exit 2, and printed them only on `--audit`.
         # A reader who runs the campaign page and sees a non-zero exit with no line to explain it has to

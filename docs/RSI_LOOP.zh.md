@@ -8302,6 +8302,72 @@ ceiling debt      2 of 3 round(s) do not record the ceilings they were judged un
 **边界 370：修一条记录可以改变"哪一族付得起"，却不改变欠账的数字。** 只说"欠账 2 of 3"会把一次类别迁移说成
 什么都没发生；句子要跟着说"这 1 条现在由上限队列付"。
 
+### 3.159 一轮站在"人指的、几何不认"的文件上：测之前要说，页面上要数
+
+第 152 轮给"队列够不着的那一半"装了一个动词 `--claim-round-file`，并且让这个动词把**自己的判定**写进记录：
+`agrees` / `disagrees` / `unknown`。判定是 `disagrees` 的时候，这一轮就走进了一个它从没测过的家族——
+而在此之前，没有任何地方说过这件事。恰恰在两个最要紧的时刻没有说：
+
+1. 队列真的在这个文件上重测它的时候——那一轮会带着新数字退休旧记录，读者会以为新数字长在那条轮原本的文件上；
+2. 页面把它算进"队列付过的轮"、或者按文件给它排队的时候。
+
+**一个事实，两个位置。** `claim_note(record)` 回答"这条记录现在指着的文件，是不是一个人指过去、而几何不认的"；
+`claimed_rounds(rounds)` 把这件事按轮列出来，给页面用。两个函数都读 `stream_path_history` 的最后一条，
+而且只认**指向当前文件**的那一条：记录后来又换了文件时，旧断言说的是另一份证据，不读。
+
+真跑一次（`var/demo153`，一条被手工指到 `data/smd/stream-one.json`、几何 `disagrees` 的记录）：
+
+```
+---- re-running round-out-of-reach.json on data/smd/stream-one.json
+  careful: the file data/smd/stream-one.json was claimed by a person, and its geometry disagrees with the
+  ones the round recorded -- what this measures is evidence about that file, not about the one the round
+  first measured (boundary 371)
+recorded round var\evolve\round-20261120T085517Z.json
+retired round-out-of-reach.json (re-measured as round-20261120T085517Z.json)
+  ceilings         the successor records the ceilings it was judged under
+ceilings          1 of 1 re-measured with their ceilings; 0 still without
+```
+
+页面上（`var/demo151`，同一份记录在被重测之前）：
+
+```
+claims            1 round(s) name a file a person claimed, and the geometry never confirmed it:
+                  round-out-of-reach.json data/smd/stream-one.json (disagrees)
+claims            a re-measurement on such a round is evidence about that file, not about the one the
+                  round first measured (boundary 371)
+```
+
+**`unknown` 不是 `agrees`。** 判定的三种值里，`unknown`（那个文件不在本 checkout 里、几何无从比对）和
+`disagrees` 一样都算"没被确认"：读这句话的人需要知道"这是人说的"，而不是"机器核过的"。反过来，只有
+`agrees` 才是沉默——沉默必须有依据。
+
+**第一次把这句话接错了位置。** 最初的版本把警告印在 `---- re-running …` 之后、`if not recorded:` 之前，
+于是 `var/demo151` 那次跑出来的是这样：
+
+```
+---- re-running round-out-of-reach.json on data/smd/stream-one.json
+  careful: the file data/smd/stream-one.json was claimed by a person, …
+ceilings          0 of 1 re-measured with their ceilings; 1 still without
+```
+
+警告说"这次测的是什么"，然后什么都没测——那条记录没有候选定义，队列在量之前就返回了。**页面可以警告一次
+测量，但不能描述一次不会发生的测量**（边界 372）。修法是把警告移到"这条记录确定可以重测"之后，并且把这句话
+抽成 `_claim_note_line(record)`，这样测试能直接钉住顺序，而不用等一次五分钟的测量。
+
+**顺手修掉两处容错。** 为了造这条演示，往账本里写了一条 `trials` 只有名字（而不是"候选 + 测量 + 判定"三段）
+的旧形状记录，`rejection_provenance` 直接抛 `AttributeError: 'str' object has no attribute 'get'`——两处：
+`trials` 的条目本身是名字，以及条目的 `verdict` 是名字。两处都改成"跳过这条、继续数"，因为一个只想要计数的
+页面没有理由因为一条读不懂的旧记录而崩掉（边界 153 的同一条规则；第 71 轮 `accepted` 是整数的那次是同一个坑）。
+
+**这一轮也留下了一个缺口。** 重测之后，新记录直接写 `stream_path`，**不继承**被重测记录上的那条断言：上面
+`var/demo153` 第二次 `--campaign` 就不再印 `claims` 行。也就是说，"这个文件是人指的、几何不认"这个事实，
+在一次成功的重测之后就消失了——而那次重测恰恰是站在它上面的。这写进了下一项。
+
+**边界 371**：一次测量的前提如果是一个人的断言（而不是机器核过的几何），那么在这句话起作用的地方——重测
+之前、页面计数时——必须说出来；只写进那条命令当时打印的一行日志，等于只对当时在场的人说过。
+**边界 372**：警告的位置是它内容的一部分：对一次不会发生的测量说"这次测的是什么"，比不说更坏，因为它让
+读者以为工作做了。凡是"先说后做"的句子，都要放在"确实会做"的分支里。
+
 
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
@@ -8893,6 +8959,10 @@ missing for the next level
 138. ~~让 `--unrecorded` 的"付不动"那一段也能被修好：写一条命令把"没有单一文件"的轮补上文件，跑完之后这一段
      自己变短。~~（第 152 轮：§3.158）
 
-139. 让"补回去的文件"也能被反过来检查：`--claim-round-file` 记下的 `geometry: disagrees` 会让那一轮的上限重测
-     在错误几何上发生，而页面现在不说这件事；给重测加一句"这次重测用的文件是人员补的、几何不同意"，并让
-     `--campaign` 数出有多少条这样的记录（今天只数了 `stream_path_history` 的长度）。
+139. **（已完成，见 §3.159）** 让"补回去的文件"也能被反过来检查：`--claim-round-file` 写下的
+     `geometry: disagrees` 是一条人的断言，重测之前和页面上都要说出来，并让 `--campaign` 数出有几条记录
+     站在这类文件上。
+140. 让重测**继承**被重测记录上的那条断言：成功的重跑现在直接写 `stream_path`，于是"这个文件是人指的、
+     几何不认"在重测之后就从账本里消失了，而那次重测正是站在它上面做的。让 `RoundResult` 带上
+     `stream_path_history`，把继承来的断言（带原记录的轮名）写进新记录，并让 `claimed_rounds` 在
+     `--campaign` 上仍然数得到它。

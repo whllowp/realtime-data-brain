@@ -2471,6 +2471,51 @@ def _rewrite_ledger_line(root: Path, name: str, changes: Dict[str, Any]) -> bool
     return True
 
 
+def claim_note(record: Dict[str, Any]) -> Optional[str]:
+    """What a person's claim said about the file this record now names (round 153).
+
+    Round 152 gave the out-of-reach half a verb, and the verb records the verdict it rested on. A claim whose
+    geometry disagreed puts the round into a family it never measured: the file it now names is not the file
+    the record's own windows, scored count and cadence point at. Nothing said so at the moment it mattered --
+    a re-measurement on that file, or a page counting the round -- so both ask here instead of trusting the
+    name (boundary 371).
+    """
+    claimed = [item for item in (record.get("stream_path_history") or [])
+               if isinstance(item, dict) and item.get("to")]
+    named = str(record.get("stream_path") or "")
+    for entry in reversed(claimed):
+        if named and str(entry.get("to") or "") != named:
+            continue
+        verdict = str(entry.get("geometry") or "unknown")
+        if verdict == "agrees":
+            return None
+        said = ("disagrees with" if verdict == "disagrees" else "was never checked against")
+        return ("the file %s was claimed by a person, and its geometry %s the ones the round recorded"
+                % (named or str(entry.get("to") or ""), said))
+    return None
+
+
+def claimed_rounds(rounds: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The rounds whose current file stands on a claim the geometry never confirmed (round 153).
+
+    A page that counts these is not auditing the repair -- round 152 already says which verdict it rested on.
+    It is saying how many rows rest on a person's assertion, because a measurement taken there answers a
+    question about that file and not about the one the round first measured (boundary 371).
+    """
+    rows: List[Dict[str, Any]] = []
+    for record in rounds:
+        note = claim_note(record)
+        if not note:
+            continue
+        entry = [item for item in (record.get("stream_path_history") or []) if isinstance(item, dict)]
+        last = entry[-1] if entry else {}
+        rows.append({"round": str(record.get("round") or ""),
+                     "stream_path": str(record.get("stream_path") or ""),
+                     "geometry": str(last.get("geometry") or "unknown"),
+                     "at": str(last.get("at") or "")})
+    return rows
+
+
 def claim_round_file(root: Path, pairs: Sequence[str], *, force: bool = False,
                      geometry_of: Optional[Callable[[str], str]] = None,
                      why: str = "", now: Optional[datetime] = None,
@@ -3909,7 +3954,15 @@ def rejection_provenance(root: Path, rules: Optional[EvolveRules] = None) -> Dic
         retired = bool(retirement)
         baseline = Measurement.from_dict(row.get("baseline") or {}) if rules is not None else None
         for trial in row.get("trials") or []:
+            if not isinstance(trial, dict):
+                # Round 153: a ledger line that names a candidate rather than carrying its verdict cannot
+                # say who settled it. Skipping it is honest; raising a traceback over a page that only
+                # wanted a count is not (boundary 153).
+                continue
             verdict = trial.get("verdict") or {}
+            if not isinstance(verdict, dict):
+                # Round 153: a verdict written as its name ("reject") cannot say who settled it either.
+                continue
             accepted = bool(verdict.get("accepted"))
             reason = verdict.get("reason", "")
             if rules is not None and baseline is not None:
