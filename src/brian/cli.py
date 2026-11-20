@@ -25,7 +25,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .bus import JournalBus, MemoryBus, open_bus
 from .config import ENV_VARS, Settings, load_settings
@@ -626,6 +626,43 @@ WHY_EMPTY_REASONS: Tuple[Tuple[str, str], ...] = (
 )
 
 
+# Round 178 (item 164): three declarations do not come from a dict literal -- they are a class's own
+# `to_dict()` (plus the field the branch adds) or a function's return value. `--check` builds the thing and
+# compares key for key, so a field added to `Sensitivity`, `RcaReport` or `summarise` is caught without running
+# the pipeline (boundary 426). A builder is a second statement about how the payload is made: if the branch adds
+# a field, the builder has to add it too, or the check reports the branch instead of the class.
+def _sensitivity_keys() -> Iterable[str]:
+    from .evolve import Sensitivity
+
+    return set(Sensitivity(bar=0.05, bars=[], rules=EvolveRules()).to_dict()) | {"gate"}
+
+
+def _evaluate_keys() -> Iterable[str]:
+    from .contracts import RcaReport
+
+    # An empty alert_id is refused by the contract itself, which is a good sign: the constructor is the
+    # authority on what a report is, and a builder that guessed would be checking the guess (boundary 427).
+    report = RcaReport(alert_id="alert-1", decision_id="decision-1", service="svc", summary="s",
+                       root_cause="r")
+    return set(report.to_dict()) | {"recommendation"}
+
+
+def _dataset_summary_keys() -> Iterable[str]:
+    """`summarise` returns `{"n_examples": 0}` for nothing and seven keys otherwise; a real export is the seven."""
+    from .export import TrainingExample, summarise
+
+    example = TrainingExample(state="", answers={}, service="", scenario="", digest_id="",
+                              window_start=datetime(1970, 1, 1, tzinfo=timezone.utc))
+    return set(summarise([example]))
+
+
+PAYLOAD_BUILDERS: Dict[str, Callable[[], Iterable[str]]] = {
+    "--sensitivity": _sensitivity_keys,
+    "evaluate": _evaluate_keys,
+    "dataset --summary-out": _dataset_summary_keys,
+}
+
+
 def _wrap_items(items: Sequence[str], width: int = 96) -> List[str]:
     """Round 176 (item 162): a list of names as lines that fit a terminal."""
     chunks: List[str] = []
@@ -719,6 +756,13 @@ def format_payload_writers() -> str:
         # about a hole it has just closed, which is worse than either truth (boundary 424).
         lines.append("every row is declared above, so a key added to any of these payloads is refused where that")
         lines.append("payload is built, and a payload that drops one is refused there too (boundary 424).")
+        # Round 178 (item 164): a declaration checked only when its branch runs is unchecked in CI, so three of
+        # them are compared against the object that builds them (boundary 426).
+        lines.append("`--check` also builds %d of them and compares each key for key:" % len(PAYLOAD_BUILDERS))
+        for chunk in _wrap_items(sorted(PAYLOAD_BUILDERS)):
+            lines.append("  " + chunk)
+        lines.append("a field added to one of those classes or functions is found without running the pipeline,")
+        lines.append("so a declaration whose branch no test drives is still checked (boundary 426).")
     lines.append("")
     lines.append("A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this")
     lines.append("table and its count move together (boundary 392).")
@@ -790,6 +834,26 @@ def payload_writer_problems(source: Optional[str] = None) -> List[str]:
             if '"%s"' % key not in text:
                 problems.append("the key %r of %s appears nowhere in this source: it was declared from memory"
                                 % (key, command))
+    # Round 178 (item 164): the keys that come from a class or a function are compared against the object
+    # itself. The source scan above can only see a key somebody typed; a field added to `RcaReport.to_dict()`
+    # changes the payload without appearing in any declaration (boundary 426).
+    for command, builder in sorted(PAYLOAD_BUILDERS.items()):
+        declared = set(PAYLOAD_KEYS.get(command, ()))
+        try:
+            built = set(builder())
+        except Exception as error:  # noqa: BLE001 - a builder that cannot run is a finding, not a crash
+            problems.append("the %s payload cannot be built here (%s), so its declaration is unchecked"
+                            % (command, error))
+            continue
+        if built - declared:
+            problems.append("%s builds the key(s) %s and the declaration does not list them"
+                            % (command, ", ".join(sorted(built - declared))))
+        if declared - built:
+            problems.append("the declaration of %s lists the key(s) %s and nothing builds them"
+                            % (command, ", ".join(sorted(declared - built))))
+    for command in sorted(PAYLOAD_BUILDERS):
+        if command not in PAYLOAD_KEYS:
+            problems.append("%s has a builder and no declared shape, so nothing compares them" % command)
     page = format_payload_writers()
     documented = {reason: meaning for reason, meaning in WHY_EMPTY_REASONS}
     # Only a line that *starts* with the assignment is one; the lines of this scanner quote the same token and
@@ -2819,9 +2883,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        % len(problems))
                 return 2
             _print("checked           the page and the source agree: %d writer(s), %d file-level form(s), "
-                   "%d named gap(s), %d why_empty value(s)"
+                   "%d named gap(s), %d why_empty value(s), %d built shape(s)"
                    % (len(PAYLOAD_WRITERS), len(PAYLOAD_BATCH_FORMS), len(PAYLOAD_NONE),
-                      len(WHY_EMPTY_REASONS)))
+                      len(WHY_EMPTY_REASONS), len(PAYLOAD_BUILDERS)))
             return 0
         _print(format_payload_writers())
         return 0

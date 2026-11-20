@@ -9584,6 +9584,74 @@ assert len(cli.PAYLOAD_KEYS) == len(cli.PAYLOAD_WRITERS) == 24
 目前只验「键在源码里出现过」，不验「与构造它的那个类一致」。第三项笔记里写着——下一轮让 `--check` 也把这两行
 的来源找出来对一遍。
 
+### 3.184 声明要对着「构造它的那个对象」验，不是只对着源码里有没有这个字符串
+
+第 174–177 轮把 24 行的键全声明了，但 `--check` 只验一件事：**每个声明的键在本文件里出现过**。
+这对字面量够用，对另三行不够——它们的键来自别的模块的类或函数：
+
+| 行 | 构造者 |
+| --- | --- |
+| `--sensitivity` | `Sensitivity(…).to_dict()` 的 7 个键 + 分支加的 `gate` |
+| `evaluate` | `RcaReport(…).to_dict()` 的 16 个键 + 分支加的 `recommendation` |
+| `dataset --summary-out` | `export.summarise([example])` 的 7 个键 |
+
+`RcaReport.to_dict()` 里加一个字段，`cli.py` 里一个字都不用改，24 条声明全都还是「合法」的——检查看不
+见，因为它只读自己这一个文件。
+
+这一轮让 `--check` 真的**构造**这三个对象，逐键比对（`PAYLOAD_BUILDERS`：行名 → 一个返回键集合的函数）：
+
+```
+checked           the page and the source agree: 24 writer(s), 4 file-level form(s), 0 named gap(s), 3 why_empty value(s), 3 built shape(s)
+```
+
+**证明它会响**（`var/prove_178.py`：往 `src/brian/contracts.py` 的 `RcaReport.to_dict()` 里加一个字段，跑
+`--check`，再原样还原）：
+
+```
+inconsistent      evaluate builds the key(s) a_field_added_by_this_proof and the declaration does not list them
+checked           1 problem(s): the page does not describe this source (boundary 392)
+exit: 2
+restored: True
+```
+
+**没有跑一次流水线**，没有造一份报告，没有读 `var/`。这就是这一项的意义：一个只有某个分支才会跑的声明，
+在 CI 里从来没人验过，而类的字段变更是最平常的改动。
+
+**构造代替猜测这件事，第一次跑就教了我一次。** 我第一版把 `RcaReport(alert_id="", decision_id="", …)`
+当"空对象"用，结果契约自己拒绝了：
+
+```
+inconsistent      the evaluate payload cannot be built here (RcaReport requires both alert_id and decision_id), so its declaration is unchecked
+```
+
+**构造器是权威**——它比任何解析都更清楚"一份报告是什么"。于是 builder 改成给它真标识符；而这次失败本身
+说明检查的口径是对的：builder 编不出来，就报"这条声明没人验"，而不是静默跳过（静默跳过正是这一项要修的
+毛病）。
+
+另外两种错也各自有句子，都不崩：声明里有键、却没有任何东西构造它 → `lists the key(s) ghost and nothing
+builds them`；某个 builder 没有对应声明 → `--ghost-command has a builder and no declared shape, so nothing
+compares them`；builder 抛异常 → `cannot be built here (…)`，作为问题返回，`--check` 照常退出 2。
+
+**页面上说清了覆盖面**：
+
+```
+`--check` also builds 3 of them and compares each key for key:
+  --sensitivity, dataset --summary-out, evaluate
+a field added to one of those classes or functions is found without running the pipeline,
+so a declaration whose branch no test drives is still checked (boundary 426).
+```
+
+24 行里 3 行是这样验的，其余 21 行仍然是"写入时拒绝"——两种覆盖方式都写在页面上，读者不必猜哪一行算哪种。
+（第 174 轮就定过这条：覆盖 3/24 的清单必须说出自己的覆盖范围。）
+
+**边界 426**：一份只在某个分支里才会被执行的声明，等于在 CI 里没有声明；要么让它对着构造它的对象验，要么在
+页面上说清它没被验。
+**边界 427**：让构造器来判断 builder——builder 猜出来的输入，检查的是猜测而不是事实；一个编不出来的
+builder 应该报「这条没被验」，不是安静地跳过。
+
+**遗留**：`--campaign` 的 68 个键仍然只有"键出现在源码里"这一层（它来自 `Campaign.to_dict()` 加 9 处赋值，
+类构造需要 12 个参数）。下一项把它也纳入，用「类 + 分支赋值」两段式比对，而不是构造整个 `Campaign`。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -10255,3 +10323,8 @@ missing for the next level
      后两行构造对象逐键比对。补齐之后那句「0 行未声明 …… 加一个键没人会发现」自相矛盾，改成两支；
      并加了集合相等的完整性测试，`var/prove_177.py` 删掉一行证明它会失败（§3.183）。
 164. 让 `--payload-writers --check` 也核对那两条「类 + 一个字段」的声明：`evaluate` 对着 `RcaReport.to_dict()`、`dataset --summary-out` 对着 `export.summarise()`，这样 CI 不跑流水线也能发现类的字段变了（第 177 轮把这两条检查留在了测试里）。
+     **这一轮做了 3 行**：`--sensitivity`、`evaluate`、`dataset --summary-out` 由 `PAYLOAD_BUILDERS` 直接构造
+     对象后逐键比对，`--check` 说 `3 built shape(s)`；往 `RcaReport.to_dict()` 加一个字段即报
+     `evaluate builds the key(s) … and the declaration does not list them` 并退出 2（`var/prove_178.py` 证明过、
+     还原后字节一致）。builder 编不出来时报「这条没被验」而不是跳过——构造器是权威（§3.184）。
+165. 把 `--campaign` 的 68 个键也纳入 builder 式的检查：它来自 `Campaign.to_dict()` 加分支里 9 处赋值，构造整个 `Campaign` 需要 12 个参数，所以改成「类源码的键集合 ∪ 分支赋值的键集合」两段式比对，让 `--check` 也能发现这个类加了字段。
