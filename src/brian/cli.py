@@ -307,6 +307,12 @@ def _evolve_streams(args: argparse.Namespace, settings: Settings
 
 
 def _print_after_preview(root: Path, pairs: List[str], *, kind: str, origin: str) -> None:
+    """Round 132: the printer, over a function the campaign page can call too (boundary 308)."""
+    for line in _after_preview_lines(root, pairs, kind=kind, origin=origin):
+        _print(line)
+
+
+def _after_preview_lines(root: Path, pairs: List[str], *, kind: str, origin: str) -> List[str]:
     """Round 131: the counts the pages print, computed from a copy of the store instead of from a write.
 
     A preview that stops at "these three pairs" makes the reader run the command to learn whether it was worth
@@ -328,8 +334,7 @@ def _print_after_preview(root: Path, pairs: List[str], *, kind: str, origin: str
             after_rows = reaffirm_plan(rounds_all, after, runs)
             key = "stale"
     except (OSError, ValueError) as error:
-        _print("after this run  the books could not be previewed: %s" % error)
-        return
+        return ["after this run  the books could not be previewed: %s" % error]
 
     def total(rows: List[Mapping[str, Any]]) -> int:
         return sum(int(row.get(key) or 0) for row in rows)
@@ -339,10 +344,52 @@ def _print_after_preview(root: Path, pairs: List[str], *, kind: str, origin: str
                    if same_stream_path(str(row.get("origin") or ""), origin))
 
     noun = "unanswered withdrawal(s)" if kind == "restore" else "stale decision(s)"
-    _print("after this run  %s would owe %d %s, and the ledger would go from %d to %d"
-           % (origin, here(after_rows), noun, total(before_rows), total(after_rows)))
-    _print("                the repair bill is not previewed: it reads the queue's stored refusals, which this "
-           "command does not touch -- run `--campaign` afterwards to see it (boundary 307)")
+    return ["after this run  %s would owe %d %s, and the ledger would go from %d to %d"
+            % (origin, here(after_rows), noun, total(before_rows), total(after_rows)),
+            "                the repair bill is not previewed: it reads the queue's stored refusals, which this "
+            "command does not touch -- run `--campaign` afterwards to see it (boundary 307)"]
+
+
+def _print_what_if(root: Path, target: str) -> None:
+    """Round 132: "what if I paid this file off", asked from the page instead of from the command that pays it.
+
+    Both families are asked, because a file can owe both and paying one does not touch the other. The numbers come
+    from `_after_preview_lines`, the same function the dry runs print, so the page and the command cannot drift
+    (boundary 308) -- and the block says that it wrote nothing, because a recomputation that looks like a receipt is
+    the one mistake this whole thread keeps finding.
+    """
+    try:
+        stored = load_settlements(root)
+        rounds_all = history(root, include_retired=True)
+        runs = queue_runs(root)["runs"]
+        withdrawal_rows = [row for row in withdrawal_plan(rounds_all, stored)
+                           if same_stream_path(str(row.get("origin") or ""), target)]
+        reaffirm_rows = [row for row in reaffirm_plan(rounds_all, stored, runs)
+                         if same_stream_path(str(row.get("origin") or ""), target)]
+    except (OSError, ValueError) as error:
+        _print("what if          the plans could not be read: %s" % error)
+        return
+    restore_pairs = ["%s=%s" % (str(entry.get("record") or ""), str(entry.get("successor") or ""))
+                     for entry in (withdrawal_rows[0].get("records") if withdrawal_rows else [])]
+    retake_pairs = ["%s=%s" % (str(item.get("record") or ""), str(item.get("successor") or ""))
+                    for item in (reaffirm_rows[0].get("pairs") if reaffirm_rows else [])]
+    _print("what if          %s owes %d unanswered withdrawal(s) and %d stale decision(s)"
+           % (target, sum(int(row.get("decisions") or 0) for row in withdrawal_rows),
+              sum(int(row.get("stale") or 0) for row in reaffirm_rows)))
+    if not restore_pairs and not retake_pairs:
+        _print("                 nothing to pay: neither plan lists that file, so no batch command would change it")
+        return
+    if restore_pairs:
+        _print("                 paying the withdrawals (%d pair(s), `--settle-restore-file %s`):"
+               % (len(restore_pairs), target))
+        for line in _after_preview_lines(root, restore_pairs, kind="restore", origin=target):
+            _print("                   " + line.strip())
+    if retake_pairs:
+        _print("                 paying the re-takes (%d pair(s), `--settle-reaffirm-file %s`):"
+               % (len(retake_pairs), target))
+        for line in _after_preview_lines(root, retake_pairs, kind="reaffirm", origin=target):
+            _print("                   " + line.strip())
+    _print("                 nothing here is written: this is the same recomputation the dry runs print (boundary 308)")
 
 
 def _print_repair_delta(entry: Mapping[str, Any]) -> None:
@@ -1828,6 +1875,11 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
         _print("--max-withdrawn-days caps a --strict charge; without --strict nothing reads it")
         return 2
 
+    if getattr(args, "what_if_records", None) and not getattr(args, "campaign", False):
+        # Round 132: only the campaign branch reads it. Anywhere else the question would be ignored, and a flag that
+        # looks like a question must not be answered with silence (boundary 305 again).
+        _print("--what-if-records asks the campaign page a question; without --campaign nothing prints it")
+        return 2
     if getattr(args, "dry_run", False) and not (getattr(args, "settle_reaffirm_file", None)
                                                 or getattr(args, "settle_restore_file", None)):
         # Round 130: `--dry-run` exists for the two batch commands. Anywhere else it would be silently ignored, and
@@ -2716,6 +2768,10 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                                trend=trend, debt=_largest_debt(root), plan=_debt_plan(root),
                                budget=budget, limits=_limits_text(limits_view),
                                ceiling_note=ceiling_note))
+        if getattr(args, "what_if_records", None):
+            # Round 132: a reader looking at "this file owes two" should not have to conjure the batch commands to
+            # ask what paying them would leave. The block is a recomputation, never a write.
+            _print_what_if(root, str(args.what_if_records).strip())
         worst, payable = _debt_view(root)
         if args.json_out:
             # Round 60: the page's next-step lines are derived facts, so the machine-readable form carries the
@@ -5349,6 +5405,9 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--settle-note", metavar="RECORD=SUCCESSOR", default=None,
                         help="append the explanation a recorded settlement lacked: the decision keeps its date "
                              "and successor; needs --settle-why")
+    evolve.add_argument("--what-if-records", default=None, metavar="STREAM",
+                        help="with --campaign: print what that stream file would still owe if its unresolved "
+                             "decisions were paid off now (a recomputation; nothing is written)")
     evolve.add_argument("--dry-run", action="store_true",
                         help="with --settle-reaffirm-file or --settle-restore-file: print the pairs the command "
                              "would act on, and write nothing")

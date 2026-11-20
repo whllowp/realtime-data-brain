@@ -7117,6 +7117,51 @@ after this run  data/smd/stream-two.json would owe 0 unanswered withdrawal(s), a
 - **307** 预览必须声明它的作用域：能算的算准，算不了的点名，不然「预览说没问题」会被读成「跑完没问题」。
 - **308** 预告与事后必须共用同一份推算：另写一套近似，预言迟早与账本分叉，而分叉之后没人知道该信哪一个。
 
+### 3.138 这个问题属于页面，不属于那条命令
+
+第 131 轮把事后账算出来了，但它只挂在干跑后面：读者看着页面上的「这个文件欠两笔」，仍要先想出 `--settle-restore-file`
+这个名字，才能问出「付掉会怎样」。问题本身是关于页面的，所以这一轮把它放到页面上：
+
+```
+$ brian evolve --campaign --what-if-records data/smd/stream-two.json
+what if          data/smd/stream-two.json owes 2 unanswered withdrawal(s) and 3 stale decision(s)
+                 paying the withdrawals (2 pair(s), `--settle-restore-file data/smd/stream-two.json`):
+                   after this run  data/smd/stream-two.json would owe 0 unanswered withdrawal(s), and the ledger would go from 3 to 1
+                 paying the re-takes (3 pair(s), `--settle-reaffirm-file data/smd/stream-two.json`):
+                   after this run  data/smd/stream-two.json would owe 2 stale decision(s), and the ledger would go from 5 to 4
+                 nothing here is written: this is the same recomputation the dry runs print (boundary 308)
+```
+
+**两族分开问**：付掉撤销不清掉重开，合并成一个数字就没人知道哪一半付了。所以页面对同一个文件问两次，各自给一行事后账。
+
+**这一轮最有价值的一行是「付完还欠」**。上面第二个问题说：把该文件 3 对重开全部付掉，它仍然欠 2 笔。当时只当是
+推算的边界，真跑一次对上了：
+
+```
+$ brian evolve --settle-reaffirm-file data/smd/stream-two.json --settle-why "read today's books" --settle-by alice
+re-taking       3 decision(s) on data/smd/stream-two.json in one command (2 never re-taken, 1 re-taken before and moved again)
+re-taken       1 of 3 decision(s), 0 kept its date (already re-taken), 2 refused
+```
+
+两对被拒，原因写在 `reaffirm_link` 里：`round-sixth.json` 现在指向 `round-seventh.json`，再确认「它指向 round-new」
+就是在断言账本否认的事（第 119 轮的守卫，正确地拒绝了）。于是「付完仍欠 2」不是推算误差，而是**计划列了两条命令
+自己会拒绝的对**——清单印什么，命令就跑什么（边界 261/301）在计划层被违反了。这一条留给第 119 项。
+
+**页面不写任何东西**：`--what-if-records` 只读两套计划（`withdrawal_plan`、`reaffirm_plan`）与 settlements 副本，
+`--campaign` 的其它输出一字不动；拿掉 `--campaign` 直接用它，报错退出而不是静默忽略：
+
+```
+$ brian evolve --audit --what-if-records data/smd/stream-one.json
+--what-if-records asks the campaign page a question; without --campaign nothing prints it
+```
+
+边界：
+
+- **309** 预览必须能说出「付完还欠多少」：只会说「付完就好了」的预览，是在替读者做它不该做的判断；真实的守卫、
+  被拒的对、尚未到期的对，都应当在那行数字里体现。
+- **310** 计划里不该出现命令自己会拒绝的对：清单与命令共用一份计划（283），所以计划若收录了跑不通的对，
+  页面给出的下一步就成了「照做然后失败」（留作第 119 项）。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7636,6 +7681,12 @@ missing for the next level
      `withdrawal_plan` / `reaffirm_plan` 这两个纯函数于 settlements 列表的取值；不能算的（修复账单读的是队列里存下的
      拒绝句子，不在 settlements 里）印一句说明它没被预览。边界 307、308。
 
-118. 让 `--campaign` 自己也能说「如果把这些付掉会怎样」：现在的干跑只在批量命令里，读者要么先跑干跑、要么先读页面；
-     把 `preview_settlement_change` 暴露给 `--campaign --what-if-records <file>`，按该文件的待办打印三行前后差异，
-     并明确「这些数字没有写入任何记录」——页面与命令从此共用同一份推算。
+118. **已完成**（第 132 轮）：`--campaign --what-if-records <file>` 在页面之后打印该文件的两个问题——要付的撤销、
+     要重开的决定，各自一行事后账（`would owe N …, and the ledger would go from A to B`），并注明「这里没有写任何东西，
+     这是干跑同一份推算」。作用于没有 `--campaign` 的命令行时 exit 2。边界 309、310。
+
+119. 让计划不要印出命令自己会拒绝的对：本轮 what-if 在 `var/demo128` 上显示「付掉这个文件的 3 对重开之后仍欠 2」，
+     真跑果然是 `re-taken 1 of 3 …, 2 refused`——原因是 `round-sixth.json` 已改为指向 `round-seventh.json`，
+     `reaffirm_link` 正确地拒绝了「断言账本否认的事」（第 119 轮），但 `reaffirm_plan` 仍然把它列进清单。
+     要做的是：`reaffirm_plan` 排除这类对（或在行上标 `unpayable` 并给出去处），`--campaign` 单独一行点名它们，
+     并让 `--settle-reaffirm-file` 的头部数字与之一致——清单印什么，命令就跑什么（边界 261/301 在计划层的重演）。
