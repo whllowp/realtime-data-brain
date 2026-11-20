@@ -9755,6 +9755,68 @@ restored: True | clean again: []
 这两个文件名——读者无法知道"被检查的范围"到底包含哪些文件，某个源码被移走时也是等到第一次读失败才知道。
 下一项让页面列出这些文件，并让 `--check` 逐个确认它们存在且可读。
 
+### 3.187 被检查的范围要出现在页面上，而且那句承诺不能比检查更大
+
+第 180 轮把两处读源码的检查收成一个 resolver，但页面从没说过它到底读**哪几个文件**。于是一个很自然的动作——
+把 `src/brian/campaign.py` 挪走——不会在页面上得到"某个源码不见了"，而是先得到 `--campaign` 那个形状的
+`cannot be read here (...)`，读的人得自己从错误串里猜是文件没了还是锚点变了。
+
+这一轮给页面加一段范围声明，并由 `--check` 两侧对齐：
+
+```
+The two shapes decided by a file's text are parsed from 2 source file(s):
+  src/brian/cli.py, src/brian/campaign.py
+`--check` confirms each one is readable and that every `_read_source` call names a listed
+file, so a source that stops being readable is a finding here instead of a traceback about
+a payload shape (boundary 431). It cannot see a source disappearing before this module
+imports: `cli.py` imports `campaign.py` at startup, and that failure comes first (boundary 432).
+```
+
+对齐是**双向**的（第 177 轮的规矩：完整性只能由集合差回答）：页面列的文件必须各有一次真实的
+`_read_source("<name>")` 调用，源码里每一次 `_read_source(...)` 又必须出现在页面上。一侧多出来的东西，
+要么是过度承诺，要么是沉默。
+
+**`--check` 的汇总因此多一个数**：
+
+```
+checked           the page and the source agree: 24 writer(s), 4 file-level form(s), 0 named gap(s),
+                  3 why_empty value(s), 4 verified shape(s), 2 source file(s)
+```
+
+**这一轮最值钱的是一个假承诺被自己抓出来。** 我最初写的句子是"源码被移走时，这里会先发现，而不是抛异常"，
+于是照例跑一次证明（`var/prove_181.py`：把 `campaign.py` 改个后缀、跑 `--check`、还原）：
+
+```
+before:
+exit 0
+checked           the page and the source agree: 24 writer(s), ... , 2 source file(s)
+with campaign.py moved away:
+exit 1
+Traceback (most recent call last):
+  File "...\src\brian\cli.py", line 108, in <module>
+    from .campaign import budget_text, campaign as campaign_result, ...
+ModuleNotFoundError: No module named 'brian.campaign'
+after restoring:
+exit 0
+checked           ... 2 source file(s)
+```
+
+**它连 import 都到不了。** `cli.py` 在启动时就 `from .campaign import ...`，所以"文件被移走"这个失败发生在
+任何检查运行**之前**——那句话覆盖不了它。把承诺缩小成它真能看见的那一半（"停止可读"而不是"被移走"），
+并在同一段里说明它看不见什么，才是这句声明该有的样子。
+
+**两种失败因此是分开的**：文件在启动后变得不可读（权限、被替换、被删）→ 这里是 finding；文件在启动前就没了
+→ import 报错，检查根本没机会说话。测试里"列了但读不到"那条断言用的是一个既不 import 也不存在的名字
+（`nope.py`），正是为了走**前一条**路径。
+
+**边界 432**：一个检查不能声称覆盖发生在它运行之前的失败。页面上的"会发现"必须落在检查真正开始的那一刻之后；
+如果做不到，就把范围写窄，并说明为什么那段时间不在里面。
+**边界 433**：一处"范围"声明要和它管的调用**互为逆**——多列的是过度承诺，少列的是沉默，两者都是页面对读者的
+错误陈述，而集合差是唯一能同时看见这两侧的办法。
+
+**遗留（下一项）**：`payload_writer_problems(source=…)` 收一个源码字符串参数，但只有一半的检查用它
+（另一半点 `_campaign_keys()` 仍读磁盘）。传进来一份文本却只检查了一半，读者会以为整个检查都落在那个文件上。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -10434,4 +10496,6 @@ missing for the next level
 
 166. ✅ 让两处读源码的检查共用一个 resolver，并让读失败说出文件名（第 180 轮）。`SRC_DIR` / `_source_file(name)`（按模块定位）/ `_read_source(name)`（通用换行 + 失败句子带 `src/brian/<file>: …`）进 `src/brian/cli.py`，`_campaign_keys()` 与 `payload_writer_problems()` 都改走它；`var/prove_180.py` 证明 `cwd-independent: True`、CRLF 不再是坑，并且把 `campaign.py` 藏起来时那句话里带着路径。
 
-167. 让 `--payload-writers` 列出 `--check` 读取的**源码文件**（今天是 `src/brian/cli.py` 与 `src/brian/campaign.py`），并由 `--check` 逐个确认存在且可读：页面现在不说清被检查的范围，源码被移走时要等到第一次读失败才暴露。
+167. ✅ 让 `--payload-writers` 列出 `--check` 解析的源码文件，并由 `--check` 两侧对齐（第 181 轮）。新增 `PAYLOAD_SOURCE_FILES = ("cli.py", "campaign.py")` 与 `_read_source_names(text)`（从源码里读出真实的 `_read_source("...")` 调用）；页面上多一段范围声明，`--check` 汇总多 `2 source file(s)`，并双向比对「页面列的文件」与「源码里的读取点」。跑一次证明时发现原句承诺过大：`campaign.py` 被移走时 `cli.py` 在 import 阶段就挂了，检查根本没有机会运行——承诺因此缩到「停止可读」，并在同一段里写明它看不见的那一段。
+
+168. 让 `payload_writer_problems(source=...)` 要么对两个读者都生效（把源码文本传给 `_campaign_keys`），要么去掉这个参数：现在传进来的文本只影响一半的检查，另一半仍读磁盘，而调用者会以为整份检查都落在那个文件上。

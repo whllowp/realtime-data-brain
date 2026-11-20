@@ -683,6 +683,24 @@ def _read_source(name: str) -> str:
         raise OSError("src/brian/%s: %s" % (name, error)) from error
 
 
+SOURCE_READ = re.compile(r'_read_source\("([a-z_0-9]+\.py)"\)')
+
+
+def _read_source_names(text: str) -> List[str]:
+    """Round 181 (item 167): which sources this check parses, read out of the source that parses them.
+
+    The page's list and the calls have to move together, the same way the writer rows and the payload-writing calls
+    do (boundary 425). Taking the list from the page would make the comparison a page against itself, so both sides
+    are read here: this returns the calls, and the page's rows are compared against them.
+    """
+    names: List[str] = []
+    for line in text.splitlines():
+        if "SOURCE_READ = re.compile" in line:
+            continue
+        names.extend(SOURCE_READ.findall(line))
+    return sorted(set(names))
+
+
 def _campaign_keys() -> Iterable[str]:
     """`Campaign.to_dict()`'s keys plus the nine the campaign branch assigns.
 
@@ -701,6 +719,12 @@ def _campaign_keys() -> Iterable[str]:
     branch = branch[branch.index("    if args.campaign:"):]
     branch = branch[: branch.index("\n        return gate_code\n")]
     return class_keys | set(re.findall(r'\n\s+payload\["([a-z_0-9]+)"\] = ', branch))
+
+
+# The shapes whose keys are decided by a file's *text*. The other three are decided by an imported class or
+# function, which `--check` builds instead of reading (boundaries 426/428). A file that moves out of this list
+# without its reader moving too is a page that over-claims (boundary 432).
+PAYLOAD_SOURCE_FILES: Tuple[str, ...] = ("cli.py", "campaign.py")
 
 
 PAYLOAD_BUILDERS: Dict[str, Callable[[], Iterable[str]]] = {
@@ -814,6 +838,14 @@ def format_payload_writers() -> str:
         lines.append("and the nine assignments in its branch, because constructing one needs twelve arguments")
         lines.append("(boundaries 426/428). A field added to any of those sources is found without running the")
         lines.append("pipeline, so a declaration whose branch no test drives is still checked.")
+        lines.append("The two shapes decided by a file's text are parsed from %d source file(s):"
+                     % len(PAYLOAD_SOURCE_FILES))
+        for chunk in _wrap_items(["src/brian/" + name for name in PAYLOAD_SOURCE_FILES]):
+            lines.append("  " + chunk)
+        lines.append("`--check` confirms each one is readable and that every `_read_source` call names a listed")
+        lines.append("file, so a source that stops being readable is a finding here instead of a traceback about")
+        lines.append("a payload shape (boundary 431). It cannot see a source disappearing before this module")
+        lines.append("imports: `cli.py` imports `campaign.py` at startup, and that failure comes first (boundary 432).")
     lines.append("")
     lines.append("A command that starts or stops writing a payload fails tests/test_payload_inventory.py until this")
     lines.append("table and its count move together (boundary 392).")
@@ -873,6 +905,21 @@ def payload_writer_problems(source: Optional[str] = None) -> List[str]:
     # page rather than in the table's command column, so this reads the page the caller sees.
     # Round 174 (item 160): a declared shape must be a row, must name its keys on the page, and must name keys
     # the source actually mentions -- a declaration nobody can find in the code is a plan, not an inventory.
+    listed = [str(name) for name in PAYLOAD_SOURCE_FILES]
+    for name in listed:
+        try:
+            _read_source(name)
+        except OSError as error:
+            problems.append("a source this check parses cannot be read, so the shapes that come from it are "
+                            "unchecked: %s" % error)
+    parsed = _read_source_names(text) if text is not None else []
+    for name in parsed:
+        if name not in listed:
+            problems.append("the check parses src/brian/%s and the page does not list it as a source" % name)
+    for name in listed:
+        if name not in parsed:
+            problems.append("the page lists src/brian/%s as a source of this check and nothing parses it" % name)
+
     rendered = {row[0]: row[1] for row in PAYLOAD_WRITERS}
     for command, declared_keys in sorted(PAYLOAD_KEYS.items()):
         if command not in rendered:
@@ -2934,9 +2981,9 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        % len(problems))
                 return 2
             _print("checked           the page and the source agree: %d writer(s), %d file-level form(s), "
-                   "%d named gap(s), %d why_empty value(s), %d verified shape(s)"
+                   "%d named gap(s), %d why_empty value(s), %d verified shape(s), %d source file(s)"
                    % (len(PAYLOAD_WRITERS), len(PAYLOAD_BATCH_FORMS), len(PAYLOAD_NONE),
-                      len(WHY_EMPTY_REASONS), len(PAYLOAD_BUILDERS)))
+                      len(WHY_EMPTY_REASONS), len(PAYLOAD_BUILDERS), len(PAYLOAD_SOURCE_FILES)))
             return 0
         _print(format_payload_writers())
         return 0
