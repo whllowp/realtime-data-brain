@@ -7081,6 +7081,42 @@ N 条决定却一个 payload 也不写，而 `--settle-reaffirm-file` 会写。�
 - **305** 安全阀不能被安静忽略：`--dry-run` 落在不读它的命令上必须报错退出，否则它看起来像系好了安全带。
 - **306** 干跑什么都不写、真跑必须交代：两者不能靠同一个开关实现，前者是提前 return，后者是把输出参数传下去。
 
+### 3.137 干跑要说「跑完之后账变成什么样」
+
+第 130 轮的干跑回答了「会动哪几对」，没回答「值不值得跑」：读者仍要跑一遍才知道这个文件是不是就此不欠了。
+而这个问题是可以提前算的——settlements 就是一个列表，两个计划（`withdrawal_plan`、`reaffirm_plan`）又都是它的
+纯函数，于是「付款后的副本」可以构造出来，一个字节都不用写：
+
+```
+$ brian evolve --settle-restore-file data/smd/stream-two.json \
+      --settle-why "both claims are dated after their decisions" --settle-by alice --dry-run
+would take up  2 decision(s) on data/smd/stream-two.json in one dry run: nothing was recorded
+  round-ninth.json=round-tenth.json  (withdrawn 2026-11-18T05:12:13.025936+00:00, 2.0 day(s) ago)
+  round-sixth.json=round-seventh.json  (withdrawn 2026-11-18T05:12:13.025936+00:00, 2.0 day(s) ago)
+after this run  data/smd/stream-two.json would owe 0 unanswered withdrawal(s), and the ledger would go from 3 to 1
+                the repair bill is not previewed: it reads the queue's stored refusals, which this command does not
+                touch -- run `--campaign` afterwards to see it (boundary 307)
+```
+
+真跑一次核对：`re-taken 2 of 2 …`，之后 `--campaign` 只剩 `1 withdrawal(s) have no answer`——预览说 3→1，账上就是 3→1。
+重开那一族也一样：`--settle-reaffirm-file … --dry-run` 说「这个文件 0 条、全局 5→2」，真跑之后页面只剩另一个文件上的两条。
+
+实现只有一处新东西：`preview_settlement_change(settlements, pairs, *, kind, now, why, by, claimants)` 返回
+**列表的副本加上每对一个条目**（`redecisions` 或 `reaffirmations`），不碰磁盘。`is_withdrawn` 读的是两侧时刻的
+先后（第 126 轮），所以「加上一条 redecision」在副本里就已经把「仍然撤销中」变成「已拿回」，不需要第二套判断规则。
+
+两面都要守住：
+
+- 预告的数字必须来自**同一份推算**，不是另写一套近似：`after_rows = withdrawal_plan(rounds, after)` 与页面上那一行
+  调的是同一个函数，只是喂了另一份列表（边界 308）。
+- 算不出来的那一行必须**说它没算**，而不是留白或者猜：修复账单读的是 `blocked_dossier`（队列里存下的拒绝句子），
+  与 settlements 无关，所以预览只配一句「跑完再看 `--campaign`」。一份只报好消息的预览，比没有预览更危险。
+
+边界：
+
+- **307** 预览必须声明它的作用域：能算的算准，算不了的点名，不然「预览说没问题」会被读成「跑完没问题」。
+- **308** 预告与事后必须共用同一份推算：另写一套近似，预言迟早与账本分叉，而分叉之后没人知道该信哪一个。
+
 ## 4. 分级：从 L2 到 L4 的三步是什么
 
 ```
@@ -7595,7 +7631,11 @@ missing for the next level
      每一对（含种类、撤销时间与天数），一行也不写；作用于其它命令时直接 exit 2 而不是被忽略。顺带修掉第 129 轮留下的一处
      不对称：`--settle-restore-file` 的 `--json-out` 被显式清空，批量付了 N 条却不留 payload。边界 304、305、306。
 
-117. 让干跑也报「跑完之后账会变成什么样」：`--dry-run` 现在列出要动的对与文件清空后的状态，但没说这次之后
-     `--campaign` 上哪一行会消失、哪一个闸门会从 1 变 0——干跑应当能回答「值得跑吗」，而不只是「会动哪几对」。
-     做法：干跑时把 `campaign(root)` 里与该文件相关的三行（withdrawal_plan / have no answer / repair next）
-     前后各算一次并打印差异，且明确标注「这些数字没有写入任何记录」。
+117. **已完成**（第 131 轮）：干跑在列出要动的对之后，再用一份**没有写下去的副本**算一次事后状态——
+     `after this run  <文件> would owe 0 unanswered withdrawal(s), and the ledger would go from 3 to 1`。能算的是
+     `withdrawal_plan` / `reaffirm_plan` 这两个纯函数于 settlements 列表的取值；不能算的（修复账单读的是队列里存下的
+     拒绝句子，不在 settlements 里）印一句说明它没被预览。边界 307、308。
+
+118. 让 `--campaign` 自己也能说「如果把这些付掉会怎样」：现在的干跑只在批量命令里，读者要么先跑干跑、要么先读页面；
+     把 `preview_settlement_change` 暴露给 `--campaign --what-if-records <file>`，按该文件的待办打印三行前后差异，
+     并明确「这些数字没有写入任何记录」——页面与命令从此共用同一份推算。

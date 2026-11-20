@@ -3199,6 +3199,34 @@ def unanswered_withdrawals(settlements: Sequence[Mapping[str, Any]],
     return rows
 
 
+def preview_settlement_change(settlements: Sequence[Mapping[str, Any]], pairs: Sequence[Sequence[str]],
+                              *, kind: str, now: Optional[datetime] = None, why: str = "", by: str = "",
+                              claimants: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """The store as it would read after `kind` for each pair, with nothing written.
+
+    Round 131: `--dry-run` listed the pairs and stopped there, so "does this file stop owing anything" still needed a
+    real run. The settlements store is a list, so the after-state is a copy plus one entry per pair -- and the counts
+    the pages print are pure functions of that list (`withdrawal_plan`, `reaffirm_plan`), so the preview can be exact
+    about them. What it cannot see is named by the caller: the repair bill reads the queue's stored refusals, a
+    different store this command does not touch (boundary 307).
+    """
+    moment = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    stamp = moment.isoformat()
+    wanted = {(str(record), str(successor)) for record, successor in pairs}
+    out: List[Dict[str, Any]] = []
+    for item in settlements:
+        row = dict(item)
+        key = (str(row.get("record") or ""), str(row.get("successor") or ""))
+        if key in wanted:
+            if kind == "restore":
+                row["redecisions"] = list(row.get("redecisions") or []) + [{"at": stamp, "why": why, "by": by}]
+            else:
+                row["reaffirmations"] = list(row.get("reaffirmations") or []) + [
+                    {"at": stamp, "why": why, "by": by, "claimants": list(claimants)}]
+        out.append(row)
+    return out
+
+
 def withdrawal_plan(rounds: Sequence[Mapping[str, Any]], settlements: Sequence[Mapping[str, Any]],
                     now: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """The unansered withdrawals grouped by the stream file they belong to, heaviest first (round 128).

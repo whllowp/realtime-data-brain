@@ -106,3 +106,41 @@ def test_the_preview_and_the_run_agree_on_the_pairs(tmp_path, monkeypatch, capsy
     payload = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
     for item in payload["restored"]:
         assert "%s=%s" % (item["record"], item["successor"]) in preview
+
+
+def test_the_restore_preview_says_what_the_books_would_owe(tmp_path, monkeypatch, capsys):
+    _two_on_one_file(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--settle-restore-file", ONE, "--settle-why", "read today's books",
+                     "--dry-run"]) == 0
+    printed = " ".join(capsys.readouterr().out.split())
+    assert ("after this run data/smd/stream-one.json would owe 0 unanswered withdrawal(s), and the ledger would go "
+            "from 2 to 0") in printed
+    assert "the repair bill is not previewed" in printed
+
+
+def test_the_reaffirm_preview_says_what_the_plan_would_owe(tmp_path, monkeypatch, capsys):
+    _two_stale(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--settle-reaffirm-file", ONE, "--settle-why", "read today's books",
+                     "--dry-run"]) == 0
+    printed = " ".join(capsys.readouterr().out.split())
+    assert ("after this run data/smd/stream-one.json would owe 0 stale decision(s), and the ledger would go from 3 "
+            "to 0") in printed
+    assert "the repair bill is not previewed" in printed
+
+
+def test_the_previewed_numbers_match_the_books_afterwards(tmp_path, monkeypatch, capsys):
+    _two_on_one_file(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["evolve", "--settle-restore-file", ONE, "--settle-why", "read today's books", "--dry-run",
+                     "--json-out", str(tmp_path / "preview.json")]) == 0
+    capsys.readouterr()
+    assert not (tmp_path / "preview.json").exists()  # a preview writes nothing, not even its own payload
+    assert cli.main(["evolve", "--settle-restore-file", ONE, "--settle-why", "read today's books",
+                     "--settle-by", "carol"]) == 0
+    capsys.readouterr()
+    assert cli.main(["evolve", "--campaign"]) == 0
+    after = " ".join(capsys.readouterr().out.split())
+    assert "have no answer" not in after
+    assert _withdrawal_plan(tmp_path) == []

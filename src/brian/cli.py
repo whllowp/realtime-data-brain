@@ -91,6 +91,7 @@ from .evolve import (
     settle_link,
     settle_note,
     restore_settlement,
+    preview_settlement_change,
     withdraw_settlement,)
 from .laya.client import LayaClient, LayaError, LayaUnavailable
 from .campaign import budget_text, campaign as campaign_result, format_campaign, span_text
@@ -303,6 +304,45 @@ def _evolve_streams(args: argparse.Namespace, settings: Settings
     streams = [Stream(name=args.service, windows=list(windows),
                       meta={"service": args.service, "seed": args.seed})]
     return settings, streams, "demo", {}
+
+
+def _print_after_preview(root: Path, pairs: List[str], *, kind: str, origin: str) -> None:
+    """Round 131: the counts the pages print, computed from a copy of the store instead of from a write.
+
+    A preview that stops at "these three pairs" makes the reader run the command to learn whether it was worth
+    running. Both plans are pure functions of the settlements list, so the after-state is exact -- and the one number
+    that is *not* a function of that list is named instead of guessed (boundary 307).
+    """
+    try:
+        stored = load_settlements(root)
+        rounds_all = history(root, include_retired=True)
+        wanted = [pair.split("=", 1) for pair in pairs if "=" in pair]
+        after = preview_settlement_change(stored, wanted, kind=kind, why="(preview)", by="")
+        if kind == "restore":
+            before_rows = withdrawal_plan(rounds_all, stored)
+            after_rows = withdrawal_plan(rounds_all, after)
+            key = "decisions"
+        else:
+            runs = queue_runs(root)["runs"]
+            before_rows = reaffirm_plan(rounds_all, stored, runs)
+            after_rows = reaffirm_plan(rounds_all, after, runs)
+            key = "stale"
+    except (OSError, ValueError) as error:
+        _print("after this run  the books could not be previewed: %s" % error)
+        return
+
+    def total(rows: List[Mapping[str, Any]]) -> int:
+        return sum(int(row.get(key) or 0) for row in rows)
+
+    def here(rows: List[Mapping[str, Any]]) -> int:
+        return sum(int(row.get(key) or 0) for row in rows
+                   if same_stream_path(str(row.get("origin") or ""), origin))
+
+    noun = "unanswered withdrawal(s)" if kind == "restore" else "stale decision(s)"
+    _print("after this run  %s would owe %d %s, and the ledger would go from %d to %d"
+           % (origin, here(after_rows), noun, total(before_rows), total(after_rows)))
+    _print("                the repair bill is not previewed: it reads the queue's stored refusals, which this "
+           "command does not touch -- run `--campaign` afterwards to see it (boundary 307)")
 
 
 def _print_repair_delta(entry: Mapping[str, Any]) -> None:
@@ -3095,6 +3135,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                 entry = next((item for item in wanted if str(item.get("record") or "") == record), {})
                 _print("  %s  (%s)" % (pair, str(entry.get("kind") or "never")))
             _print("nothing was written; drop --dry-run to re-take them (boundary 304).")
+            _print_after_preview(root, pairs, kind="reaffirm", origin=str(row.get("origin") or target))
             return 0
         inner = argparse.Namespace(**vars(args))
         inner.settle_reaffirm_file = None
@@ -3181,6 +3222,7 @@ def cmd_evolve(args: argparse.Namespace, settings: Settings) -> int:
                        % (pair, str(entry.get("at") or "?"), float(entry.get("age_days") or 0.0)))
             _print("nothing was written; afterwards that file would owe no unanswered withdrawal. Drop --dry-run to "
                    "take them up again (boundary 304).")
+            _print_after_preview(root, pairs, kind="restore", origin=str(match[0].get("origin") or target))
             return 0
         inner = argparse.Namespace(**vars(args))
         inner.settle_restore_file = None
